@@ -1,0 +1,44 @@
+services:
+  loklingo-backend:
+    build:
+      context: ./backend
+    container_name: loklingo-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      LITELLM_BASE_URL: "${LITELLM_BASE_URL}"
+      LITELLM_API_KEY: "${LITELLM_API_KEY}"
+      LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
+      OCR_SERVICE_URL: "http://loklingo-ocr:8000"
+    depends_on:
+      - loklingo-ocr
+    networks:
+      - loklingo-net
+
+  loklingo-ocr:
+    build:
+      context: ./ocr-service
+    container_name: loklingo-ocr
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    networks:
+      - loklingo-net
+
+  loklingo-frontend:
+    build:
+      context: ./frontend
+    container_name: loklingo-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - loklingo-backend
+    networks:
+      - loklingo-net
+
+networks:
+  loklingo-net:
+    driver: bridge

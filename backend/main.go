@@ -2,25 +2,27 @@ package main
 
 import (
 	"log"
-	"os"
-
-	"loklingo/backend/handlers"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
+
+	"loklingo/backend/config"
+	"loklingo/backend/handlers"
 )
 
 func main() {
+	cfg := config.Load()
+
 	app := fiber.New(fiber.Config{
-		AppName: "LokLingo API v1",
+		AppName: "LokLingo API",
 	})
 
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,OPTIONS",
-		AllowHeaders: "Content-Type",
+		AllowHeaders: "Content-Type,Authorization",
 	}))
 
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -28,12 +30,10 @@ func main() {
 	})
 
 	api := app.Group("/api/v1")
-	api.Post("/translate", handlers.Translate)
+	api.Post("/translate", handlers.NewTranslateHandler(cfg).Translate)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	log.Printf("LokLingo backend starting on :%s", cfg.Port)
+	if err := app.Listen(":" + cfg.Port); err != nil {
+		log.Fatalf("server error: %v", err)
 	}
-
-	log.Fatal(app.Listen(":" + port))
 }
