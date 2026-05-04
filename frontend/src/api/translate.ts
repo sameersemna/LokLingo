@@ -1,15 +1,15 @@
 const API_BASE = '/api/v1'
 
 export interface TranslateRequest {
-  source_text: string
-  source_lang: string
-  target_lang: string
+  text: string
+  source: string
+  target: string
 }
 
 export interface TranslateResponse {
   translated_text: string
-  source_lang: string
-  target_lang: string
+  source: string
+  target: string
 }
 
 export async function translate(req: TranslateRequest): Promise<TranslateResponse> {

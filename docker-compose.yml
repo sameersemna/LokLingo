@@ -13,7 +13,14 @@ services:
       LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
     depends_on:
-      - loklingo-ocr
+      loklingo-ocr:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - loklingo-net
 
@@ -24,6 +31,12 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - loklingo-net
 
@@ -35,7 +48,8 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - loklingo-backend
+      loklingo-backend:
+        condition: service_healthy
     networks:
       - loklingo-net
 
