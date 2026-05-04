@@ -2,9 +2,11 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +18,8 @@ type TranslationInput struct {
 	Text   string
 	Source string
 	Target string
+	// Ctx carries the request context for timeout / cancellation.
+	Ctx context.Context
 }
 
 type TranslationService interface {
@@ -51,6 +55,13 @@ type liteLLMResponse struct {
 }
 
 func (s *translationService) Translate(input TranslationInput) (string, error) {
+	ctx := input.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	start := time.Now()
+
 	systemPrompt := fmt.Sprintf(
 		"You are a professional translator. Translate the following text from %s to %s. Return only translated text.",
 		langName(input.Source), langName(input.Target),
@@ -70,7 +81,7 @@ func (s *translationService) Translate(input TranslationInput) (string, error) {
 	}
 
 	url := strings.TrimRight(s.cfg.LiteLLMBaseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
 	}
@@ -101,7 +112,15 @@ func (s *translationService) Translate(input TranslationInput) (string, error) {
 		return "", fmt.Errorf("litellm returned no choices")
 	}
 
-	return strings.TrimSpace(llmResp.Choices[0].Message.Content), nil
+	result := strings.TrimSpace(llmResp.Choices[0].Message.Content)
+	slog.Info("translation completed",
+		"source", input.Source,
+		"target", input.Target,
+		"input_chars", len(input.Text),
+		"output_chars", len(result),
+		"latency_ms", time.Since(start).Milliseconds(),
+	)
+	return result, nil
 }
 
 func langName(code string) string {

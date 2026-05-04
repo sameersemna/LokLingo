@@ -1,5 +1,3 @@
-const API_BASE = '/api/v1'
-
 export interface TranslateRequest {
   text: string
   source: string
@@ -13,11 +11,17 @@ export interface TranslateResponse {
 }
 
 export async function translate(req: TranslateRequest): Promise<TranslateResponse> {
-  const res = await fetch(`${API_BASE}/translate`, {
+  const payload = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
-  })
+  }
+
+  // Prefer the root translate endpoint and gracefully fall back to versioned route.
+  let res = await fetch('/translate', payload)
+  if (res.status === 404) {
+    res = await fetch('/api/v1/translate', payload)
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Unknown error' }))

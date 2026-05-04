@@ -8,9 +8,12 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o loklingo-backend .
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates wget \
+    && addgroup -S loklingo && adduser -S -G loklingo loklingo
 WORKDIR /app
 COPY --from=builder /app/loklingo-backend .
+RUN chown loklingo:loklingo /app/loklingo-backend
+USER loklingo
 
 EXPOSE 8080
 CMD ["./loklingo-backend"]

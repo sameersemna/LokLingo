@@ -1,7 +1,8 @@
 package main
 
 import (
-	"log"
+	"log/slog"
+	"os"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -14,6 +15,8 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	cfg := config.Load()
 
 	app := fiber.New(fiber.Config{
@@ -37,8 +40,9 @@ func main() {
 	api := app.Group("/api/v1")
 	api.Post("/translate", translateHandler.Translate)
 
-	log.Printf("LokLingo backend starting on :%s", cfg.Port)
+	slog.Info("LokLingo backend starting", "port", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {
-		log.Fatalf("server error: %v", err)
+		slog.Error("server error", "err", err)
+		os.Exit(1)
 	}
 }

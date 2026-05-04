@@ -60,6 +60,7 @@ func (h *TranslateHandler) Translate(c *fiber.Ctx) error {
 		Text:   req.Text,
 		Source: req.Source,
 		Target: req.Target,
+		Ctx:    c.Context(),
 	})
 	if err != nil {
 		return errResponse(c, fiber.StatusBadGateway, "translation failed")

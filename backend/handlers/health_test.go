@@ -1,4 +1,3 @@
-package handlers
 package handlers_test
 
 import (
@@ -6,8 +5,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
 	"loklingo/backend/handlers"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func TestHealthHandler(t *testing.T) {

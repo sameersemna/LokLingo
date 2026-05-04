@@ -1,12 +1,12 @@
-package middleware
 package middleware_test
 
 import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
 	"loklingo/backend/middleware"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func TestRequestID_Generated(t *testing.T) {
