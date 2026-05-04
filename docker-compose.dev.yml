@@ -1,25 +1,7 @@
-# Development overlay — adds a local Redis container and wires the backend to it.
+# Development overlay — wires the backend to the Redis instance on the host (latitude).
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 services:
   loklingo-backend:
     environment:
-      REDIS_URL: "redis://loklingo-redis:6379"
-    depends_on:
-      loklingo-redis:
-        condition: service_healthy
-
-  loklingo-redis:
-    image: redis:7-alpine
-    container_name: loklingo-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
-    networks:
-      - loklingo-net
+      REDIS_URL: "${REDIS_URL}"
