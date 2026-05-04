@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -10,6 +13,7 @@ import (
 
 	"loklingo/backend/config"
 	"loklingo/backend/handlers"
+	"loklingo/backend/jobs"
 	"loklingo/backend/middleware"
 	"loklingo/backend/services"
 )
@@ -19,6 +23,22 @@ func main() {
 
 	cfg := config.Load()
 
+	// --- Job store (Redis) ---
+	jobStore, err := jobs.NewRedisStore(cfg.RedisURL)
+	if err != nil {
+		slog.Error("failed to connect to Redis", "err", err)
+		os.Exit(1)
+	}
+
+	// --- Worker ---
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	translationService := services.NewTranslationService(cfg)
+	worker := jobs.NewWorker(jobStore, translationService)
+	go worker.Run(ctx)
+
+	// --- HTTP server ---
 	app := fiber.New(fiber.Config{
 		AppName: "LokLingo API",
 	})
@@ -34,11 +54,13 @@ func main() {
 
 	app.Get("/health", handlers.HealthHandler)
 
-	translationService := services.NewTranslationService(cfg)
 	translateHandler := handlers.NewTranslateHandler(translationService)
+	jobsHandler := handlers.NewJobsHandler(jobStore)
 
 	api := app.Group("/api/v1")
 	api.Post("/translate", translateHandler.Translate)
+	api.Post("/jobs", jobsHandler.CreateJob)
+	api.Get("/jobs/:id", jobsHandler.GetJob)
 
 	slog.Info("LokLingo backend starting", "port", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {

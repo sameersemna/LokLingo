@@ -12,8 +12,11 @@ services:
       LITELLM_API_KEY: "${LITELLM_API_KEY}"
       LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
+      REDIS_URL: "redis://loklingo-redis:6379"
     depends_on:
       loklingo-ocr:
+        condition: service_healthy
+      loklingo-redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -21,6 +24,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    networks:
+      - loklingo-net
+
+  loklingo-redis:
+    image: redis:7-alpine
+    container_name: loklingo-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks:
       - loklingo-net
 

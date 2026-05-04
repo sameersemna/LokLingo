@@ -10,6 +10,7 @@ type Config struct {
 	LiteLLMAPIKey  string
 	LiteLLMModel   string
 	OCRServiceURL  string
+	RedisURL       string
 }
 
 func Load() *Config {
@@ -19,6 +20,7 @@ func Load() *Config {
 		LiteLLMAPIKey:  getEnv("LITELLM_API_KEY", "sk-loklingo"),
 		LiteLLMModel:   getEnv("LITELLM_MODEL", "gpt-4o-mini"),
 		OCRServiceURL:  getEnv("OCR_SERVICE_URL", "http://ocr-service:8000"),
+		RedisURL:       getEnv("REDIS_URL", "redis://localhost:6379"),
 	}
 }
 
