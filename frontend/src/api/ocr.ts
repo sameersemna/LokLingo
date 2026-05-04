@@ -1,22 +1,77 @@
 const OCR_BASE = '/ocr'
 
-export interface OCRResponse {
-  text: string
-  confidence: number
+export interface BoundingBox {
+  /** 4 corner points [[x,y], …] in clockwise order */
+  points: number[][]
 }
 
-export async function extractText(file: File): Promise<OCRResponse> {
+export interface TextBlock {
+  text: string
+  confidence: number
+  bbox: BoundingBox
+}
+
+export interface OCRImageResponse {
+  text: string
+  confidence: number
+  blocks: TextBlock[]
+}
+
+export interface PageResult {
+  page_number: number
+  text: string
+  confidence: number
+  blocks: TextBlock[]
+}
+
+export interface OCRPdfResponse {
+  text: string
+  confidence: number
+  pages: PageResult[]
+}
+
+export async function extractTextFromImage(
+  file: File,
+  lang = 'auto',
+): Promise<OCRImageResponse> {
   const b64 = await fileToBase64(file)
-  const res = await fetch(`${OCR_BASE}/ocr`, {
+  const res = await fetch(`${OCR_BASE}/ocr/image`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image_b64: b64, mime_type: file.type || 'image/png' }),
+    body: JSON.stringify({ image_b64: b64, mime_type: file.type || 'image/png', lang }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'OCR failed' }))
     throw new Error(err.detail ?? `HTTP ${res.status}`)
   }
   return res.json()
+}
+
+export async function extractTextFromPdf(
+  file: File,
+  lang = 'auto',
+  dpi = 200,
+): Promise<OCRPdfResponse> {
+  const b64 = await fileToBase64(file)
+  const res = await fetch(`${OCR_BASE}/ocr/pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pdf_b64: b64, lang, dpi }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'PDF OCR failed' }))
+    throw new Error(err.detail ?? `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+/** Auto-dispatches to image or PDF extractor based on file MIME type. */
+export async function extractText(file: File, lang = 'auto'): Promise<{ text: string; confidence: number }> {
+  if (file.type === 'application/pdf') {
+    const result = await extractTextFromPdf(file, lang)
+    return { text: result.text, confidence: result.confidence }
+  }
+  return extractTextFromImage(file, lang)
 }
 
 function fileToBase64(file: File): Promise<string> {

@@ -132,7 +132,7 @@ function App() {
     }
     setOcrLoading(true)
     try {
-      const res = await extractText(file)
+      const res = await extractText(file, sourceLang === 'auto' ? 'auto' : sourceLang)
       setSourceText(res.text)
       pushToast(`OCR complete — confidence ${Math.round(res.confidence * 100)}%`, "success")
     } catch (err) {
@@ -267,7 +267,7 @@ function App() {
                 <input
                   ref={fileRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/*,application/pdf"
                   className="ocr-input"
                   id="ocr-file"
                   onChange={e => e.target.files?.[0] && handleOCRFile(e.target.files[0])}
