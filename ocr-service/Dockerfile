@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && addgroup --system ocr && adduser --system --ingroup ocr ocr
 
+ENV HOME=/home/ocr
+RUN mkdir -p /home/ocr && chown -R ocr:ocr /home/ocr
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

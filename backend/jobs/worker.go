@@ -52,6 +52,18 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) process(ctx context.Context, job *Job) {
 	slog.Info("processing translation job", "job_id", job.ID, "source", job.Source, "target", job.Target)
 
+	// Check translation cache before calling the LLM.
+	if cached, err := w.store.GetCached(ctx, job.Text, job.Source, job.Target); err == nil {
+		slog.Info("cache hit", "job_id", job.ID)
+		job.Status = StatusCompleted
+		job.TranslatedText = cached
+		if err := w.store.Update(ctx, job); err != nil {
+			slog.Error("update job result (cache hit)", "job_id", job.ID, "err", err)
+		}
+		slog.Info("job finished (cached)", "job_id", job.ID)
+		return
+	}
+
 	job.Status = StatusProcessing
 	if err := w.store.Update(ctx, job); err != nil {
 		slog.Error("update job to processing", "job_id", job.ID, "err", err)
@@ -70,6 +82,10 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	} else {
 		job.Status = StatusCompleted
 		job.TranslatedText = translated
+		// Populate cache so future identical requests skip the LLM.
+		if cerr := w.store.SetCached(ctx, job.Text, job.Source, job.Target, translated); cerr != nil {
+			slog.Warn("failed to cache translation", "job_id", job.ID, "err", cerr)
+		}
 	}
 
 	if err := w.store.Update(ctx, job); err != nil {

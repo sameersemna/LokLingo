@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +12,11 @@ import (
 )
 
 const (
-	queueKey  = "loklingo:jobs:queue"
-	jobKeyFmt = "loklingo:job:%s"
-	jobTTL    = 24 * time.Hour
+	queueKey    = "loklingo:jobs:queue"
+	jobKeyFmt   = "loklingo:job:%s"
+	cacheKeyFmt = "loklingo:cache:%s"
+	jobTTL      = 24 * time.Hour
+	cacheTTL    = 30 * 24 * time.Hour // cache translations for 30 days
 )
 
 // ErrNotFound is returned by Get when the job ID does not exist in the store.
@@ -29,6 +32,18 @@ type Store interface {
 	Update(ctx context.Context, job *Job) error
 	// Dequeue blocks up to ~1 s for the next job ID. Returns nil, nil on timeout.
 	Dequeue(ctx context.Context) (*Job, error)
+	// GetCached returns a previously cached translation, or ("", ErrNotFound).
+	GetCached(ctx context.Context, text, source, target string) (string, error)
+	// SetCached stores a translation result in the cache.
+	SetCached(ctx context.Context, text, source, target, translated string) error
+}
+
+// CacheKey returns the deterministic Redis key for a translation triple.
+// Uses SHA-256 over "source\x00target\x00text" to keep keys short and uniform.
+func CacheKey(text, source, target string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00%s", source, target, text)
+	return fmt.Sprintf(cacheKeyFmt, fmt.Sprintf("%x", h.Sum(nil)))
 }
 
 type redisStore struct {
@@ -94,4 +109,21 @@ func (s *redisStore) Dequeue(ctx context.Context) (*Job, error) {
 	}
 	// result[0] = key name, result[1] = job ID
 	return s.Get(ctx, result[1])
+}
+
+func (s *redisStore) GetCached(ctx context.Context, text, source, target string) (string, error) {
+	key := CacheKey(text, source, target)
+	val, err := s.rdb.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("redis cache get: %w", err)
+	}
+	return val, nil
+}
+
+func (s *redisStore) SetCached(ctx context.Context, text, source, target, translated string) error {
+	key := CacheKey(text, source, target)
+	return s.rdb.Set(ctx, key, translated, cacheTTL).Err()
 }

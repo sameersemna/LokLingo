@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gofiber/fiber/v2"
@@ -22,6 +23,17 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "err", err)
+		os.Exit(1)
+	}
+
+	slog.Info("LokLingo starting", "env", cfg.AppEnv)
+
+	if cfg.AppEnv == "production" && strings.Contains(cfg.RedisURL, "localhost") {
+		slog.Error("misconfiguration: REDIS_URL points to localhost in production", "redis_url", cfg.RedisURL)
+		os.Exit(1)
+	}
 
 	// --- Job store (Redis) ---
 	jobStore, err := jobs.NewRedisStore(cfg.RedisURL)
@@ -53,8 +65,9 @@ func main() {
 	app.Use(middleware.RateLimiter())
 
 	app.Get("/health", handlers.HealthHandler)
+	app.Get("/ready", handlers.NewReadinessHandler(cfg).Ready)
 
-	translateHandler := handlers.NewTranslateHandler(translationService)
+	translateHandler := handlers.NewTranslateHandler(translationService, jobStore)
 	jobsHandler := handlers.NewJobsHandler(jobStore)
 
 	api := app.Group("/api/v1")

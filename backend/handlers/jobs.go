@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -53,6 +54,7 @@ func (h *JobsHandler) CreateJob(c *fiber.Ctx) error {
 		UpdatedAt: now,
 	}
 	if err := h.store.Enqueue(c.Context(), job); err != nil {
+		slog.Error("failed to enqueue job", "request_id", c.Locals("requestID"), "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
 	}
 
@@ -75,6 +77,7 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 		return errResponse(c, fiber.StatusNotFound, "job not found")
 	}
 	if err != nil {
+		slog.Error("failed to retrieve job", "request_id", c.Locals("requestID"), "job_id", id, "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to retrieve job")
 	}
 

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"loklingo/backend/jobs"
 	"loklingo/backend/services"
 )
 
@@ -27,9 +29,21 @@ func (m *mockTranslationService) Translate(input services.TranslationInput) (str
 	return m.result, nil
 }
 
+// mockStore is a minimal no-op jobs.Store for handler tests.
+type mockStore struct{}
+
+func (s *mockStore) Enqueue(_ context.Context, _ *jobs.Job) error       { return nil }
+func (s *mockStore) Get(_ context.Context, _ string) (*jobs.Job, error) { return nil, jobs.ErrNotFound }
+func (s *mockStore) Update(_ context.Context, _ *jobs.Job) error        { return nil }
+func (s *mockStore) Dequeue(_ context.Context) (*jobs.Job, error)       { return nil, nil }
+func (s *mockStore) GetCached(_ context.Context, _, _, _ string) (string, error) {
+	return "", jobs.ErrNotFound
+}
+func (s *mockStore) SetCached(_ context.Context, _, _, _, _ string) error { return nil }
+
 func TestTranslateHandler_Success(t *testing.T) {
 	mockSvc := &mockTranslationService{result: "Hallo Welt"}
-	h := NewTranslateHandler(mockSvc)
+	h := NewTranslateHandler(mockSvc, &mockStore{})
 
 	app := fiber.New()
 	app.Post("/translate", h.Translate)
@@ -59,7 +73,7 @@ func TestTranslateHandler_Success(t *testing.T) {
 
 func TestTranslateHandler_Validation(t *testing.T) {
 	mockSvc := &mockTranslationService{result: "x"}
-	h := NewTranslateHandler(mockSvc)
+	h := NewTranslateHandler(mockSvc, &mockStore{})
 
 	app := fiber.New()
 	app.Post("/translate", h.Translate)
@@ -91,7 +105,7 @@ func TestTranslateHandler_Validation(t *testing.T) {
 
 func TestTranslateHandler_UpstreamFailure(t *testing.T) {
 	mockSvc := &mockTranslationService{err: errors.New("upstream failed")}
-	h := NewTranslateHandler(mockSvc)
+	h := NewTranslateHandler(mockSvc, &mockStore{})
 
 	app := fiber.New()
 	app.Post("/translate", h.Translate)

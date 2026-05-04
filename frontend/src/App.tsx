@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { translate } from "./api/translate"
 import { extractText } from "./api/ocr"
+import { getReadiness, type ReadinessResponse } from "./api/health"
 import "./App.css"
 
 const LANGUAGES = [
@@ -39,6 +40,17 @@ function saveHistory(h: HistoryEntry[]) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0, MAX_HISTORY)))
 }
 
+const LANG_KEY = "loklingo-langs"
+
+function loadLangs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LANG_KEY) ?? "{}")
+    const src = LANGUAGES.find(l => l.code === saved.source)?.code ?? "auto"
+    const tgt = TARGET_LANGUAGES.find(l => l.code === saved.target)?.code ?? "de"
+    return { source: src, target: tgt }
+  } catch { return { source: "auto", target: "de" } }
+}
+
 function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("loklingo-theme")
@@ -46,8 +58,8 @@ function App() {
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
   })
   const [sourceText, setSourceText] = useState("")
-  const [sourceLang, setSourceLang] = useState("auto")
-  const [targetLang, setTargetLang] = useState("de")
+  const [sourceLang, setSourceLang] = useState(() => loadLangs().source)
+  const [targetLang, setTargetLang] = useState(() => loadLangs().target)
   const [result, setResult] = useState("")
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
@@ -55,14 +67,40 @@ function App() {
   const [showHistory, setShowHistory] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory)
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
+  const [showStatusDetail, setShowStatusDetail] = useState(false)
   const toastId = useRef(0)
   const histId = useRef(history.length)
   const fileRef = useRef<HTMLInputElement>(null)
+  const chipRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme)
     localStorage.setItem("loklingo-theme", theme)
   }, [theme])
+
+  useEffect(() => {
+    localStorage.setItem(LANG_KEY, JSON.stringify({ source: sourceLang, target: targetLang }))
+  }, [sourceLang, targetLang])
+
+  useEffect(() => {
+    let cancelled = false
+    const check = () => getReadiness().then(r => { if (!cancelled) setReadiness(r) }).catch(() => {})
+    check()
+    const interval = setInterval(check, 30_000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
+
+  useEffect(() => {
+    if (!showStatusDetail) return
+    const handler = (e: MouseEvent) => {
+      if (chipRef.current && !chipRef.current.contains(e.target as Node)) {
+        setShowStatusDetail(false)
+      }
+    }
+    document.addEventListener("mousedown", handler)
+    return () => document.removeEventListener("mousedown", handler)
+  }, [showStatusDetail])
 
   const pushToast = useCallback((msg: string, type: "success" | "error") => {
     const id = ++toastId.current
@@ -148,6 +186,11 @@ function App() {
 
   const charCount = sourceText.length
   const nearLimit = charCount > MAX_CHARS * 0.8
+  const readinessState = readiness?.status ?? "checking"
+  const readinessLabel =
+    readinessState === "ok" ? "System healthy" :
+    readinessState === "degraded" ? "System degraded" :
+    "Checking system"
 
   return (
     <div className="app">
@@ -156,9 +199,10 @@ function App() {
           <h1>LokLingo</h1>
           <div className="header-actions">
             <button
-              className="icon-btn"
+              className={`icon-btn${showHistory ? " is-active" : ""}`}
               type="button"
               onClick={() => setShowHistory(h => !h)}
+              aria-pressed={showHistory}
               title="Translation history"
             >
               ⏱ History {history.length > 0 && <span className="badge">{history.length}</span>}
@@ -167,6 +211,7 @@ function App() {
               className="theme-btn"
               type="button"
               aria-label="Toggle color scheme"
+              aria-pressed={theme === "dark"}
               onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
             >
               {theme === "dark" ? "☀ Light" : "☾ Dark"}
@@ -174,6 +219,41 @@ function App() {
           </div>
         </div>
         <p className="tagline">Self-hosted translation &mdash; no limits</p>
+        <div className="readiness-chip-wrap" ref={chipRef}>
+          <button
+            type="button"
+            className={`readiness-chip readiness-${readinessState}${showStatusDetail ? " is-open" : ""}`}
+            onClick={() => setShowStatusDetail(s => !s)}
+            aria-expanded={showStatusDetail}
+            aria-haspopup="true"
+          >
+            {readinessLabel} <span className="chip-caret">{showStatusDetail ? "▲" : "▼"}</span>
+          </button>
+          {showStatusDetail && (
+            <div className="readiness-popover" role="status">
+              <div className="readiness-popover-title">Dependency status</div>
+              {readiness === null ? (
+                <p className="readiness-popover-checking">Fetching…</p>
+              ) : (
+                <ul className="readiness-dep-list">
+                  {Object.entries(readiness.dependencies)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([name, dep]) => (
+                      <li key={name} className={`readiness-dep-item dep-${dep.status}`}>
+                        <span className="dep-dot" />
+                        <span className="dep-name">{name}</span>
+                        {dep.status === "error" && dep.error && (
+                          <span className="dep-error" title={dep.error}>
+                            {dep.error.length > 60 ? dep.error.slice(0, 57) + "…" : dep.error}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
       </header>
 
       {/* History drawer */}
@@ -223,7 +303,7 @@ function App() {
               ))}
             </select>
             {detectedLang && (
-              <span className="detected-badge">Detected: {langLabel(detectedLang)}</span>
+              <span className="detected-badge">✓ {langLabel(detectedLang)}</span>
             )}
           </div>
 
@@ -260,7 +340,7 @@ function App() {
             />
             <div className="panel-footer">
               <span className={`char-count${nearLimit ? " near-limit" : ""}`}>
-                {charCount}/{MAX_CHARS}
+                {charCount}/{MAX_CHARS} · {sourceText.trim() ? sourceText.trim().split(/\s+/).length : 0}w
               </span>
               <div className="panel-footer-actions">
                 {/* OCR upload button */}
@@ -321,7 +401,9 @@ function App() {
             onClick={handleTranslate}
             disabled={loading || !sourceText.trim()}
           >
-            {loading ? "Translating…" : "Translate"}
+            {loading
+              ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating…</>
+              : "Translate"}
           </button>
         </div>
       </main>

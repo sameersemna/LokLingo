@@ -1,0 +1,21 @@
+services:
+  loklingo-backend:
+    environment:
+      LITELLM_BASE_URL: "http://loklingo-litellm-mock:4010"
+      LITELLM_API_KEY: "test-key"
+      LITELLM_MODEL: "mock-model"
+
+  loklingo-litellm-mock:
+    image: python:3.11-alpine
+    working_dir: /app
+    command: ["python", "/app/guide/mock_litellm.py"]
+    volumes:
+      - ./guide:/app/guide:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4010/models')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - loklingo-net

@@ -5,18 +5,17 @@ services:
     container_name: loklingo-backend
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${BACKEND_HOST_PORT:-8080}:8080"
     environment:
+      APP_ENV: "${APP_ENV:-development}"
       PORT: "8080"
       LITELLM_BASE_URL: "${LITELLM_BASE_URL}"
       LITELLM_API_KEY: "${LITELLM_API_KEY}"
       LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
-      REDIS_URL: "redis://loklingo-redis:6379"
+      REDIS_URL: "${REDIS_URL:-}"
     depends_on:
       loklingo-ocr:
-        condition: service_healthy
-      loklingo-redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -27,28 +26,13 @@ services:
     networks:
       - loklingo-net
 
-  loklingo-redis:
-    image: redis:7-alpine
-    container_name: loklingo-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
-    networks:
-      - loklingo-net
-
   loklingo-ocr:
     build:
       context: ./ocr-service
     container_name: loklingo-ocr
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${OCR_HOST_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 20s
@@ -64,7 +48,7 @@ services:
     container_name: loklingo-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${FRONTEND_HOST_PORT:-3000}:80"
     depends_on:
       loklingo-backend:
         condition: service_healthy
