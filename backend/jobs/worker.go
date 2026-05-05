@@ -3,21 +3,24 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
+	internalservices "loklingo/backend/internal/services"
 	"loklingo/backend/services"
 )
 
 // Worker dequeues jobs and executes translations in the background.
 type Worker struct {
-	store   Store
-	service services.TranslationService
+	store      Store
+	service    services.TranslationService
+	pdfService internalservices.PDFService
 }
 
 // NewWorker constructs a Worker.
-func NewWorker(store Store, service services.TranslationService) *Worker {
-	return &Worker{store: store, service: service}
+func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService) *Worker {
+	return &Worker{store: store, service: service, pdfService: pdfService}
 }
 
 // Run blocks, processing jobs until ctx is cancelled.
@@ -50,7 +53,31 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) process(ctx context.Context, job *Job) {
-	slog.Info("processing translation job", "job_id", job.ID, "source", job.Source, "target", job.Target)
+	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
+
+	// For PDF jobs: extract text from the file before translating.
+	if job.Type == TypePDF {
+		if job.FilePath == "" {
+			slog.Error("pdf job missing file_path", "job_id", job.ID)
+			job.Status = StatusFailed
+			job.ErrorMsg = "file_path is required for translate_pdf jobs"
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update job result (missing file_path)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+		extracted, err := w.pdfService.ExtractText(job.FilePath)
+		if err != nil {
+			slog.Error("pdf text extraction failed", "job_id", job.ID, "file", job.FilePath, "err", err)
+			job.Status = StatusFailed
+			job.ErrorMsg = fmt.Sprintf("pdf extraction failed: %v", err)
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update job result (pdf extraction failed)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+		job.Text = extracted
+	}
 
 	// Check translation cache before calling the LLM.
 	if cached, err := w.store.GetCached(ctx, job.Text, job.Source, job.Target); err == nil {

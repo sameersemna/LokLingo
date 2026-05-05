@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -97,4 +100,59 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(resp)
+}
+
+const pdfUploadDir = "/tmp/loklingo"
+
+// CreatePDFJob handles POST /api/v1/jobs/pdf.
+// Accepts multipart/form-data with a PDF file upload, saves it under
+// /tmp/loklingo, enqueues a translate_pdf job, and returns 202 Accepted
+// with a job_id for polling. The file is NOT processed here.
+func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
+	file, err := c.FormFile("file")
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, "file is required (multipart field: file)")
+	}
+	target := c.FormValue("target")
+	if target == "" {
+		return errResponse(c, fiber.StatusBadRequest, "target is required")
+	}
+	source := c.FormValue("source")
+	if source == "" {
+		source = "auto"
+	}
+	lang := c.FormValue("lang")
+
+	if err := os.MkdirAll(pdfUploadDir, 0o700); err != nil {
+		slog.Error("failed to create upload dir", "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to prepare upload directory")
+	}
+
+	fileName := fmt.Sprintf("%s.pdf", uuid.NewString())
+	filePath := filepath.Join(pdfUploadDir, fileName)
+	if err := c.SaveFile(file, filePath); err != nil {
+		slog.Error("failed to save uploaded pdf", "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to save uploaded file")
+	}
+
+	now := time.Now()
+	job := &jobs.Job{
+		ID:        uuid.NewString(),
+		Type:      jobs.TypePDF,
+		Status:    jobs.StatusPending,
+		FilePath:  filePath,
+		Lang:      lang,
+		Source:    source,
+		Target:    target,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := h.store.Enqueue(c.Context(), job); err != nil {
+		slog.Error("failed to enqueue pdf job", "request_id", c.Locals("requestID"), "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
+	}
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"job_id": job.ID,
+	})
 }

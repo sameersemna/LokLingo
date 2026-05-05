@@ -85,3 +85,39 @@ function buildTranslateError(status: number, err: { error?: string; request_id?:
   }
   return new Error(err.error ?? `HTTP ${status}`)
 }
+
+export interface UploadPDFResponse {
+  job_id: string
+}
+
+/**
+ * Uploads a PDF file and enqueues a translate_pdf job
+ * (POST /api/v1/jobs/pdf).
+ *
+ * @param file   - The PDF File object selected by the user.
+ * @param source - Source language (ISO 639-1 or "auto").
+ * @param target - Target language (ISO 639-1, required).
+ */
+export async function uploadPDF(
+  file: File,
+  source: string,
+  target: string,
+): Promise<UploadPDFResponse> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('source', source || 'auto')
+  form.append('target', target)
+
+  const enqueueRes = await fetch('/api/v1/jobs/pdf', {
+    method: 'POST',
+    body: form,
+  })
+
+  if (!enqueueRes.ok) {
+    const err = await enqueueRes.json().catch(() => ({ error: 'Unknown error' }))
+    throw buildTranslateError(enqueueRes.status, err)
+  }
+
+  const data: UploadPDFResponse = await enqueueRes.json()
+  return data
+}

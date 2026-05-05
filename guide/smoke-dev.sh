@@ -19,4 +19,15 @@ translation="$(curl -fsS "${frontend_url}/translate" \
   --data-raw '{"text":"hello world","source":"en","target":"de"}')"
 echo "$translation" | grep '"translated_text"' >/dev/null
 
+echo "Checking PDF job endpoint: POST ${backend_url}/api/v1/jobs/pdf"
+pdf_tmp="$(mktemp /tmp/loklingo-smoke-XXXX.pdf)"
+# Write a minimal PDF header — the handler validates the field, not the content.
+printf '%%PDF-1.4\n%%%%EOF\n' > "${pdf_tmp}"
+pdf_job="$(curl -fsS -X POST "${backend_url}/api/v1/jobs/pdf" \
+  -F "file=@${pdf_tmp};type=application/pdf" \
+  -F "source=en" \
+  -F "target=de")"
+rm -f "${pdf_tmp}"
+echo "$pdf_job" | grep '"job_id"' >/dev/null
+
 echo "Smoke test passed"

@@ -12,10 +12,19 @@ const (
 	StatusFailed     Status = "failed"
 )
 
+// JobType distinguishes the kind of work a job represents.
+type JobType = string
+
+const (
+	TypeText JobType = "text"
+	TypePDF  JobType = "translate_pdf"
+)
+
 // Job holds all state for one async translation request.
 type Job struct {
 	ID             string    `json:"id"`
 	Status         Status    `json:"status"`
+	Type           JobType   `json:"type,omitempty"`
 	Text           string    `json:"text"`
 	Source         string    `json:"source"`
 	Target         string    `json:"target"`
@@ -23,4 +32,8 @@ type Job struct {
 	ErrorMsg       string    `json:"error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+
+	// PDF-job-specific fields.
+	FilePath string `json:"file_path,omitempty"` // path to the PDF on the worker's filesystem
+	Lang     string `json:"lang,omitempty"`      // OCR language hint (ISO 639-1 or "auto")
 }

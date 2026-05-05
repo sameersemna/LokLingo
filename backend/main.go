@@ -14,6 +14,7 @@ import (
 
 	"loklingo/backend/config"
 	"loklingo/backend/handlers"
+	internalservices "loklingo/backend/internal/services"
 	"loklingo/backend/jobs"
 	"loklingo/backend/middleware"
 	"loklingo/backend/services"
@@ -47,7 +48,8 @@ func main() {
 	defer cancel()
 
 	translationService := services.NewTranslationService(cfg)
-	worker := jobs.NewWorker(jobStore, translationService)
+	pdfService := internalservices.NewPDFService()
+	worker := jobs.NewWorker(jobStore, translationService, pdfService)
 	go worker.Run(ctx)
 
 	// --- HTTP server ---
@@ -73,6 +75,7 @@ func main() {
 	api := app.Group("/api/v1")
 	api.Post("/translate", translateHandler.Translate)
 	api.Post("/jobs", jobsHandler.CreateJob)
+	api.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)
 
 	slog.Info("LokLingo backend starting", "port", cfg.Port)
