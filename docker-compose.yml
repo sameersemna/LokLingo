@@ -54,6 +54,9 @@ services:
       context: ./ocr-service
     container_name: loklingo-ocr
     restart: unless-stopped
+    environment:
+      MAX_PDF_UPLOAD_BYTES: "${MAX_PDF_UPLOAD_BYTES:-104857600}"
+      MAX_PDF_PAGES: "${MAX_PDF_PAGES:-200}"
     ports:
       - "${OCR_HOST_PORT:-8000}:8000"
     healthcheck:

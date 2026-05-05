@@ -84,6 +84,8 @@ Important variables:
 * `BACKEND_HOST_PORT`: host port mapped to backend container port `8080`
 * `FRONTEND_HOST_PORT`: host port mapped to frontend container port `80`
 * `OCR_HOST_PORT`: host port mapped to OCR container port `8000`
+* `MAX_PDF_UPLOAD_BYTES`: max accepted PDF upload size for backend and OCR guards, defaults to `104857600` (100 MB)
+* `MAX_PDF_PAGES`: max accepted PDF page count for backend and OCR guards, defaults to `200`
 
 Environment files:
 
@@ -138,6 +140,15 @@ Or run the bundled smoke test:
 ```bash
 sh guide/smoke-dev.sh
 ```
+
+OCR PDF memory check (page-by-page processing):
+
+```bash
+# run inside the OCR container after compose is up
+docker compose exec loklingo-ocr python bench_pdf_memory.py /tmp/sample.pdf --dpi 200 --lang auto
+```
+
+This script reports pages processed, elapsed time, and process peak RSS so large-PDF memory behavior can be tracked.
 
 The readiness endpoint reports dependency status without sending a translation request:
 
