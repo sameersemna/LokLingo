@@ -19,7 +19,8 @@ type Config struct {
 	PostgresDSN            string // optional; enables Postgres analytics sink when set
 	MaxPDFUploadBytes      int64
 	MaxPDFPages            int
-	TranslateConcurrency   int    // max concurrent LLM page-translation requests; default 3
+	TranslateConcurrency   int    // max concurrent LLM page-translation requests per job; default 3
+	MaxLLMConcurrency      int    // max total concurrent LLM calls across all jobs (global); default 10
 	TranslateChunkMinWords int    // preferred minimum words per translation chunk; default 500
 	TranslateChunkMaxWords int    // hard cap words per translation chunk; default 1000
 	InternalToken          string // optional; enforces X-Internal-Token on internal routes
@@ -41,6 +42,7 @@ func Load() *Config {
 		MaxPDFUploadBytes:      getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
 		MaxPDFPages:            getEnvInt("MAX_PDF_PAGES", 300),
 		TranslateConcurrency:   getEnvInt("TRANSLATE_CONCURRENCY", 3),
+		MaxLLMConcurrency:      getEnvInt("MAX_LLM_CONCURRENCY", 10),
 		TranslateChunkMinWords: getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 500),
 		TranslateChunkMaxWords: getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 1000),
 		InternalToken:          getEnv("INTERNAL_TOKEN", ""),
@@ -70,6 +72,9 @@ func (c *Config) Validate() error {
 
 	if c.TranslateConcurrency <= 0 {
 		invalid = append(invalid, "TRANSLATE_CONCURRENCY must be >= 1")
+	}
+	if c.MaxLLMConcurrency <= 0 {
+		invalid = append(invalid, "MAX_LLM_CONCURRENCY must be >= 1")
 	}
 	if c.TranslateChunkMinWords <= 0 {
 		invalid = append(invalid, "TRANSLATE_CHUNK_MIN_WORDS must be >= 1")

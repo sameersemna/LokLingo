@@ -42,11 +42,7 @@ func (s *pdfService) ExtractText(filePath string) (string, error) {
 
 	var sb strings.Builder
 	for pageNum := 1; pageNum <= totalPages; pageNum++ {
-		page := r.Page(pageNum)
-		if page.V.IsNull() {
-			continue
-		}
-		text, err := page.GetPlainText(nil)
+		text, err := safeExtractPageText(r, pageNum)
 		if err != nil {
 			return "", fmt.Errorf("pdf: extract text from page %d of %q: %w", pageNum, filePath, err)
 		}
@@ -80,11 +76,7 @@ func (s *pdfService) ExtractPages(filePath string) ([]string, error) {
 
 	pages := make([]string, totalPages)
 	for pageNum := 1; pageNum <= totalPages; pageNum++ {
-		page := r.Page(pageNum)
-		if page.V.IsNull() {
-			continue
-		}
-		text, err := page.GetPlainText(nil)
+		text, err := safeExtractPageText(r, pageNum)
 		if err != nil {
 			return nil, fmt.Errorf("pdf: extract text from page %d of %q: %w", pageNum, filePath, err)
 		}
@@ -105,4 +97,19 @@ func (s *pdfService) PageCount(filePath string) (int, error) {
 		return 0, fmt.Errorf("pdf: %q contains no pages", filePath)
 	}
 	return totalPages, nil
+}
+
+// safeExtractPageText extracts text from a single page, recovering from any
+// panic raised by the ledongthuc/pdf library on malformed content streams.
+func safeExtractPageText(r *pdf.Reader, pageNum int) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pdf library panic on page %d: %v", pageNum, r)
+		}
+	}()
+	page := r.Page(pageNum)
+	if page.V.IsNull() {
+		return "", nil
+	}
+	return page.GetPlainText(nil)
 }

@@ -117,4 +117,105 @@ if command -v docker >/dev/null 2>&1; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# PDF job timing tests: small / medium / large
+# Requires: python3 with fpdf2 installed for realistic multi-page PDFs.
+# Falls back to a minimal skeleton PDF when fpdf2 is unavailable.
+# ---------------------------------------------------------------------------
+
+# poll_job <job_id> <timeout_s> — polls GET /api/v1/jobs/:id until the job
+# reaches a terminal state (completed/failed) or the timeout expires.
+# Prints the final status to stdout; exits non-zero on timeout or failure.
+poll_job() {
+  _jid="$1"
+  _timeout="$2"
+  _poll_interval=2
+  _elapsed=0
+  while [ "$_elapsed" -lt "$_timeout" ]; do
+    _resp="$(curl -fsS "${backend_url}/api/v1/jobs/${_jid}")"
+    _status="$(echo "$_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")"
+    if [ "$_status" = "completed" ] || [ "$_status" = "failed" ]; then
+      echo "$_status"
+      return 0
+    fi
+    sleep "$_poll_interval"
+    _elapsed=$(( _elapsed + _poll_interval ))
+  done
+  echo "timeout"
+  return 1
+}
+
+# make_pdf <output_path> <num_pages>
+# Generates a multi-page text PDF when fpdf2 is available; falls back to a
+# minimal 1-page skeleton otherwise (num_pages is then forced to 1).
+make_pdf() {
+  _out="$1"
+  _pages="$2"
+  if python3 -c "import fpdf" 2>/dev/null; then
+    python3 - "$_out" "$_pages" <<'PYEOF'
+import sys
+from fpdf import FPDF
+out_path, pages = sys.argv[1], int(sys.argv[2])
+pdf = FPDF()
+for i in range(1, pages + 1):
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    for line in range(1, 31):
+        pdf.cell(0, 8, f"Page {i}/{pages} – line {line}: The quick brown fox jumps over the lazy dog. Smoke test content.")
+        pdf.ln()
+pdf.output(out_path)
+PYEOF
+  else
+    echo "  (fpdf2 not found — using minimal skeleton PDF, page count forced to 1)"
+    printf '%%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\nxref\n0 4\n0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\n0000000115 00000 n\ntrailer\n<< /Root 1 0 R /Size 4 >>\nstartxref\n190\n%%%%EOF\n' > "$_out"
+  fi
+}
+
+# submit_and_time <label> <num_pages> <poll_timeout_s>
+submit_and_time() {
+  _label="$1"
+  _pages="$2"
+  _timeout="$3"
+
+  echo ""
+  echo "--- PDF job timing: ${_label} (${_pages} page(s)) ---"
+
+  _tmp="$(mktemp /tmp/loklingo-smoke-timing-XXXX.pdf)"
+  make_pdf "$_tmp" "$_pages"
+
+  _t0="$(date +%s)"
+  _submit_resp="$(curl -fsS -X POST "${backend_url}/api/v1/jobs/pdf" \
+    -F "file=@${_tmp};type=application/pdf" \
+    -F "source=en" \
+    -F "target=de")"
+  rm -f "$_tmp"
+
+  _job_id="$(echo "$_submit_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")"
+  echo "  submitted job_id=${_job_id}"
+
+  _final_status="$(poll_job "$_job_id" "$_timeout")"
+  _t1="$(date +%s)"
+  _elapsed_s=$(( _t1 - _t0 ))
+
+  echo "  status=${_final_status}  total_time=${_elapsed_s}s"
+
+  if [ "$_final_status" = "timeout" ]; then
+    echo "  ERROR: job did not complete within ${_timeout}s"
+    exit 1
+  fi
+  # A failed status is reported but does not abort the smoke run so the other
+  # size tiers can still be measured.
+  if [ "$_final_status" = "failed" ]; then
+    echo "  WARN: job ended with status=failed"
+  fi
+}
+
+# Small: 1–2 pages, 60 s timeout
+submit_and_time "small"  2   60
+# Medium: 10–20 pages, 5 min timeout
+submit_and_time "medium" 15  300
+# Large: 50+ pages, 15 min timeout
+submit_and_time "large"  50  900
+
+echo ""
 echo "Smoke test passed"

@@ -48,6 +48,7 @@ func TestConfigValidatePassesForCompleteConfig(t *testing.T) {
 		OCRServiceURL:          "http://loklingo-ocr:8000",
 		RedisURL:               "redis://loklingo-redis:6379",
 		TranslateConcurrency:   3,
+		MaxLLMConcurrency:      10,
 		TranslateChunkMinWords: 500,
 		TranslateChunkMaxWords: 1000,
 	}

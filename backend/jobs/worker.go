@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	internalservices "loklingo/backend/internal/services"
@@ -22,9 +23,10 @@ type Worker struct {
 	pdfService           internalservices.PDFService
 	ocrClient            internalservices.OCRClient // optional fallback for image-based PDFs
 	maxPDFPages          int
-	translateConcurrency int // semaphore width for chunk-level LLM calls
-	chunkMinWords        int // preferred minimum words for a PDF translation chunk
-	chunkMaxWords        int // hard cap words for a PDF translation chunk
+	translateConcurrency int           // semaphore width for chunk-level LLM calls per job
+	globalLLMSem         chan struct{} // shared semaphore: max total concurrent LLM calls across all jobs
+	chunkMinWords        int           // preferred minimum words for a PDF translation chunk
+	chunkMaxWords        int           // hard cap words for a PDF translation chunk
 }
 
 // WorkerOption is a functional option for NewWorker.
@@ -56,6 +58,17 @@ func WithPDFChunkWordRange(minWords, maxWords int) WorkerOption {
 	}
 }
 
+// WithMaxLLMConcurrency sets the global maximum number of concurrent LLM calls
+// across all jobs. Must be ≥ 1; values ≤ 0 are ignored.
+func WithMaxLLMConcurrency(n int) WorkerOption {
+	return func(w *Worker) {
+		if n > 0 && n != cap(w.globalLLMSem) {
+			// Create a new semaphore with the specified capacity
+			w.globalLLMSem = make(chan struct{}, n)
+		}
+	}
+}
+
 // NewWorker constructs a Worker. ocrClient may be nil to disable OCR fallback.
 // Additional behaviour can be tuned via WorkerOption values.
 func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService, ocrClient internalservices.OCRClient, maxPDFPages int, opts ...WorkerOption) *Worker {
@@ -69,6 +82,7 @@ func NewWorker(store Store, service services.TranslationService, pdfService inte
 		ocrClient:            ocrClient,
 		maxPDFPages:          maxPDFPages,
 		translateConcurrency: pdfTranslateConcurrency,
+		globalLLMSem:         make(chan struct{}, 10), // default global concurrency = 10
 		chunkMinWords:        pdfChunkMinWords,
 		chunkMaxWords:        pdfChunkMaxWords,
 	}
@@ -200,7 +214,17 @@ func isRateLimitError(err error) bool {
 
 // translateWithRetry calls w.service.Translate with exponential back-off on
 // rate-limit errors.  Non-retryable errors are returned immediately.
-func (w *Worker) translateWithRetry(ctx context.Context, text, source, target string) (string, error) {
+// Acquires a slot from the global LLM semaphore before calling the service.
+// retries is incremented (atomically) each time a retry is issued; it may be nil.
+func (w *Worker) translateWithRetry(ctx context.Context, text, source, target string, retries *atomic.Int64) (string, error) {
+	// Acquire global LLM concurrency slot; respect context cancellation.
+	select {
+	case w.globalLLMSem <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-w.globalLLMSem }()
+
 	input := services.TranslationInput{
 		Text:   text,
 		Source: source,
@@ -215,6 +239,9 @@ func (w *Worker) translateWithRetry(ctx context.Context, text, source, target st
 		}
 		if !isRateLimitError(err) || attempt >= translateMaxRetries {
 			return "", err
+		}
+		if retries != nil {
+			retries.Add(1)
 		}
 		slog.Warn("translate rate-limited, backing off",
 			"attempt", attempt+1,
@@ -283,9 +310,9 @@ func buildTextChunks(units []chunkUnit, minWords, maxWords int) []textChunk {
 	return chunks
 }
 
-func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, target string) ([]chunkUnit, error) {
+func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, target string, retries *atomic.Int64) ([]chunkUnit, error) {
 	if len(chunk.units) == 1 {
-		translated, err := w.translateWithRetry(ctx, chunk.units[0].text, source, target)
+		translated, err := w.translateWithRetry(ctx, chunk.units[0].text, source, target, retries)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +328,7 @@ func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, ta
 		parts = append(parts, u.text)
 	}
 	payload := strings.Join(parts, pdfChunkSep)
-	translated, err := w.translateWithRetry(ctx, payload, source, target)
+	translated, err := w.translateWithRetry(ctx, payload, source, target, retries)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +338,7 @@ func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, ta
 		// Fallback: if the model modified the delimiter, translate units one-by-one.
 		out := make([]chunkUnit, 0, len(chunk.units))
 		for _, u := range chunk.units {
-			part, perr := w.translateWithRetry(ctx, u.text, source, target)
+			part, perr := w.translateWithRetry(ctx, u.text, source, target, retries)
 			if perr != nil {
 				return nil, perr
 			}
@@ -386,6 +413,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	var ocrTriggered bool
 	var ocrReason string
 	var ocrOutcome string
+	var retryCount atomic.Int64
+	var chunkCount int
 
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
 
@@ -522,6 +551,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 	units := buildChunkUnits(pages, w.chunkMaxWords)
 	chunks := buildTextChunks(units, w.chunkMinWords, w.chunkMaxWords)
+	chunkCount = len(chunks)
 	unitTargetsByPage := make([]int, len(pages))
 	for _, u := range units {
 		if u.pageIndex >= 0 && u.pageIndex < len(unitTargetsByPage) {
@@ -544,7 +574,26 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				return
 			}
 			defer func() { <-sem }()
-			translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target)
+			chunkStart := time.Now()
+			translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target, &retryCount)
+			chunkDurMs := time.Since(chunkStart).Milliseconds()
+			if err != nil {
+				slog.Error("chunk_translation_failed",
+					"job_id", job.ID,
+					"job_type", job.Type,
+					"chunk_idx", idx,
+					"duration_ms", chunkDurMs,
+					"err", err,
+				)
+			} else {
+				slog.Info("chunk_translated",
+					"job_id", job.ID,
+					"job_type", job.Type,
+					"chunk_idx", idx,
+					"chunk_words", c.words,
+					"duration_ms", chunkDurMs,
+				)
+			}
 			if err == nil && job.Type == TypePDF {
 				progressMu.Lock()
 				for _, u := range translatedUnits {
@@ -622,5 +671,12 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			"total_ms", time.Since(startedAt).Milliseconds(),
 		)
 	}
-	slog.Info("job finished", "job_id", job.ID, "status", job.Status)
+	slog.Info("job_finished",
+		"job_id", job.ID,
+		"job_type", job.Type,
+		"status", job.Status,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"chunk_count", chunkCount,
+		"retry_count", retryCount.Load(),
+	)
 }
