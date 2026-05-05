@@ -14,12 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && addgroup --system ocr && adduser --system --ingroup ocr ocr
 
 ENV HOME=/home/ocr
-RUN mkdir -p /home/ocr && chown -R ocr:ocr /home/ocr
+RUN mkdir -p /home/ocr /tmp/loklingo \
+    && chmod 1777 /tmp/loklingo \
+    && chown -R ocr:ocr /home/ocr
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY test_app.py .
 
 RUN chown -R ocr:ocr /app
 USER ocr

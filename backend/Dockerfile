@@ -12,7 +12,9 @@ RUN apk add --no-cache ca-certificates wget \
     && addgroup -S loklingo && adduser -S -G loklingo loklingo
 WORKDIR /app
 COPY --from=builder /app/loklingo-backend .
-RUN chown loklingo:loklingo /app/loklingo-backend
+RUN mkdir -p /tmp/loklingo \
+    && chmod 1777 /tmp/loklingo \
+    && chown loklingo:loklingo /app/loklingo-backend
 USER loklingo
 
 EXPOSE 8080

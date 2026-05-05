@@ -921,6 +921,23 @@ body {
 .pdf-job-done     { background: #eaf8f0; color: #146c3a; border-color: #98ddb5; }
 .pdf-job-failed   { background: #fff0f0; color: #c0392b; border-color: #f5b7b7; }
 
+/* processing_method pill */
+.pdf-method-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  cursor: default;
+}
+.pdf-method-pdf_text { background: #eff4ff; color: #3b5bdb; border-color: #bac8ff; }
+.pdf-method-ocr      { background: #fff4e6; color: #c45c00; border-color: #ffd8a8; }
+
+:root[data-theme="dark"] .pdf-method-pdf_text { background: #1a2540; color: #91b4f7; border-color: #2c4a80; }
+:root[data-theme="dark"] .pdf-method-ocr      { background: #2e1a00; color: #f5a623; border-color: #7a4000; }
+
 :root[data-theme="dark"] .pdf-job-pending    { background: #1e1e24; color: #888; border-color: #333; }
 :root[data-theme="dark"] .pdf-job-processing { background: #1a2540; color: #7ab2f7; border-color: #2c4a80; }
 :root[data-theme="dark"] .pdf-job-done       { background: #0d2919; color: #4caf82; border-color: #1a5c38; }

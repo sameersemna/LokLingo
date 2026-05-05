@@ -57,6 +57,7 @@ func TestConfigValidatePassesForCompleteConfig(t *testing.T) {
 func TestLoadReadsPDFGuardrailEnvValues(t *testing.T) {
 	t.Setenv("MAX_PDF_UPLOAD_BYTES", "1048576")
 	t.Setenv("MAX_PDF_PAGES", "150")
+	t.Setenv("OCR_SHARED_STORAGE_DIR", "/tmp/loklingo")
 
 	cfg := Load()
 	if cfg.MaxPDFUploadBytes != 1048576 {
@@ -64,5 +65,8 @@ func TestLoadReadsPDFGuardrailEnvValues(t *testing.T) {
 	}
 	if cfg.MaxPDFPages != 150 {
 		t.Fatalf("expected MaxPDFPages=150, got %d", cfg.MaxPDFPages)
+	}
+	if cfg.OCRSharedStorageDir != "/tmp/loklingo" {
+		t.Fatalf("expected OCRSharedStorageDir=/tmp/loklingo, got %q", cfg.OCRSharedStorageDir)
 	}
 }

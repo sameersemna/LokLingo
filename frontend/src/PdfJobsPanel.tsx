@@ -124,6 +124,15 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
             )}
           </span>
 
+          {status === 'completed' && live?.processing_method && (
+            <span
+              className={`pdf-method-badge pdf-method-${live.processing_method}`}
+              title={live.processing_method === 'pdf_text' ? 'Extracted via embedded PDF text' : 'Extracted via OCR (image-based PDF)'}
+            >
+              {live.processing_method === 'pdf_text' ? 'PDF text' : 'OCR'}
+            </span>
+          )}
+
           {status === 'completed' && text && (
             <button className="icon-btn" title="Show / hide translation" onClick={() => setExpanded(e => !e)}>
               {expanded ? '▲' : '▼'}

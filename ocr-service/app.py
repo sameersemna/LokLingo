@@ -40,6 +40,7 @@ def _get_env_int(name: str, default: int) -> int:
 
 MAX_PDF_UPLOAD_BYTES = _get_env_int("MAX_PDF_UPLOAD_BYTES", 100 * 1024 * 1024)
 MAX_PDF_PAGES = _get_env_int("MAX_PDF_PAGES", 200)
+OCR_SHARED_STORAGE_DIR = os.path.realpath(os.getenv("OCR_SHARED_STORAGE_DIR", "")) if os.getenv("OCR_SHARED_STORAGE_DIR", "") else ""
 
 app = FastAPI(title="LokLingo OCR Service", version="2.0.0")
 
@@ -134,7 +135,8 @@ class OCRImageResponse(BaseModel):
 
 
 class OCRPdfRequest(BaseModel):
-    pdf_b64: str = Field(description="Base64-encoded PDF file")
+    pdf_b64: str | None = Field(default=None, description="Base64-encoded PDF file")
+    file_path: str | None = Field(default=None, description="Absolute path to a shared PDF file")
     lang: LangField = "auto"  # type: ignore[assignment]
     dpi: int = Field(default=200, ge=72, le=400, description="Rendering DPI for each page")
 
@@ -230,6 +232,60 @@ def _write_upload_to_temp_pdf(upload: UploadFile, max_bytes: int | None = None) 
         except OSError:
             pass
         raise
+
+
+def _write_pdf_bytes_to_temp_pdf(pdf_bytes: bytes, max_bytes: int | None = None) -> str:
+    if max_bytes is None:
+        max_bytes = MAX_PDF_UPLOAD_BYTES
+    if len(pdf_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF file exceeds max size of {max_bytes} bytes",
+        )
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    try:
+        with tmp:
+            tmp.write(pdf_bytes)
+        return tmp.name
+    except Exception:
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def _resolve_shared_pdf_path(raw_path: object) -> str:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise HTTPException(status_code=400, detail="file_path is required")
+    if not OCR_SHARED_STORAGE_DIR:
+        raise HTTPException(status_code=400, detail="shared file access is not enabled")
+
+    resolved = os.path.realpath(raw_path.strip())
+    try:
+        if os.path.commonpath([resolved, OCR_SHARED_STORAGE_DIR]) != OCR_SHARED_STORAGE_DIR:
+            raise HTTPException(status_code=400, detail="file_path must be inside shared storage dir")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_path must be inside shared storage dir")
+
+    if not os.path.exists(resolved):
+        raise HTTPException(status_code=404, detail="shared PDF file does not exist")
+    if not os.path.isfile(resolved):
+        raise HTTPException(status_code=400, detail="file_path must point to a file")
+
+    try:
+        size = os.path.getsize(resolved)
+    except OSError as exc:
+        logger.exception("Shared PDF stat error: %s", exc)
+        raise HTTPException(status_code=422, detail="Cannot access shared PDF file")
+    if size > MAX_PDF_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF file exceeds max size of {MAX_PDF_UPLOAD_BYTES} bytes",
+        )
+
+    return resolved
 
 
 def _ocr_pdf_file(
@@ -331,9 +387,28 @@ def _ocr_pdf_file(
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _gpu_available() -> bool:
+    """Return True if a CUDA-capable GPU is visible to the process."""
+    try:
+        import paddle  # type: ignore
+        return bool(paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0)
+    except Exception:
+        return False
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "service": "loklingo-ocr", "version": "2.0.0"}
+    with _cache_lock:
+        warmed_models = list(_ocr_cache.keys())
+
+    return {
+        "status": "ok",
+        "service": "loklingo-ocr",
+        "version": "2.0.0",
+        "gpu_available": _gpu_available(),
+        "models_warmed": warmed_models,
+        "models_warmed_count": len(warmed_models),
+    }
 
 
 @app.post("/ocr/image", response_model=OCRImageResponse)
@@ -361,12 +436,45 @@ def ocr_image(req: OCRImageRequest) -> OCRImageResponse:
 
 @app.post("/ocr/pdf", response_model=OCRPdfResponse)
 async def ocr_pdf(request: Request) -> OCRPdfResponse:
-    """Extract text and bounding boxes from every page of an uploaded PDF."""
+    """Extract text and bounding boxes from an uploaded PDF or shared file path."""
     content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            payload = OCRPdfRequest.model_validate(await request.json())
+        except Exception as exc:
+            logger.exception("Invalid OCR JSON request: %s", exc)
+            raise HTTPException(status_code=400, detail="Invalid JSON request body")
+
+        lang = _parse_lang(payload.lang)
+        dpi = _parse_dpi(payload.dpi)
+
+        if payload.file_path:
+            file_path = _resolve_shared_pdf_path(payload.file_path)
+            return _ocr_pdf_file(file_path, lang, dpi)
+
+        if payload.pdf_b64:
+            try:
+                pdf_bytes = base64.b64decode(payload.pdf_b64)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid base64 PDF data")
+
+            file_path = ""
+            try:
+                file_path = _write_pdf_bytes_to_temp_pdf(pdf_bytes)
+                return _ocr_pdf_file(file_path, lang, dpi)
+            finally:
+                if file_path:
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        logger.warning("Failed to remove temp PDF: %s", file_path)
+
+        raise HTTPException(status_code=400, detail="file_path or pdf_b64 is required")
+
     if not content_type.startswith("multipart/form-data"):
         raise HTTPException(
             status_code=415,
-            detail="Content-Type must be multipart/form-data",
+            detail="Content-Type must be multipart/form-data or application/json",
         )
 
     form = await request.form()

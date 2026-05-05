@@ -378,6 +378,30 @@ class TestWriteUploadToTempPdf(unittest.TestCase):
             self.assertEqual(os.listdir(temp_dir), [])
 
 
+class TestResolveSharedPdfPath(unittest.TestCase):
+    def test_requires_shared_storage_enabled(self):
+        with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", ""):
+            with self.assertRaises(Exception) as ctx:
+                ocr_app._resolve_shared_pdf_path("/tmp/loklingo/sample.pdf")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_rejects_path_outside_shared_root(self):
+        with tempfile.TemporaryDirectory() as shared_dir, tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
+            with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", os.path.realpath(shared_dir)):
+                with self.assertRaises(Exception) as ctx:
+                    ocr_app._resolve_shared_pdf_path(temp_pdf.name)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_resolves_valid_path_inside_shared_root(self):
+        with tempfile.TemporaryDirectory() as shared_dir:
+            file_path = os.path.join(shared_dir, "sample.pdf")
+            with open(file_path, "wb") as f:
+                f.write(b"%PDF-1.4")
+            with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", os.path.realpath(shared_dir)):
+                resolved = ocr_app._resolve_shared_pdf_path(file_path)
+        self.assertEqual(resolved, os.path.realpath(file_path))
+
+
 # ---------------------------------------------------------------------------
 # Integration: FastAPI /ocr/pdf endpoint via httpx TestClient
 # ---------------------------------------------------------------------------
@@ -415,7 +439,7 @@ class TestOcrPdfEndpoint(unittest.TestCase):
         resp = self.client.post(
             "/ocr/pdf",
             content=json.dumps({"pdf_b64": "abc"}),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "text/plain"},
         )
         self.assertEqual(resp.status_code, 415)
 
@@ -480,6 +504,93 @@ class TestOcrPdfEndpoint(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 413)
         self.assertIn("max page count", resp.json()["detail"])
+
+    def test_shared_file_path_json_returns_200(self):
+        with tempfile.TemporaryDirectory() as shared_dir:
+            file_path = os.path.join(shared_dir, "sample.pdf")
+            with open(file_path, "wb") as f:
+                f.write(b"%PDF-1.4")
+
+            img = _fake_pil_image()
+            fake_ocr = mock.MagicMock()
+            fake_ocr.ocr = mock.MagicMock(return_value=[[([[0,0],[1,0],[1,1],[0,1]], ("Shared path", 0.95))]])
+
+            with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", os.path.realpath(shared_dir)), \
+                 mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
+                 mock.patch.object(ocr_app, "convert_from_path", return_value=[img]), \
+                 mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+                resp = self.client.post(
+                    "/ocr/pdf",
+                    json={"file_path": file_path, "lang": "en", "dpi": 200},
+                )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Shared path", resp.json()["text"])
+
+    def test_shared_file_path_outside_root_returns_400(self):
+        with tempfile.TemporaryDirectory() as shared_dir, tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
+            with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", os.path.realpath(shared_dir)):
+                resp = self.client.post(
+                    "/ocr/pdf",
+                    json={"file_path": temp_pdf.name, "lang": "en", "dpi": 200},
+                )
+
+        self.assertEqual(resp.status_code, 400)
+
+    def test_json_base64_pdf_returns_200(self):
+        img = _fake_pil_image()
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=[[([[0,0],[1,0],[1,1],[0,1]], ("Base64 path", 0.9))]])
+
+        with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
+             mock.patch.object(ocr_app, "convert_from_path", return_value=[img]), \
+             mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+            resp = self.client.post(
+                "/ocr/pdf",
+                json={"pdf_b64": "JVBERi0xLjQKJSVFT0YK", "lang": "en", "dpi": 200},
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Base64 path", resp.json()["text"])
+
+
+# ---------------------------------------------------------------------------
+# Tests: /health endpoint enrichment
+# ---------------------------------------------------------------------------
+
+class TestHealthEndpoint(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from fastapi.testclient import TestClient
+            cls.client = TestClient(ocr_app.app)
+        except ImportError:
+            raise unittest.SkipTest("fastapi[testclient] not available")
+
+    def test_health_returns_200(self):
+        resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_health_contains_required_fields(self):
+        resp = self.client.get("/health")
+        body = resp.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["service"], "loklingo-ocr")
+        self.assertIn("gpu_available", body)
+        self.assertIn("models_warmed", body)
+        self.assertIn("models_warmed_count", body)
+
+    def test_health_models_warmed_reflects_cache(self):
+        """Warm a fake model into the cache; health should reflect it."""
+        with mock.patch.dict(ocr_app._ocr_cache, {"ch": object()}):
+            resp = self.client.get("/health")
+        body = resp.json()
+        self.assertIn("ch", body["models_warmed"])
+        self.assertGreaterEqual(body["models_warmed_count"], 1)
+
+    def test_health_gpu_available_is_bool(self):
+        resp = self.client.get("/health")
+        self.assertIsInstance(resp.json()["gpu_available"], bool)
 
 
 if __name__ == "__main__":

@@ -32,9 +32,12 @@ services:
       LITELLM_API_KEY: "${LITELLM_API_KEY}"
       LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
+      OCR_SHARED_STORAGE_DIR: "${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}"
       REDIS_URL: "${REDIS_URL:-}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-loklingo}:${POSTGRES_PASSWORD}@loklingo-postgres:5432/loklingo"
       INTERNAL_TOKEN: "${INTERNAL_TOKEN:-}"
+    volumes:
+      - pdf_uploads:${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}
     depends_on:
       loklingo-ocr:
         condition: service_healthy
@@ -55,8 +58,11 @@ services:
     container_name: loklingo-ocr
     restart: unless-stopped
     environment:
+      OCR_SHARED_STORAGE_DIR: "${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}"
       MAX_PDF_UPLOAD_BYTES: "${MAX_PDF_UPLOAD_BYTES:-104857600}"
       MAX_PDF_PAGES: "${MAX_PDF_PAGES:-200}"
+    volumes:
+      - pdf_uploads:${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}:ro
     ports:
       - "${OCR_HOST_PORT:-8000}:8000"
     healthcheck:
@@ -87,3 +93,4 @@ networks:
 
 volumes:
   postgres_data:
+  pdf_uploads:
