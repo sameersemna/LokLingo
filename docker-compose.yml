@@ -1,4 +1,23 @@
 services:
+  loklingo-postgres:
+    image: postgres:16-alpine
+    container_name: loklingo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: loklingo
+      POSTGRES_USER: "${POSTGRES_USER:-loklingo}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loklingo} -d loklingo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - loklingo-net
+
   loklingo-backend:
     build:
       context: ./backend
@@ -14,8 +33,11 @@ services:
       LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
       REDIS_URL: "${REDIS_URL:-}"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-loklingo}:${POSTGRES_PASSWORD}@loklingo-postgres:5432/loklingo"
     depends_on:
       loklingo-ocr:
+        condition: service_healthy
+      loklingo-postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -58,3 +80,6 @@ services:
 networks:
   loklingo-net:
     driver: bridge
+
+volumes:
+  postgres_data:

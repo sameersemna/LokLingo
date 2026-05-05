@@ -14,6 +14,7 @@ type Config struct {
 	LiteLLMModel   string
 	OCRServiceURL  string
 	RedisURL       string
+	PostgresDSN    string // optional; enables Postgres analytics sink when set
 }
 
 func Load() *Config {
@@ -27,6 +28,7 @@ func Load() *Config {
 		LiteLLMModel:   getEnv("LITELLM_MODEL", ""),
 		OCRServiceURL:  getEnv("OCR_SERVICE_URL", ""),
 		RedisURL:       resolveRedisURL(appEnv),
+		PostgresDSN:    getEnv("POSTGRES_DSN", ""),
 	}
 }
 

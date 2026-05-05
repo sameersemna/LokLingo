@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	internalservices "loklingo/backend/internal/services"
@@ -16,11 +17,12 @@ type Worker struct {
 	store      Store
 	service    services.TranslationService
 	pdfService internalservices.PDFService
+	ocrClient  internalservices.OCRClient // optional fallback for image-based PDFs
 }
 
-// NewWorker constructs a Worker.
-func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService) *Worker {
-	return &Worker{store: store, service: service, pdfService: pdfService}
+// NewWorker constructs a Worker. ocrClient may be nil to disable OCR fallback.
+func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService, ocrClient internalservices.OCRClient) *Worker {
+	return &Worker{store: store, service: service, pdfService: pdfService, ocrClient: ocrClient}
 }
 
 // Run blocks, processing jobs until ctx is cancelled.
@@ -52,6 +54,20 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
+// normalizeText collapses runs of whitespace within each paragraph while
+// preserving paragraph breaks (blank lines between sections).
+func normalizeText(s string) string {
+	paragraphs := strings.Split(strings.TrimSpace(s), "\n\n")
+	out := paragraphs[:0]
+	for _, p := range paragraphs {
+		normalized := strings.Join(strings.Fields(p), " ")
+		if normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return strings.Join(out, "\n\n")
+}
+
 func (w *Worker) process(ctx context.Context, job *Job) {
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
 
@@ -67,16 +83,44 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			return
 		}
 		extracted, err := w.pdfService.ExtractText(job.FilePath)
-		if err != nil {
-			slog.Error("pdf text extraction failed", "job_id", job.ID, "file", job.FilePath, "err", err)
-			job.Status = StatusFailed
-			job.ErrorMsg = fmt.Sprintf("pdf extraction failed: %v", err)
-			if uerr := w.store.Update(ctx, job); uerr != nil {
-				slog.Error("update job result (pdf extraction failed)", "job_id", job.ID, "err", uerr)
+		if err != nil || extracted == "" {
+			reason := "empty text"
+			if err != nil {
+				reason = err.Error()
 			}
-			return
+			if w.ocrClient == nil {
+				slog.Error("pdf text extraction failed, no OCR fallback configured", "job_id", job.ID, "file", job.FilePath, "reason", reason)
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("pdf extraction failed: %s", reason)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update job result (pdf extraction failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+			slog.Warn("pdf text extraction failed, falling back to OCR", "job_id", job.ID, "file", job.FilePath, "reason", reason)
+			ocred, ocrErr := w.ocrClient.ExtractText(job.FilePath, job.Lang)
+			if ocrErr != nil {
+				slog.Error("OCR fallback also failed", "job_id", job.ID, "file", job.FilePath, "err", ocrErr)
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("pdf extraction failed: %s; OCR fallback failed: %v", reason, ocrErr)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update job result (OCR fallback failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+			slog.Info("ocr_fallback_triggered",
+				"job_id", job.ID,
+				"file", job.FilePath,
+				"lang", job.Lang,
+				"target", job.Target,
+				"extraction_failure_reason", reason,
+			)
+			extracted = ocred
+			job.ProcessingMethod = "ocr"
+		} else {
+			job.ProcessingMethod = "pdf_text"
 		}
-		job.Text = extracted
+		job.Text = normalizeText(extracted)
 	}
 
 	// Check translation cache before calling the LLM.

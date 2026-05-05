@@ -18,16 +18,34 @@ import (
 	"loklingo/backend/jobs"
 	"loklingo/backend/middleware"
 	"loklingo/backend/services"
+
+	"loklingo/backend/internal/pglog"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	jsonHandler := slog.NewJSONHandler(os.Stdout, nil)
 
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		slog.Error("invalid configuration", "err", err)
 		os.Exit(1)
 	}
+
+	// Connect to Postgres for the analytics sink (optional).
+	var pgPool *pgxpool.Pool
+	if cfg.PostgresDSN != "" {
+		var err error
+		pgPool, err = pgxpool.New(context.Background(), cfg.PostgresDSN)
+		if err != nil {
+			slog.New(jsonHandler).Warn("postgres analytics sink disabled: could not connect", "err", err)
+		} else {
+			slog.New(jsonHandler).Info("postgres analytics sink enabled")
+		}
+	}
+
+	slog.SetDefault(slog.New(pglog.New(jsonHandler, pgPool)))
 
 	slog.Info("LokLingo starting", "env", cfg.AppEnv)
 
@@ -49,7 +67,8 @@ func main() {
 
 	translationService := services.NewTranslationService(cfg)
 	pdfService := internalservices.NewPDFService()
-	worker := jobs.NewWorker(jobStore, translationService, pdfService)
+	ocrClient := internalservices.NewOCRClient(cfg.OCRServiceURL)
+	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient)
 	go worker.Run(ctx)
 
 	// --- HTTP server ---

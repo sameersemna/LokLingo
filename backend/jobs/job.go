@@ -34,6 +34,7 @@ type Job struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 
 	// PDF-job-specific fields.
-	FilePath string `json:"file_path,omitempty"` // path to the PDF on the worker's filesystem
-	Lang     string `json:"lang,omitempty"`      // OCR language hint (ISO 639-1 or "auto")
+	FilePath         string `json:"file_path,omitempty"`         // path to the PDF on the worker's filesystem
+	Lang             string `json:"lang,omitempty"`              // OCR language hint (ISO 639-1 or "auto")
+	ProcessingMethod string `json:"processing_method,omitempty"` // "pdf_text" or "ocr"
 }
