@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	internalservices "loklingo/backend/internal/services"
@@ -16,19 +17,65 @@ import (
 
 // Worker dequeues jobs and executes translations in the background.
 type Worker struct {
-	store       Store
-	service     services.TranslationService
-	pdfService  internalservices.PDFService
-	ocrClient   internalservices.OCRClient // optional fallback for image-based PDFs
-	maxPDFPages int
+	store                Store
+	service              services.TranslationService
+	pdfService           internalservices.PDFService
+	ocrClient            internalservices.OCRClient // optional fallback for image-based PDFs
+	maxPDFPages          int
+	translateConcurrency int // semaphore width for chunk-level LLM calls
+	chunkMinWords        int // preferred minimum words for a PDF translation chunk
+	chunkMaxWords        int // hard cap words for a PDF translation chunk
+}
+
+// WorkerOption is a functional option for NewWorker.
+type WorkerOption func(*Worker)
+
+// WithTranslateConcurrency sets the maximum number of concurrent chunk-translation
+// goroutines. Must be ≥ 1; values ≤ 0 are ignored (default of 3 is kept).
+func WithTranslateConcurrency(n int) WorkerOption {
+	return func(w *Worker) {
+		if n > 0 {
+			w.translateConcurrency = n
+		}
+	}
+}
+
+// WithPDFChunkWordRange configures chunk size for PDF translation.
+// Values <= 0 are ignored. If maxWords < minWords, maxWords is clamped up to minWords.
+func WithPDFChunkWordRange(minWords, maxWords int) WorkerOption {
+	return func(w *Worker) {
+		if minWords > 0 {
+			w.chunkMinWords = minWords
+		}
+		if maxWords > 0 {
+			w.chunkMaxWords = maxWords
+		}
+		if w.chunkMaxWords < w.chunkMinWords {
+			w.chunkMaxWords = w.chunkMinWords
+		}
+	}
 }
 
 // NewWorker constructs a Worker. ocrClient may be nil to disable OCR fallback.
-func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService, ocrClient internalservices.OCRClient, maxPDFPages int) *Worker {
+// Additional behaviour can be tuned via WorkerOption values.
+func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService, ocrClient internalservices.OCRClient, maxPDFPages int, opts ...WorkerOption) *Worker {
 	if maxPDFPages <= 0 {
 		maxPDFPages = 300
 	}
-	return &Worker{store: store, service: service, pdfService: pdfService, ocrClient: ocrClient, maxPDFPages: maxPDFPages}
+	w := &Worker{
+		store:                store,
+		service:              service,
+		pdfService:           pdfService,
+		ocrClient:            ocrClient,
+		maxPDFPages:          maxPDFPages,
+		translateConcurrency: pdfTranslateConcurrency,
+		chunkMinWords:        pdfChunkMinWords,
+		chunkMaxWords:        pdfChunkMaxWords,
+	}
+	for _, o := range opts {
+		o(w)
+	}
+	return w
 }
 
 // Run blocks, processing jobs until ctx is cancelled.
@@ -106,6 +153,183 @@ func normalizePages(raw []string) []string {
 // PDFUploadDir is the shared location where CreatePDFJob writes uploaded files.
 // Workers read from here; both sides must agree on this path.
 const PDFUploadDir = "/tmp/loklingo"
+
+// pdfTranslateConcurrency is the default maximum number of page-translation goroutines
+// that may be in-flight simultaneously. Override at construction via WithTranslateConcurrency.
+const pdfTranslateConcurrency = 3
+
+// translateMaxRetries is the maximum number of retry attempts after a retryable
+// error (e.g. HTTP 429 rate-limit) before the page translation is failed.
+const translateMaxRetries = 3
+
+// translateRetryBase is the initial back-off delay before the first retry.
+// Each subsequent retry doubles the delay (capped at translateRetryBase * 2^retries).
+const translateRetryBase = 500 * time.Millisecond
+
+// pdfChunkMinWords and pdfChunkMaxWords define the target PDF translation chunk
+// size in words. Chunks are built from contiguous page text units to reduce LLM
+// call count while keeping inputs within a safer token budget.
+const pdfChunkMinWords = 500
+const pdfChunkMaxWords = 1000
+
+const pdfChunkSep = "\n\n[[[LK_PAGE_BREAK]]]\n\n"
+
+type chunkUnit struct {
+	pageIndex int
+	text      string
+	words     int
+}
+
+type textChunk struct {
+	units []chunkUnit
+	words int
+}
+
+// isRateLimitError reports whether err looks like an HTTP 429 / rate-limit
+// response from LiteLLM.  The service wraps the status as a formatted string
+// so we match on substrings rather than a sentinel error type.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "litellm status 429") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "rate_limit")
+}
+
+// translateWithRetry calls w.service.Translate with exponential back-off on
+// rate-limit errors.  Non-retryable errors are returned immediately.
+func (w *Worker) translateWithRetry(ctx context.Context, text, source, target string) (string, error) {
+	input := services.TranslationInput{
+		Text:   text,
+		Source: source,
+		Target: target,
+		Ctx:    ctx,
+	}
+	delay := translateRetryBase
+	for attempt := 0; ; attempt++ {
+		result, err := w.service.Translate(input)
+		if err == nil {
+			return result, nil
+		}
+		if !isRateLimitError(err) || attempt >= translateMaxRetries {
+			return "", err
+		}
+		slog.Warn("translate rate-limited, backing off",
+			"attempt", attempt+1,
+			"backoff_ms", delay.Milliseconds(),
+		)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		delay *= 2
+	}
+}
+
+func splitByWordBudget(text string, maxWords int) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	words := strings.Fields(text)
+	if len(words) <= maxWords {
+		return []string{strings.Join(words, " ")}
+	}
+	parts := make([]string, 0, (len(words)+maxWords-1)/maxWords)
+	for i := 0; i < len(words); i += maxWords {
+		end := i + maxWords
+		if end > len(words) {
+			end = len(words)
+		}
+		parts = append(parts, strings.Join(words[i:end], " "))
+	}
+	return parts
+}
+
+func buildChunkUnits(pages []string, maxWords int) []chunkUnit {
+	units := make([]chunkUnit, 0, len(pages))
+	for pageIdx, pageText := range pages {
+		parts := splitByWordBudget(pageText, maxWords)
+		for _, part := range parts {
+			units = append(units, chunkUnit{
+				pageIndex: pageIdx,
+				text:      part,
+				words:     len(strings.Fields(part)),
+			})
+		}
+	}
+	return units
+}
+
+func buildTextChunks(units []chunkUnit, minWords, maxWords int) []textChunk {
+	if len(units) == 0 {
+		return nil
+	}
+	chunks := make([]textChunk, 0, len(units))
+	current := textChunk{units: make([]chunkUnit, 0, 8)}
+	for _, unit := range units {
+		if len(current.units) > 0 && current.words >= minWords && current.words+unit.words > maxWords {
+			chunks = append(chunks, current)
+			current = textChunk{units: make([]chunkUnit, 0, 8)}
+		}
+		current.units = append(current.units, unit)
+		current.words += unit.words
+	}
+	if len(current.units) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, target string) ([]chunkUnit, error) {
+	if len(chunk.units) == 1 {
+		translated, err := w.translateWithRetry(ctx, chunk.units[0].text, source, target)
+		if err != nil {
+			return nil, err
+		}
+		return []chunkUnit{{
+			pageIndex: chunk.units[0].pageIndex,
+			text:      translated,
+			words:     len(strings.Fields(translated)),
+		}}, nil
+	}
+
+	parts := make([]string, 0, len(chunk.units))
+	for _, u := range chunk.units {
+		parts = append(parts, u.text)
+	}
+	payload := strings.Join(parts, pdfChunkSep)
+	translated, err := w.translateWithRetry(ctx, payload, source, target)
+	if err != nil {
+		return nil, err
+	}
+
+	split := strings.Split(translated, pdfChunkSep)
+	if len(split) != len(chunk.units) {
+		// Fallback: if the model modified the delimiter, translate units one-by-one.
+		out := make([]chunkUnit, 0, len(chunk.units))
+		for _, u := range chunk.units {
+			part, perr := w.translateWithRetry(ctx, u.text, source, target)
+			if perr != nil {
+				return nil, perr
+			}
+			out = append(out, chunkUnit{pageIndex: u.pageIndex, text: part, words: len(strings.Fields(part))})
+		}
+		return out, nil
+	}
+
+	out := make([]chunkUnit, 0, len(split))
+	for i, s := range split {
+		out = append(out, chunkUnit{
+			pageIndex: chunk.units[i].pageIndex,
+			text:      strings.TrimSpace(s),
+			words:     len(strings.Fields(s)),
+		})
+	}
+	return out, nil
+}
 
 // cleanStaleUploads removes files under dir that are older than maxAge.
 // Errors are logged but never propagated — this is best-effort housekeeping.
@@ -246,6 +470,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			job.ProcessingMethod = "pdf_text"
 		}
 		job.Text = strings.Join(pages, "\n\n")
+		job.TotalPages = len(pages)
+		job.ProcessedPages = 0
 	}
 
 	// For non-PDF jobs job.Text is already set; wrap it as a single page so the
@@ -259,6 +485,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		slog.Info("cache hit", "job_id", job.ID)
 		job.Status = StatusCompleted
 		job.TranslatedText = cached
+		if job.Type == TypePDF {
+			job.ProcessedPages = job.TotalPages
+		}
 		if ocrTriggered {
 			ocrOutcome = "cached"
 			slog.Info("ocr_fallback_triggered",
@@ -287,20 +516,73 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 
 	translateStart := time.Now()
-	translatedPages := make([]string, 0, len(pages))
+	type pageResult struct {
+		units []chunkUnit
+		err   error
+	}
+	units := buildChunkUnits(pages, w.chunkMaxWords)
+	chunks := buildTextChunks(units, w.chunkMinWords, w.chunkMaxWords)
+	unitTargetsByPage := make([]int, len(pages))
+	for _, u := range units {
+		if u.pageIndex >= 0 && u.pageIndex < len(unitTargetsByPage) {
+			unitTargetsByPage[u.pageIndex]++
+		}
+	}
+	unitDoneByPage := make([]int, len(pages))
+	results := make([]pageResult, len(chunks))
+	sem := make(chan struct{}, w.translateConcurrency)
+	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(idx int, c textChunk) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[idx] = pageResult{err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
+			translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target)
+			if err == nil && job.Type == TypePDF {
+				progressMu.Lock()
+				for _, u := range translatedUnits {
+					if u.pageIndex < 0 || u.pageIndex >= len(unitDoneByPage) {
+						continue
+					}
+					unitDoneByPage[u.pageIndex]++
+					if unitDoneByPage[u.pageIndex] == unitTargetsByPage[u.pageIndex] {
+						job.ProcessedPages++
+						if uerr := w.store.Update(ctx, job); uerr != nil {
+							slog.Error("update pdf progress", "job_id", job.ID, "processed_pages", job.ProcessedPages, "err", uerr)
+						}
+					}
+				}
+				progressMu.Unlock()
+			}
+			results[idx] = pageResult{units: translatedUnits, err: err}
+		}(i, chunk)
+	}
+	wg.Wait()
+	translatedPageParts := make([][]string, len(pages))
 	var translateErr error
-	for _, pageText := range pages {
-		var part string
-		part, translateErr = w.service.Translate(services.TranslationInput{
-			Text:   pageText,
-			Source: job.Source,
-			Target: job.Target,
-			Ctx:    ctx,
-		})
-		if translateErr != nil {
+	for _, r := range results {
+		if r.err != nil {
+			translateErr = r.err
 			break
 		}
-		translatedPages = append(translatedPages, part)
+		for _, u := range r.units {
+			if u.pageIndex >= 0 && u.pageIndex < len(translatedPageParts) {
+				translatedPageParts[u.pageIndex] = append(translatedPageParts[u.pageIndex], u.text)
+			}
+		}
+	}
+	translatedPages := make([]string, 0, len(pages))
+	if translateErr == nil {
+		for _, parts := range translatedPageParts {
+			translatedPages = append(translatedPages, strings.TrimSpace(strings.Join(parts, " ")))
+		}
 	}
 	translated := strings.Join(translatedPages, "\n\n")
 	translateMS = time.Since(translateStart).Milliseconds()

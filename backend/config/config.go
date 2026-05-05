@@ -8,41 +8,48 @@ import (
 )
 
 type Config struct {
-	AppEnv              string
-	Port                string
-	LiteLLMBaseURL      string
-	LiteLLMAPIKey       string
-	LiteLLMModel        string
-	OCRServiceURL       string
-	OCRSharedStorageDir string
-	RedisURL            string
-	PostgresDSN         string // optional; enables Postgres analytics sink when set
-	MaxPDFUploadBytes   int64
-	MaxPDFPages         int
-	InternalToken       string // optional; enforces X-Internal-Token on internal routes
+	AppEnv                 string
+	Port                   string
+	LiteLLMBaseURL         string
+	LiteLLMAPIKey          string
+	LiteLLMModel           string
+	OCRServiceURL          string
+	OCRSharedStorageDir    string
+	RedisURL               string
+	PostgresDSN            string // optional; enables Postgres analytics sink when set
+	MaxPDFUploadBytes      int64
+	MaxPDFPages            int
+	TranslateConcurrency   int    // max concurrent LLM page-translation requests; default 3
+	TranslateChunkMinWords int    // preferred minimum words per translation chunk; default 500
+	TranslateChunkMaxWords int    // hard cap words per translation chunk; default 1000
+	InternalToken          string // optional; enforces X-Internal-Token on internal routes
 }
 
 func Load() *Config {
 	appEnv := getEnv("APP_ENV", "development")
 
 	return &Config{
-		AppEnv:              appEnv,
-		Port:                getEnv("PORT", "8080"),
-		LiteLLMBaseURL:      getEnv("LITELLM_BASE_URL", ""),
-		LiteLLMAPIKey:       getEnv("LITELLM_API_KEY", ""),
-		LiteLLMModel:        getEnv("LITELLM_MODEL", ""),
-		OCRServiceURL:       getEnv("OCR_SERVICE_URL", ""),
-		OCRSharedStorageDir: getEnv("OCR_SHARED_STORAGE_DIR", ""),
-		RedisURL:            resolveRedisURL(appEnv),
-		PostgresDSN:         getEnv("POSTGRES_DSN", ""),
-		MaxPDFUploadBytes:   getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
-		MaxPDFPages:         getEnvInt("MAX_PDF_PAGES", 300),
-		InternalToken:       getEnv("INTERNAL_TOKEN", ""),
+		AppEnv:                 appEnv,
+		Port:                   getEnv("PORT", "8080"),
+		LiteLLMBaseURL:         getEnv("LITELLM_BASE_URL", ""),
+		LiteLLMAPIKey:          getEnv("LITELLM_API_KEY", ""),
+		LiteLLMModel:           getEnv("LITELLM_MODEL", ""),
+		OCRServiceURL:          getEnv("OCR_SERVICE_URL", ""),
+		OCRSharedStorageDir:    getEnv("OCR_SHARED_STORAGE_DIR", ""),
+		RedisURL:               resolveRedisURL(appEnv),
+		PostgresDSN:            getEnv("POSTGRES_DSN", ""),
+		MaxPDFUploadBytes:      getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
+		MaxPDFPages:            getEnvInt("MAX_PDF_PAGES", 300),
+		TranslateConcurrency:   getEnvInt("TRANSLATE_CONCURRENCY", 3),
+		TranslateChunkMinWords: getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 500),
+		TranslateChunkMaxWords: getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 1000),
+		InternalToken:          getEnv("INTERNAL_TOKEN", ""),
 	}
 }
 
 func (c *Config) Validate() error {
 	missing := make([]string, 0, 4)
+	invalid := make([]string, 0, 3)
 
 	if strings.TrimSpace(c.LiteLLMBaseURL) == "" {
 		missing = append(missing, "LITELLM_BASE_URL")
@@ -59,6 +66,20 @@ func (c *Config) Validate() error {
 
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
+	}
+
+	if c.TranslateConcurrency <= 0 {
+		invalid = append(invalid, "TRANSLATE_CONCURRENCY must be >= 1")
+	}
+	if c.TranslateChunkMinWords <= 0 {
+		invalid = append(invalid, "TRANSLATE_CHUNK_MIN_WORDS must be >= 1")
+	}
+	if c.TranslateChunkMaxWords < c.TranslateChunkMinWords {
+		invalid = append(invalid, "TRANSLATE_CHUNK_MAX_WORDS must be >= TRANSLATE_CHUNK_MIN_WORDS")
+	}
+
+	if len(invalid) > 0 {
+		return fmt.Errorf("invalid configuration: %s", strings.Join(invalid, "; "))
 	}
 
 	return nil

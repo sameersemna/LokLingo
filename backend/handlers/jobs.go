@@ -96,6 +96,10 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 		"created_at": job.CreatedAt,
 		"updated_at": job.UpdatedAt,
 	}
+	if job.Type == jobs.TypePDF {
+		resp["total_pages"] = job.TotalPages
+		resp["processed_pages"] = job.ProcessedPages
+	}
 	if job.Status == jobs.StatusCompleted {
 		resp["translated_text"] = job.TranslatedText
 	}

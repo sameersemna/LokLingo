@@ -37,4 +37,6 @@ type Job struct {
 	FilePath         string `json:"file_path,omitempty"`         // path to the PDF on the worker's filesystem
 	Lang             string `json:"lang,omitempty"`              // OCR language hint (ISO 639-1 or "auto")
 	ProcessingMethod string `json:"processing_method,omitempty"` // "pdf_text" or "ocr"
+	TotalPages       int    `json:"total_pages,omitempty"`       // total translatable pages discovered by the worker
+	ProcessedPages   int    `json:"processed_pages,omitempty"`   // pages translated so far
 }

@@ -43,10 +43,13 @@ func TestConfigValidateRequiresRuntimeDependencies(t *testing.T) {
 
 func TestConfigValidatePassesForCompleteConfig(t *testing.T) {
 	cfg := &Config{
-		LiteLLMBaseURL: "http://latitude:11435",
-		LiteLLMModel:   "ollama/llama3.2:latest",
-		OCRServiceURL:  "http://loklingo-ocr:8000",
-		RedisURL:       "redis://loklingo-redis:6379",
+		LiteLLMBaseURL:         "http://latitude:11435",
+		LiteLLMModel:           "ollama/llama3.2:latest",
+		OCRServiceURL:          "http://loklingo-ocr:8000",
+		RedisURL:               "redis://loklingo-redis:6379",
+		TranslateConcurrency:   3,
+		TranslateChunkMinWords: 500,
+		TranslateChunkMaxWords: 1000,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -68,5 +71,62 @@ func TestLoadReadsPDFGuardrailEnvValues(t *testing.T) {
 	}
 	if cfg.OCRSharedStorageDir != "/tmp/loklingo" {
 		t.Fatalf("expected OCRSharedStorageDir=/tmp/loklingo, got %q", cfg.OCRSharedStorageDir)
+	}
+}
+
+func TestLoadReadsChunkingEnvValues(t *testing.T) {
+	t.Setenv("TRANSLATE_CONCURRENCY", "4")
+	t.Setenv("TRANSLATE_CHUNK_MIN_WORDS", "600")
+	t.Setenv("TRANSLATE_CHUNK_MAX_WORDS", "900")
+
+	cfg := Load()
+	if cfg.TranslateConcurrency != 4 {
+		t.Fatalf("expected TranslateConcurrency=4, got %d", cfg.TranslateConcurrency)
+	}
+	if cfg.TranslateChunkMinWords != 600 {
+		t.Fatalf("expected TranslateChunkMinWords=600, got %d", cfg.TranslateChunkMinWords)
+	}
+	if cfg.TranslateChunkMaxWords != 900 {
+		t.Fatalf("expected TranslateChunkMaxWords=900, got %d", cfg.TranslateChunkMaxWords)
+	}
+}
+
+func TestConfigValidateRejectsInvalidTranslationLimits(t *testing.T) {
+	cfg := &Config{
+		LiteLLMBaseURL:         "http://latitude:11435",
+		LiteLLMModel:           "ollama/llama3.2:latest",
+		OCRServiceURL:          "http://loklingo-ocr:8000",
+		RedisURL:               "redis://loklingo-redis:6379",
+		TranslateConcurrency:   0,
+		TranslateChunkMinWords: 500,
+		TranslateChunkMaxWords: 1000,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "TRANSLATE_CONCURRENCY") {
+		t.Fatalf("expected validation error to mention TRANSLATE_CONCURRENCY, got %q", err.Error())
+	}
+}
+
+func TestConfigValidateRejectsInvalidChunkRange(t *testing.T) {
+	cfg := &Config{
+		LiteLLMBaseURL:         "http://latitude:11435",
+		LiteLLMModel:           "ollama/llama3.2:latest",
+		OCRServiceURL:          "http://loklingo-ocr:8000",
+		RedisURL:               "redis://loklingo-redis:6379",
+		TranslateConcurrency:   3,
+		TranslateChunkMinWords: 1000,
+		TranslateChunkMaxWords: 500,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "TRANSLATE_CHUNK_MAX_WORDS") {
+		t.Fatalf("expected validation error to mention TRANSLATE_CHUNK_MAX_WORDS, got %q", err.Error())
 	}
 }

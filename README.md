@@ -87,6 +87,9 @@ Important variables:
 * `OCR_SHARED_STORAGE_DIR`: shared directory mounted into backend and OCR containers for zero-copy OCR requests, defaults to `/tmp/loklingo`
 * `MAX_PDF_UPLOAD_BYTES`: max accepted PDF upload size for backend and OCR guards, defaults to `104857600` (100 MB)
 * `MAX_PDF_PAGES`: max accepted PDF page count for backend and OCR guards, defaults to `200`
+* `TRANSLATE_CONCURRENCY`: max concurrent LLM translation requests in the worker, defaults to `3`
+* `TRANSLATE_CHUNK_MIN_WORDS`: preferred minimum words per PDF translation chunk, defaults to `500`
+* `TRANSLATE_CHUNK_MAX_WORDS`: hard cap words per PDF translation chunk, defaults to `1000`
 
 Environment files:
 

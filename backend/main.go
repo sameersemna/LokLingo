@@ -68,7 +68,10 @@ func main() {
 	translationService := services.NewTranslationService(cfg)
 	pdfService := internalservices.NewPDFService()
 	ocrClient := internalservices.NewOCRClient(cfg.OCRServiceURL, cfg.OCRSharedStorageDir)
-	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient, cfg.MaxPDFPages)
+	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient, cfg.MaxPDFPages,
+		jobs.WithTranslateConcurrency(cfg.TranslateConcurrency),
+		jobs.WithPDFChunkWordRange(cfg.TranslateChunkMinWords, cfg.TranslateChunkMaxWords),
+	)
 	go worker.Run(ctx)
 
 	// --- HTTP server ---

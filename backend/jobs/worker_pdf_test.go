@@ -3,9 +3,12 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"loklingo/backend/services"
 )
@@ -512,16 +515,31 @@ func (m *mockMultiPagePDFSvc) PageCount(_ string) (int, error) {
 
 // mockPerPageTranslSvc records call order and maps input text to translated output.
 type mockPerPageTranslSvc struct {
+	mu           sync.Mutex
 	translations map[string]string
 	callOrder    []string
 }
 
 func (m *mockPerPageTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
 	m.callOrder = append(m.callOrder, in.Text)
-	if out, ok := m.translations[in.Text]; ok {
-		return out, nil
+	m.mu.Unlock()
+	parts := strings.Split(in.Text, pdfChunkSep)
+	if len(parts) == 1 {
+		if out, ok := m.translations[in.Text]; ok {
+			return out, nil
+		}
+		return "translated:" + in.Text, nil
 	}
-	return "translated:" + in.Text, nil
+	translatedParts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if out, ok := m.translations[p]; ok {
+			translatedParts = append(translatedParts, out)
+			continue
+		}
+		translatedParts = append(translatedParts, "translated:"+p)
+	}
+	return strings.Join(translatedParts, pdfChunkSep), nil
 }
 
 func TestWorker_PDFJob_MultiPage_TranslatesEachPageInOrder(t *testing.T) {
@@ -556,12 +574,10 @@ func TestWorker_PDFJob_MultiPage_TranslatesEachPageInOrder(t *testing.T) {
 		t.Fatalf("expected status=completed, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
 	}
 
-	// All three pages must be translated in order.
-	if len(transSvc.callOrder) != 3 {
-		t.Fatalf("expected 3 Translate calls, got %d", len(transSvc.callOrder))
-	}
-	if transSvc.callOrder[0] != page1 || transSvc.callOrder[1] != page2 || transSvc.callOrder[2] != page3 {
-		t.Fatalf("unexpected call order: %v", transSvc.callOrder)
+	// Translation calls are now chunked, so call count should be between 1 and
+	// page count. Output order is still guaranteed.
+	if len(transSvc.callOrder) < 1 || len(transSvc.callOrder) > 3 {
+		t.Fatalf("expected 1..3 Translate calls with chunking, got %d", len(transSvc.callOrder))
 	}
 
 	want := "Erste Seite\n\nZweite Seite\n\nDritte Seite"
@@ -574,4 +590,401 @@ func TestWorker_PDFJob_MultiPage_TranslatesEachPageInOrder(t *testing.T) {
 	if store.lastJob.Text != wantText {
 		t.Fatalf("expected job.Text=%q, got %q", wantText, store.lastJob.Text)
 	}
+}
+
+// concurrencyTrackingTranslSvc counts peak concurrent Translate invocations.
+type concurrencyTrackingTranslSvc struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+}
+
+func (m *concurrencyTrackingTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
+	m.active++
+	if m.active > m.maxActive {
+		m.maxActive = m.active
+	}
+	m.mu.Unlock()
+
+	// Small delay to allow concurrent goroutines to overlap and expose peak concurrency.
+	time.Sleep(5 * time.Millisecond)
+
+	m.mu.Lock()
+	m.active--
+	m.mu.Unlock()
+
+	parts := strings.Split(in.Text, pdfChunkSep)
+	for i, p := range parts {
+		parts[i] = "translated:" + p
+	}
+	return strings.Join(parts, pdfChunkSep), nil
+}
+
+// TestWorker_PDFJob_MultiPage_ConcurrencyBounded verifies that at most
+// pdfTranslateConcurrency page-translation goroutines run simultaneously.
+func TestWorker_PDFJob_MultiPage_ConcurrencyBounded(t *testing.T) {
+	pages := []string{
+		"Page one", "Page two", "Page three",
+		"Page four", "Page five", "Page six",
+	}
+
+	store := &mockWorkerStore{}
+	pdfSvc := &mockMultiPagePDFSvc{pages: pages}
+	transSvc := &concurrencyTrackingTranslSvc{}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-concurrency",
+		Type:     TypePDF,
+		FilePath: "/tmp/concurrency.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil || store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected completed job, got %v", store.lastJob)
+	}
+
+	transSvc.mu.Lock()
+	peak := transSvc.maxActive
+	transSvc.mu.Unlock()
+
+	if peak > pdfTranslateConcurrency {
+		t.Fatalf("peak concurrent translations %d exceeded limit %d", peak, pdfTranslateConcurrency)
+	}
+
+	// Output must contain all six pages joined by double newlines.
+	for _, p := range pages {
+		if !strings.Contains(store.lastJob.TranslatedText, "translated:"+p) {
+			t.Fatalf("missing translation for page %q in output", p)
+		}
+	}
+}
+
+// ---------- retry / rate-limit tests -------------------------------------
+
+// retryCountingTranslSvc fails with a 429-like error for the first `failTimes`
+// calls, then succeeds.
+type retryCountingTranslSvc struct {
+	mu        sync.Mutex
+	calls     int
+	failTimes int
+	result    string
+}
+
+func (m *retryCountingTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls <= m.failTimes {
+		return "", errors.New("litellm status 429: rate limit exceeded")
+	}
+	if m.result != "" {
+		return m.result, nil
+	}
+	return "translated:" + in.Text, nil
+}
+
+// TestWorker_TranslateWithRetry_SucceedsAfterRateLimit verifies that a 429
+// error on the first attempt is retried and ultimately succeeds.
+func TestWorker_TranslateWithRetry_SucceedsAfterRateLimit(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Hello world"}
+	// Fail twice with 429, succeed on third call.
+	transSvc := &retryCountingTranslSvc{failTimes: 2, result: "Hallo Welt"}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-retry-ok",
+		Type:     TypePDF,
+		FilePath: "/tmp/retry.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed after retry, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText != "Hallo Welt" {
+		t.Fatalf("expected 'Hallo Welt', got %q", store.lastJob.TranslatedText)
+	}
+
+	transSvc.mu.Lock()
+	totalCalls := transSvc.calls
+	transSvc.mu.Unlock()
+	if totalCalls != 3 {
+		t.Fatalf("expected 3 Translate calls (2 failures + 1 success), got %d", totalCalls)
+	}
+}
+
+// TestWorker_TranslateWithRetry_ExhaustsRetries verifies that after
+// translateMaxRetries+1 consecutive 429s the job is marked failed.
+func TestWorker_TranslateWithRetry_ExhaustsRetries(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Hello world"}
+	// Always fail with 429 — more times than allowed retries.
+	transSvc := &retryCountingTranslSvc{failTimes: translateMaxRetries + 10}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-retry-exhausted",
+		Type:     TypePDF,
+		FilePath: "/tmp/retry-fail.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusFailed {
+		t.Fatalf("expected status=failed after exhausted retries, got %s", store.lastJob.Status)
+	}
+	if store.lastJob.ErrorMsg == "" {
+		t.Fatal("expected non-empty ErrorMsg")
+	}
+
+	transSvc.mu.Lock()
+	totalCalls := transSvc.calls
+	transSvc.mu.Unlock()
+	// Exactly translateMaxRetries+1 attempts (initial + retries).
+	wantCalls := translateMaxRetries + 1
+	if totalCalls != wantCalls {
+		t.Fatalf("expected %d Translate calls, got %d", wantCalls, totalCalls)
+	}
+}
+
+// TestWorker_TranslateWithRetry_NonRetryableErrorIsImmediate verifies that a
+// non-429 error is NOT retried and the job fails immediately.
+func TestWorker_TranslateWithRetry_NonRetryableErrorIsImmediate(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Hello world"}
+	transSvc := &retryCountingTranslSvc{failTimes: 99, result: "never"}
+	// Override the error to be a non-rate-limit one.
+	nonRLSvc := &mockTranslSvc{err: errors.New("internal server error")}
+	w := NewWorker(store, nonRLSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-nonrl-error",
+		Type:     TypePDF,
+		FilePath: "/tmp/nonrl.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	_ = transSvc // unused in this sub-test
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusFailed {
+		t.Fatalf("expected status=failed, got %s", store.lastJob.Status)
+	}
+}
+
+// TestWorker_WithTranslateConcurrency_Option verifies that the WorkerOption
+// correctly overrides the default concurrency.
+func TestWorker_WithTranslateConcurrency_Option(t *testing.T) {
+	const customConcurrency = 5
+	pages := make([]string, 10)
+	for i := range pages {
+		pages[i] = fmt.Sprintf("Page %d content", i+1)
+	}
+
+	store := &mockWorkerStore{}
+	pdfSvc := &mockMultiPagePDFSvc{pages: pages}
+	transSvc := &concurrencyTrackingTranslSvc{}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0, WithTranslateConcurrency(customConcurrency))
+
+	job := &Job{
+		ID:       "pdf-custom-concurrency",
+		Type:     TypePDF,
+		FilePath: "/tmp/custom.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil || store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected completed job, got %v", store.lastJob)
+	}
+
+	transSvc.mu.Lock()
+	peak := transSvc.maxActive
+	transSvc.mu.Unlock()
+
+	if peak > customConcurrency {
+		t.Fatalf("peak concurrent translations %d exceeded custom limit %d", peak, customConcurrency)
+	}
+}
+
+type callCountingChunkSvc struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *callCountingChunkSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	parts := strings.Split(in.Text, pdfChunkSep)
+	for i, p := range parts {
+		parts[i] = "translated:" + p
+	}
+	return strings.Join(parts, pdfChunkSep), nil
+}
+
+func TestWorker_PDFJob_Chunking_ReducesLLMCallsAndPreservesOrder(t *testing.T) {
+	mkPage := func(tag string) string {
+		// 120 words/page means 6 pages produce 720 words total and should fit one chunk.
+		return strings.TrimSpace(strings.Repeat(tag+" ", 120))
+	}
+	pages := []string{
+		mkPage("one"),
+		mkPage("two"),
+		mkPage("three"),
+		mkPage("four"),
+		mkPage("five"),
+		mkPage("six"),
+	}
+
+	store := &mockWorkerStore{}
+	pdfSvc := &mockMultiPagePDFSvc{pages: pages}
+	transSvc := &callCountingChunkSvc{}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-chunking-reduced-calls",
+		Type:     TypePDF,
+		FilePath: "/tmp/chunked.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil || store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected completed job, got %v", store.lastJob)
+	}
+
+	transSvc.mu.Lock()
+	calls := transSvc.calls
+	transSvc.mu.Unlock()
+	if calls >= len(pages) {
+		t.Fatalf("expected fewer than %d LLM calls with chunking, got %d", len(pages), calls)
+	}
+
+	translatedPages := strings.Split(store.lastJob.TranslatedText, "\n\n")
+	if len(translatedPages) != len(pages) {
+		t.Fatalf("expected %d translated pages, got %d", len(pages), len(translatedPages))
+	}
+	for i, tp := range translatedPages {
+		wantPrefix := "translated:" + strings.SplitN(pages[i], " ", 2)[0]
+		if !strings.HasPrefix(tp, wantPrefix) {
+			t.Fatalf("page %d ordering mismatch: got prefix %q, want %q", i, tp[:min(20, len(tp))], wantPrefix)
+		}
+	}
+}
+
+func TestWorker_PDFJob_CustomChunkWordRange_ChangesCallCount(t *testing.T) {
+	mkPage := func(tag string) string {
+		return strings.TrimSpace(strings.Repeat(tag+" ", 120))
+	}
+	pages := []string{
+		mkPage("one"),
+		mkPage("two"),
+		mkPage("three"),
+		mkPage("four"),
+		mkPage("five"),
+		mkPage("six"),
+	}
+
+	store := &mockWorkerStore{}
+	pdfSvc := &mockMultiPagePDFSvc{pages: pages}
+	transSvc := &callCountingChunkSvc{}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0, WithPDFChunkWordRange(200, 300))
+
+	job := &Job{
+		ID:       "pdf-chunking-custom-range",
+		Type:     TypePDF,
+		FilePath: "/tmp/chunked-custom.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil || store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected completed job, got %v", store.lastJob)
+	}
+
+	transSvc.mu.Lock()
+	calls := transSvc.calls
+	transSvc.mu.Unlock()
+	if calls < 2 {
+		t.Fatalf("expected at least 2 calls with tighter chunk cap, got %d", calls)
+	}
+}
+
+func TestWorker_WithPDFChunkWordRange_ClampsInvalidRange(t *testing.T) {
+	w := NewWorker(&mockWorkerStore{}, &mockTranslSvc{}, &mockPDFSvc{}, nil, 0, WithPDFChunkWordRange(900, 300))
+
+	if w.chunkMinWords != 900 {
+		t.Fatalf("expected chunkMinWords=900, got %d", w.chunkMinWords)
+	}
+	if w.chunkMaxWords != 900 {
+		t.Fatalf("expected chunkMaxWords to clamp to 900, got %d", w.chunkMaxWords)
+	}
+}
+
+func TestWorker_PDFJob_ProgressCounters_ReachTotalPages(t *testing.T) {
+	store := &mockWorkerStore{}
+	page1 := strings.TrimSpace(strings.Repeat("one ", 120))
+	page2 := strings.TrimSpace(strings.Repeat("two ", 120))
+	page3 := strings.TrimSpace(strings.Repeat("three ", 120))
+
+	pdfSvc := &mockMultiPagePDFSvc{pages: []string{page1, page2, page3}}
+	transSvc := &mockPerPageTranslSvc{translations: map[string]string{
+		page1: "eins",
+		page2: "zwei",
+		page3: "drei",
+	}}
+
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+	job := &Job{
+		ID:       "pdf-progress",
+		Type:     TypePDF,
+		FilePath: "/tmp/progress.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s", store.lastJob.Status)
+	}
+	if store.lastJob.TotalPages != 3 {
+		t.Fatalf("expected total_pages=3, got %d", store.lastJob.TotalPages)
+	}
+	if store.lastJob.ProcessedPages != 3 {
+		t.Fatalf("expected processed_pages=3, got %d", store.lastJob.ProcessedPages)
+	}
+	if store.callCount < 5 {
+		t.Fatalf("expected multiple updates including progress updates, got callCount=%d", store.callCount)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
