@@ -8,7 +8,9 @@ package pglog
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,9 +61,9 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	// Collect the structured fields from the record.
-	fields := make(map[string]string, 6)
+	fields := make(map[string]slog.Value, 10)
 	r.Attrs(func(a slog.Attr) bool {
-		fields[a.Key] = a.Value.String()
+		fields[a.Key] = a.Value
 		return true
 	})
 
@@ -70,23 +72,61 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 // insertOCREvent writes one row to ocr_events in the background.
-func (h *Handler) insertOCREvent(fields map[string]string, recordedAt time.Time) {
+func (h *Handler) insertOCREvent(fields map[string]slog.Value, recordedAt time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	const q = `
 		INSERT INTO ocr_events
-			(recorded_at, job_id, file, lang, target, extraction_failure_reason, outcome)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+			(recorded_at, job_id, file, lang, target, extraction_failure_reason, outcome, extract_ms, ocr_ms, translate_ms, total_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
 	// Best-effort: ignore Postgres errors — stdout already has the event.
 	_, _ = h.pool.Exec(ctx, q,
 		recordedAt,
-		fields["job_id"],
-		fields["file"],
-		fields["lang"],
-		fields["target"],
-		fields["extraction_failure_reason"],
-		"succeeded", // only successful OCR fallbacks emit this message
+		fieldString(fields, "job_id"),
+		fieldString(fields, "file"),
+		fieldString(fields, "lang"),
+		fieldString(fields, "target"),
+		fieldString(fields, "extraction_failure_reason"),
+		fieldString(fields, "outcome"),
+		fieldInt64(fields, "extract_ms"),
+		fieldInt64(fields, "ocr_ms"),
+		fieldInt64(fields, "translate_ms"),
+		fieldInt64(fields, "total_ms"),
 	)
+}
+
+func fieldString(fields map[string]slog.Value, key string) string {
+	v, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	if v.Kind() == slog.KindString {
+		return v.String()
+	}
+	return fmt.Sprint(v.Any())
+}
+
+func fieldInt64(fields map[string]slog.Value, key string) int64 {
+	v, ok := fields[key]
+	if !ok {
+		return 0
+	}
+	switch v.Kind() {
+	case slog.KindInt64:
+		return v.Int64()
+	case slog.KindUint64:
+		return int64(v.Uint64())
+	case slog.KindFloat64:
+		return int64(v.Float64())
+	case slog.KindString:
+		i, err := strconv.ParseInt(v.String(), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return i
+	default:
+		return 0
+	}
 }

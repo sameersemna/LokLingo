@@ -850,3 +850,108 @@ body {
   }
 }
 
+/* ─── PDF Jobs Panel ─────────────────────────────── */
+
+.pdf-job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.pdf-job-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.pdf-job-row:last-child {
+  border-bottom: none;
+}
+
+.pdf-job-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+}
+
+.pdf-job-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.pdf-job-filename {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pdf-job-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.pdf-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.pdf-job-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.pdf-job-pending  { background: #f5f5f5; color: #666; border-color: #ddd; }
+.pdf-job-processing { background: #eef4ff; color: #2463eb; border-color: #b3cef9; }
+.pdf-job-done     { background: #eaf8f0; color: #146c3a; border-color: #98ddb5; }
+.pdf-job-failed   { background: #fff0f0; color: #c0392b; border-color: #f5b7b7; }
+
+:root[data-theme="dark"] .pdf-job-pending    { background: #1e1e24; color: #888; border-color: #333; }
+:root[data-theme="dark"] .pdf-job-processing { background: #1a2540; color: #7ab2f7; border-color: #2c4a80; }
+:root[data-theme="dark"] .pdf-job-done       { background: #0d2919; color: #4caf82; border-color: #1a5c38; }
+:root[data-theme="dark"] .pdf-job-failed     { background: #2b1010; color: #e87c7c; border-color: #5a2020; }
+
+.pdf-spinner {
+  width: 0.7em;
+  height: 0.7em;
+  border-width: 1.5px;
+  vertical-align: -0.05em;
+  border-color: rgba(128, 128, 128, 0.3);
+  border-top-color: currentColor;
+}
+
+.pdf-job-result {
+  padding: 0.6rem 1rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.pdf-job-error {
+  padding: 0.45rem 1rem;
+  font-size: 0.8rem;
+  color: var(--error);
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+

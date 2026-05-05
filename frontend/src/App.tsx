@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { translate } from "./api/translate"
+import { translate, uploadPDF } from "./api/translate"
 import { extractText } from "./api/ocr"
 import { getReadiness, type ReadinessResponse } from "./api/health"
+import { PdfJobsPanel, saveStoredJob } from "./PdfJobsPanel"
 import "./App.css"
 
 const LANGUAGES = [
@@ -64,7 +65,10 @@ function App() {
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
+  const [pdfLoading, setPdfLoading] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  const [showPdfJobs, setShowPdfJobs] = useState(false)
+  const pdfJobsKey = useRef(0)
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
@@ -164,8 +168,34 @@ function App() {
   }
 
   const handleOCRFile = async (file: File) => {
+    // PDF files → async translate_pdf job (enqueue + track in PDF Jobs panel)
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      setPdfLoading(true)
+      try {
+        const { job_id } = await uploadPDF(file, sourceLang, targetLang)
+        saveStoredJob({
+          job_id,
+          filename: file.name,
+          source: sourceLang,
+          target: targetLang,
+          submittedAt: Date.now(),
+        })
+        // Force panel refresh by bumping key, then show it
+        pdfJobsKey.current += 1
+        setShowPdfJobs(true)
+        setShowHistory(false)
+        pushToast('PDF uploaded — translating in background', 'success')
+      } catch (err) {
+        pushToast(err instanceof Error ? err.message : 'PDF upload failed', 'error')
+      } finally {
+        setPdfLoading(false)
+        if (fileRef.current) fileRef.current.value = ""
+      }
+      return
+    }
+
     if (!file.type.startsWith("image/")) {
-      pushToast("Please upload an image file", "error")
+      pushToast("Please upload an image or PDF file", "error")
       return
     }
     setOcrLoading(true)
@@ -199,9 +229,18 @@ function App() {
           <h1>LokLingo</h1>
           <div className="header-actions">
             <button
+              className={`icon-btn${showPdfJobs ? " is-active" : ""}`}
+              type="button"
+              onClick={() => { setShowPdfJobs(p => !p); setShowHistory(false) }}
+              aria-pressed={showPdfJobs}
+              title="PDF translation jobs"
+            >
+              📄 PDF Jobs
+            </button>
+            <button
               className={`icon-btn${showHistory ? " is-active" : ""}`}
               type="button"
-              onClick={() => setShowHistory(h => !h)}
+              onClick={() => { setShowHistory(h => !h); setShowPdfJobs(false) }}
               aria-pressed={showHistory}
               title="Translation history"
             >
@@ -255,6 +294,11 @@ function App() {
           )}
         </div>
       </header>
+
+      {/* PDF Jobs panel */}
+      {showPdfJobs && (
+        <PdfJobsPanel key={pdfJobsKey.current} onToast={pushToast} />
+      )}
 
       {/* History drawer */}
       {showHistory && (
@@ -352,10 +396,12 @@ function App() {
                   id="ocr-file"
                   onChange={e => e.target.files?.[0] && handleOCRFile(e.target.files[0])}
                 />
-                <label htmlFor="ocr-file" className="icon-btn" title="Extract text from image (OCR)">
+                <label htmlFor="ocr-file" className="icon-btn" title="Extract text from image (OCR) or queue a PDF translation">
                   {ocrLoading
                     ? <><span className="spinner spinner-sm" aria-hidden="true" /> Extracting…</>
-                    : "📷 OCR"
+                    : pdfLoading
+                    ? <><span className="spinner spinner-sm" aria-hidden="true" /> Uploading…</>
+                    : "📷 OCR / PDF"
                   }
                 </label>
                 {sourceText && (
@@ -374,10 +420,10 @@ function App() {
           {/* Output panel */}
           <div className="panel">
             <div className="output-body">
-              {loading ? (
+              {loading || pdfLoading ? (
                 <span className="status">
                   <span className="spinner" aria-hidden="true" />
-                  Translating…
+                  {pdfLoading ? 'Translating PDF…' : 'Translating…'}
                 </span>
               ) : (
                 <div className="result-text">{result}</div>
@@ -399,10 +445,12 @@ function App() {
           <button
             className="translate-btn"
             onClick={handleTranslate}
-            disabled={loading || !sourceText.trim()}
+            disabled={loading || pdfLoading || !sourceText.trim()}
           >
             {loading
               ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating…</>
+              : pdfLoading
+              ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating PDF…</>
               : "Translate"}
           </button>
         </div>

@@ -6,11 +6,11 @@ import logging
 import threading
 from typing import Annotated
 
+import pypdfium2 as pdfium
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
-from pdf2image import convert_from_bytes
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -201,7 +201,12 @@ def ocr_pdf(req: OCRPdfRequest) -> OCRPdfResponse:
         raise HTTPException(status_code=400, detail="Invalid base64 PDF data")
 
     try:
-        images = convert_from_bytes(pdf_bytes, dpi=req.dpi)
+        pdf_doc = pdfium.PdfDocument(pdf_bytes)
+        scale = req.dpi / 72  # PDFium native resolution is 72 DPI
+        images: list[Image.Image] = [
+            page.render(scale=scale, rotation=0).to_pil()
+            for page in pdf_doc
+        ]
     except Exception as exc:
         logger.exception("PDF→image conversion error: %s", exc)
         raise HTTPException(

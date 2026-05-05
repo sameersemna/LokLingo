@@ -68,7 +68,7 @@ func main() {
 	translationService := services.NewTranslationService(cfg)
 	pdfService := internalservices.NewPDFService()
 	ocrClient := internalservices.NewOCRClient(cfg.OCRServiceURL)
-	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient)
+	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient, cfg.MaxPDFPages)
 	go worker.Run(ctx)
 
 	// --- HTTP server ---
@@ -89,13 +89,15 @@ func main() {
 	app.Get("/ready", handlers.NewReadinessHandler(cfg).Ready)
 
 	translateHandler := handlers.NewTranslateHandler(translationService, jobStore)
-	jobsHandler := handlers.NewJobsHandler(jobStore)
+	jobsHandler := handlers.NewJobsHandler(jobStore, cfg.MaxPDFUploadBytes)
+	ocrMetricsHandler := handlers.NewOCRMetricsHandler(pgPool)
 
 	api := app.Group("/api/v1")
 	api.Post("/translate", translateHandler.Translate)
 	api.Post("/jobs", jobsHandler.CreateJob)
 	api.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)
+	api.Get("/metrics/ocr", middleware.InternalToken(cfg.InternalToken), ocrMetricsHandler.Summary)
 
 	slog.Info("LokLingo backend starting", "port", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {

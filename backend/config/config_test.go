@@ -53,3 +53,16 @@ func TestConfigValidatePassesForCompleteConfig(t *testing.T) {
 		t.Fatalf("expected valid config, got %v", err)
 	}
 }
+
+func TestLoadReadsPDFGuardrailEnvValues(t *testing.T) {
+	t.Setenv("MAX_PDF_UPLOAD_BYTES", "1048576")
+	t.Setenv("MAX_PDF_PAGES", "150")
+
+	cfg := Load()
+	if cfg.MaxPDFUploadBytes != 1048576 {
+		t.Fatalf("expected MaxPDFUploadBytes=1048576, got %d", cfg.MaxPDFUploadBytes)
+	}
+	if cfg.MaxPDFPages != 150 {
+		t.Fatalf("expected MaxPDFPages=150, got %d", cfg.MaxPDFPages)
+	}
+}

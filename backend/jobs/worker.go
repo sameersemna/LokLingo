@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,20 +16,42 @@ import (
 
 // Worker dequeues jobs and executes translations in the background.
 type Worker struct {
-	store      Store
-	service    services.TranslationService
-	pdfService internalservices.PDFService
-	ocrClient  internalservices.OCRClient // optional fallback for image-based PDFs
+	store       Store
+	service     services.TranslationService
+	pdfService  internalservices.PDFService
+	ocrClient   internalservices.OCRClient // optional fallback for image-based PDFs
+	maxPDFPages int
 }
 
 // NewWorker constructs a Worker. ocrClient may be nil to disable OCR fallback.
-func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService, ocrClient internalservices.OCRClient) *Worker {
-	return &Worker{store: store, service: service, pdfService: pdfService, ocrClient: ocrClient}
+func NewWorker(store Store, service services.TranslationService, pdfService internalservices.PDFService, ocrClient internalservices.OCRClient, maxPDFPages int) *Worker {
+	if maxPDFPages <= 0 {
+		maxPDFPages = 300
+	}
+	return &Worker{store: store, service: service, pdfService: pdfService, ocrClient: ocrClient, maxPDFPages: maxPDFPages}
 }
 
 // Run blocks, processing jobs until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	slog.Info("translation worker started")
+
+	// Remove stale upload files left by a previous crashed worker run.
+	cleanStaleUploads(PDFUploadDir, 24*time.Hour)
+
+	// Periodic cleanup: every hour remove uploads older than 24 h.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cleanStaleUploads(PDFUploadDir, 24*time.Hour)
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -68,7 +92,66 @@ func normalizeText(s string) string {
 	return strings.Join(out, "\n\n")
 }
 
+// PDFUploadDir is the shared location where CreatePDFJob writes uploaded files.
+// Workers read from here; both sides must agree on this path.
+const PDFUploadDir = "/tmp/loklingo"
+
+// cleanStaleUploads removes files under dir that are older than maxAge.
+// Errors are logged but never propagated — this is best-effort housekeeping.
+func cleanStaleUploads(dir string, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("stale_pdf_cleanup: cannot read upload dir", "dir", dir, "err", err)
+		}
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			path := filepath.Join(dir, e.Name())
+			if !strings.HasSuffix(path, ".pdf") {
+				// Only remove files we created; ignore anything else in /tmp/loklingo.
+				continue
+			}
+			if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				slog.Warn("stale_pdf_cleanup: remove failed", "file", path, "err", rerr)
+			} else {
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		slog.Info("stale_pdf_cleanup: removed stale uploads", "dir", dir, "count", removed)
+	}
+}
+
 func (w *Worker) process(ctx context.Context, job *Job) {
+	// Best-effort: remove the uploaded PDF once the job reaches a terminal state.
+	defer func() {
+		if job.Type == TypePDF && job.FilePath != "" {
+			if err := os.Remove(job.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				slog.Warn("pdf_cleanup_failed", "job_id", job.ID, "file", job.FilePath, "err", err)
+			}
+		}
+	}()
+
+	startedAt := time.Now()
+	var extractMS int64
+	var ocrMS int64
+	var translateMS int64
+	var ocrTriggered bool
+	var ocrReason string
+	var ocrOutcome string
+
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
 
 	// For PDF jobs: extract text from the file before translating.
@@ -82,12 +165,29 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			return
 		}
+		if w.maxPDFPages > 0 {
+			pageCount, pageErr := w.pdfService.PageCount(job.FilePath)
+			if pageErr != nil {
+				slog.Warn("pdf page count unavailable", "job_id", job.ID, "file", job.FilePath, "err", pageErr)
+			} else if pageCount > w.maxPDFPages {
+				slog.Warn("pdf_guardrail_rejected", "job_id", job.ID, "file", job.FilePath, "page_count", pageCount, "max_pdf_pages", w.maxPDFPages)
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("pdf has %d pages; max allowed is %d", pageCount, w.maxPDFPages)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update job result (pdf guardrail rejected)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+		}
+		extractStart := time.Now()
 		extracted, err := w.pdfService.ExtractText(job.FilePath)
+		extractMS = time.Since(extractStart).Milliseconds()
 		if err != nil || extracted == "" {
 			reason := "empty text"
 			if err != nil {
 				reason = err.Error()
 			}
+			ocrReason = reason
 			if w.ocrClient == nil {
 				slog.Error("pdf text extraction failed, no OCR fallback configured", "job_id", job.ID, "file", job.FilePath, "reason", reason)
 				job.Status = StatusFailed
@@ -98,23 +198,32 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				return
 			}
 			slog.Warn("pdf text extraction failed, falling back to OCR", "job_id", job.ID, "file", job.FilePath, "reason", reason)
+			ocrTriggered = true
+			ocrStart := time.Now()
 			ocred, ocrErr := w.ocrClient.ExtractText(job.FilePath, job.Lang)
+			ocrMS = time.Since(ocrStart).Milliseconds()
 			if ocrErr != nil {
 				slog.Error("OCR fallback also failed", "job_id", job.ID, "file", job.FilePath, "err", ocrErr)
 				job.Status = StatusFailed
 				job.ErrorMsg = fmt.Sprintf("pdf extraction failed: %s; OCR fallback failed: %v", reason, ocrErr)
+				ocrOutcome = "also_failed"
+				slog.Info("ocr_fallback_triggered",
+					"job_id", job.ID,
+					"file", job.FilePath,
+					"lang", job.Lang,
+					"target", job.Target,
+					"extraction_failure_reason", ocrReason,
+					"outcome", ocrOutcome,
+					"extract_ms", extractMS,
+					"ocr_ms", ocrMS,
+					"translate_ms", translateMS,
+					"total_ms", time.Since(startedAt).Milliseconds(),
+				)
 				if uerr := w.store.Update(ctx, job); uerr != nil {
 					slog.Error("update job result (OCR fallback failed)", "job_id", job.ID, "err", uerr)
 				}
 				return
 			}
-			slog.Info("ocr_fallback_triggered",
-				"job_id", job.ID,
-				"file", job.FilePath,
-				"lang", job.Lang,
-				"target", job.Target,
-				"extraction_failure_reason", reason,
-			)
 			extracted = ocred
 			job.ProcessingMethod = "ocr"
 		} else {
@@ -128,6 +237,21 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		slog.Info("cache hit", "job_id", job.ID)
 		job.Status = StatusCompleted
 		job.TranslatedText = cached
+		if ocrTriggered {
+			ocrOutcome = "cached"
+			slog.Info("ocr_fallback_triggered",
+				"job_id", job.ID,
+				"file", job.FilePath,
+				"lang", job.Lang,
+				"target", job.Target,
+				"extraction_failure_reason", ocrReason,
+				"outcome", ocrOutcome,
+				"extract_ms", extractMS,
+				"ocr_ms", ocrMS,
+				"translate_ms", translateMS,
+				"total_ms", time.Since(startedAt).Milliseconds(),
+			)
+		}
 		if err := w.store.Update(ctx, job); err != nil {
 			slog.Error("update job result (cache hit)", "job_id", job.ID, "err", err)
 		}
@@ -140,19 +264,27 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		slog.Error("update job to processing", "job_id", job.ID, "err", err)
 	}
 
+	translateStart := time.Now()
 	translated, err := w.service.Translate(services.TranslationInput{
 		Text:   job.Text,
 		Source: job.Source,
 		Target: job.Target,
 		Ctx:    ctx,
 	})
+	translateMS = time.Since(translateStart).Milliseconds()
 	if err != nil {
 		slog.Error("translation failed", "job_id", job.ID, "err", err)
 		job.Status = StatusFailed
 		job.ErrorMsg = err.Error()
+		if ocrTriggered {
+			ocrOutcome = "translation_failed"
+		}
 	} else {
 		job.Status = StatusCompleted
 		job.TranslatedText = translated
+		if ocrTriggered {
+			ocrOutcome = "succeeded"
+		}
 		// Populate cache so future identical requests skip the LLM.
 		if cerr := w.store.SetCached(ctx, job.Text, job.Source, job.Target, translated); cerr != nil {
 			slog.Warn("failed to cache translation", "job_id", job.ID, "err", cerr)
@@ -161,6 +293,20 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 	if err := w.store.Update(ctx, job); err != nil {
 		slog.Error("update job result", "job_id", job.ID, "err", err)
+	}
+	if ocrTriggered {
+		slog.Info("ocr_fallback_triggered",
+			"job_id", job.ID,
+			"file", job.FilePath,
+			"lang", job.Lang,
+			"target", job.Target,
+			"extraction_failure_reason", ocrReason,
+			"outcome", ocrOutcome,
+			"extract_ms", extractMS,
+			"ocr_ms", ocrMS,
+			"translate_ms", translateMS,
+			"total_ms", time.Since(startedAt).Milliseconds(),
+		)
 	}
 	slog.Info("job finished", "job_id", job.ID, "status", job.Status)
 }

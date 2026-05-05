@@ -16,12 +16,16 @@ import (
 
 // JobsHandler holds dependencies for the async job endpoints.
 type JobsHandler struct {
-	store jobs.Store
+	store             jobs.Store
+	maxPDFUploadBytes int64
 }
 
 // NewJobsHandler constructs a JobsHandler.
-func NewJobsHandler(store jobs.Store) *JobsHandler {
-	return &JobsHandler{store: store}
+func NewJobsHandler(store jobs.Store, maxPDFUploadBytes int64) *JobsHandler {
+	if maxPDFUploadBytes <= 0 {
+		maxPDFUploadBytes = 25 * 1024 * 1024
+	}
+	return &JobsHandler{store: store, maxPDFUploadBytes: maxPDFUploadBytes}
 }
 
 // CreateJob handles POST /api/v1/jobs.
@@ -102,16 +106,17 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
-const pdfUploadDir = "/tmp/loklingo"
-
 // CreatePDFJob handles POST /api/v1/jobs/pdf.
 // Accepts multipart/form-data with a PDF file upload, saves it under
-// /tmp/loklingo, enqueues a translate_pdf job, and returns 202 Accepted
+// jobs.PDFUploadDir, enqueues a translate_pdf job, and returns 202 Accepted
 // with a job_id for polling. The file is NOT processed here.
 func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	file, err := c.FormFile("file")
 	if err != nil {
 		return errResponse(c, fiber.StatusBadRequest, "file is required (multipart field: file)")
+	}
+	if file.Size > h.maxPDFUploadBytes {
+		return errResponse(c, fiber.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds max size (%d bytes)", h.maxPDFUploadBytes))
 	}
 	target := c.FormValue("target")
 	if target == "" {
@@ -123,13 +128,13 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	}
 	lang := c.FormValue("lang")
 
-	if err := os.MkdirAll(pdfUploadDir, 0o700); err != nil {
+	if err := os.MkdirAll(jobs.PDFUploadDir, 0o700); err != nil {
 		slog.Error("failed to create upload dir", "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to prepare upload directory")
 	}
 
 	fileName := fmt.Sprintf("%s.pdf", uuid.NewString())
-	filePath := filepath.Join(pdfUploadDir, fileName)
+	filePath := filepath.Join(jobs.PDFUploadDir, fileName)
 	if err := c.SaveFile(file, filePath); err != nil {
 		slog.Error("failed to save uploaded pdf", "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to save uploaded file")

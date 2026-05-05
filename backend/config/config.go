@@ -3,32 +3,39 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	AppEnv         string
-	Port           string
-	LiteLLMBaseURL string
-	LiteLLMAPIKey  string
-	LiteLLMModel   string
-	OCRServiceURL  string
-	RedisURL       string
-	PostgresDSN    string // optional; enables Postgres analytics sink when set
+	AppEnv            string
+	Port              string
+	LiteLLMBaseURL    string
+	LiteLLMAPIKey     string
+	LiteLLMModel      string
+	OCRServiceURL     string
+	RedisURL          string
+	PostgresDSN       string // optional; enables Postgres analytics sink when set
+	MaxPDFUploadBytes int64
+	MaxPDFPages       int
+	InternalToken     string // optional; enforces X-Internal-Token on internal routes
 }
 
 func Load() *Config {
 	appEnv := getEnv("APP_ENV", "development")
 
 	return &Config{
-		AppEnv:         appEnv,
-		Port:           getEnv("PORT", "8080"),
-		LiteLLMBaseURL: getEnv("LITELLM_BASE_URL", ""),
-		LiteLLMAPIKey:  getEnv("LITELLM_API_KEY", ""),
-		LiteLLMModel:   getEnv("LITELLM_MODEL", ""),
-		OCRServiceURL:  getEnv("OCR_SERVICE_URL", ""),
-		RedisURL:       resolveRedisURL(appEnv),
-		PostgresDSN:    getEnv("POSTGRES_DSN", ""),
+		AppEnv:            appEnv,
+		Port:              getEnv("PORT", "8080"),
+		LiteLLMBaseURL:    getEnv("LITELLM_BASE_URL", ""),
+		LiteLLMAPIKey:     getEnv("LITELLM_API_KEY", ""),
+		LiteLLMModel:      getEnv("LITELLM_MODEL", ""),
+		OCRServiceURL:     getEnv("OCR_SERVICE_URL", ""),
+		RedisURL:          resolveRedisURL(appEnv),
+		PostgresDSN:       getEnv("POSTGRES_DSN", ""),
+		MaxPDFUploadBytes: getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
+		MaxPDFPages:       getEnvInt("MAX_PDF_PAGES", 300),
+		InternalToken:     getEnv("INTERNAL_TOKEN", ""),
 	}
 }
 
@@ -72,4 +79,28 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvInt64(key string, fallback int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }

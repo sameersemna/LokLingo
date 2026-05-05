@@ -60,7 +60,7 @@ func newMultipartPDFRequest(t *testing.T, pdfData []byte, target, source string)
 }
 
 func newPDFJobsApp() (*fiber.App, *JobsHandler) {
-	h := NewJobsHandler(&mockStore{})
+	h := NewJobsHandler(&mockStore{}, 25*1024*1024)
 	app := fiber.New()
 	app.Post("/jobs/pdf", h.CreatePDFJob)
 	return app, h
@@ -116,7 +116,7 @@ func TestCreatePDFJob_ValidRequest_Returns202AndJobID(t *testing.T) {
 
 func TestCreatePDFJob_SourceDefaultsToAuto(t *testing.T) {
 	cs := &captureStore{}
-	h := NewJobsHandler(cs)
+	h := NewJobsHandler(cs, 25*1024*1024)
 	app := fiber.New()
 	app.Post("/jobs/pdf", h.CreatePDFJob)
 
@@ -139,7 +139,7 @@ func TestCreatePDFJob_SourceDefaultsToAuto(t *testing.T) {
 
 func TestCreatePDFJob_JobTypeIsPDF(t *testing.T) {
 	cs := &captureStore{}
-	h := NewJobsHandler(cs)
+	h := NewJobsHandler(cs, 25*1024*1024)
 	app := fiber.New()
 	app.Post("/jobs/pdf", h.CreatePDFJob)
 
@@ -155,5 +155,24 @@ func TestCreatePDFJob_JobTypeIsPDF(t *testing.T) {
 	}
 	if cs.job.FilePath == "" {
 		t.Fatal("expected non-empty FilePath on enqueued job")
+	}
+}
+
+func TestCreatePDFJob_FileTooLarge_Returns413(t *testing.T) {
+	cs := &captureStore{}
+	h := NewJobsHandler(cs, 4)
+	app := fiber.New()
+	app.Post("/jobs/pdf", h.CreatePDFJob)
+
+	req := newMultipartPDFRequest(t, []byte("12345"), "de", "en")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	}
+	if cs.job != nil {
+		t.Fatal("expected no enqueued job when file is too large")
 	}
 }

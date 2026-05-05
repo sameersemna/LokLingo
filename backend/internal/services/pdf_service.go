@@ -11,6 +11,8 @@ import (
 type PDFService interface {
 	// ExtractText reads the PDF at filePath and returns its full plain text.
 	ExtractText(filePath string) (string, error)
+	// PageCount returns the number of pages in the PDF.
+	PageCount(filePath string) (int, error)
 }
 
 type pdfService struct{}
@@ -55,4 +57,18 @@ func (s *pdfService) ExtractText(filePath string) (string, error) {
 		return "", fmt.Errorf("pdf: no text content found in %q (may be image-only; OCR required)", filePath)
 	}
 	return result, nil
+}
+
+func (s *pdfService) PageCount(filePath string) (int, error) {
+	f, r, err := pdf.Open(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("pdf: open %q: %w", filePath, err)
+	}
+	defer f.Close()
+
+	totalPages := r.NumPage()
+	if totalPages <= 0 {
+		return 0, fmt.Errorf("pdf: %q contains no pages", filePath)
+	}
+	return totalPages, nil
 }

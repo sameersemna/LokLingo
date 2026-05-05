@@ -34,6 +34,7 @@ services:
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
       REDIS_URL: "${REDIS_URL:-}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-loklingo}:${POSTGRES_PASSWORD}@loklingo-postgres:5432/loklingo"
+      INTERNAL_TOKEN: "${INTERNAL_TOKEN:-}"
     depends_on:
       loklingo-ocr:
         condition: service_healthy

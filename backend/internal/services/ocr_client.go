@@ -1,12 +1,16 @@
 package services
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -36,20 +40,16 @@ func NewOCRClient(ocrBaseURL string) OCRClient {
 	}
 }
 
-// ocrPDFRequest mirrors the OCR service's OCRPdfRequest Pydantic model.
-type ocrPDFRequest struct {
-	PDFB64 string `json:"pdf_b64"`
-	Lang   string `json:"lang"`
-	DPI    int    `json:"dpi"`
-}
-
 // ocrPDFResponse mirrors the relevant subset of OCRPdfResponse.
 type ocrPDFResponse struct {
 	Text string `json:"text"`
 }
 
-// ExtractText encodes the PDF as base64, POSTs to <baseURL>/ocr/pdf, and
-// returns the top-level "text" field from the response.
+const ocrPDFPath = "/ocr/pdf"
+
+// ExtractText streams the PDF to the OCR endpoint. It first tries
+// multipart/form-data (future contract), then falls back to streamed JSON
+// base64 (current contract) for compatibility.
 func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 	if c.baseURL == "" {
 		return "", fmt.Errorf("ocr: service URL is not configured")
@@ -57,29 +57,133 @@ func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 	if lang == "" {
 		lang = "auto"
 	}
-
-	pdfBytes, err := os.ReadFile(filePath)
-	if err != nil {
+	if _, err := os.Stat(filePath); err != nil {
 		return "", fmt.Errorf("ocr: read file %q: %w", filePath, err)
 	}
 
-	reqBody := ocrPDFRequest{
-		PDFB64: base64.StdEncoding.EncodeToString(pdfBytes),
-		Lang:   lang,
-		DPI:    200,
-	}
-	encoded, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("ocr: marshal request: %w", err)
+	text, status, err := c.extractTextMultipart(filePath, lang)
+	if err == nil {
+		return text, nil
 	}
 
-	resp, err := c.httpClient.Post(
-		c.baseURL+"/ocr/pdf",
-		"application/json",
-		bytes.NewReader(encoded),
-	)
+	// The currently deployed OCR service expects JSON. Keep compatibility
+	// without buffering the whole file in memory.
+	if status == http.StatusBadRequest || status == http.StatusUnsupportedMediaType || status == http.StatusUnprocessableEntity {
+		return c.extractTextJSONStream(filePath, lang)
+	}
+
+	return "", err
+}
+
+func (c *ocrClient) extractTextMultipart(filePath, lang string) (string, int, error) {
+	file, err := os.Open(filePath)
 	if err != nil {
-		return "", fmt.Errorf("ocr: POST /ocr/pdf: %w", err)
+		return "", 0, fmt.Errorf("ocr: read file %q: %w", filePath, err)
+	}
+	defer file.Close()
+
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() {
+		defer pw.Close()
+
+		if err := mw.WriteField("lang", lang); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart lang field: %w", err))
+			return
+		}
+		if err := mw.WriteField("dpi", "200"); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart dpi field: %w", err))
+			return
+		}
+
+		part, err := mw.CreateFormFile("file", filepath.Base(filePath))
+		if err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: create multipart file part: %w", err))
+			return
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: stream multipart file: %w", err))
+			return
+		}
+		if err := mw.Close(); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: finalize multipart body: %w", err))
+			return
+		}
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+ocrPDFPath, pr)
+	if err != nil {
+		return "", 0, fmt.Errorf("ocr: build multipart request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("ocr: POST %s (multipart): %w", ocrPDFPath, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.StatusCode, fmt.Errorf("ocr: service returned HTTP %d", resp.StatusCode)
+	}
+
+	text, err := decodeOCRText(resp.Body)
+	if err != nil {
+		return "", resp.StatusCode, err
+	}
+	return text, resp.StatusCode, nil
+}
+
+func (c *ocrClient) extractTextJSONStream(filePath, lang string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("ocr: read file %q: %w", filePath, err)
+	}
+	defer file.Close()
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		defer pw.Close()
+
+		bw := bufio.NewWriter(pw)
+		if _, err := bw.WriteString(`{"pdf_b64":"`); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: write json prefix: %w", err))
+			return
+		}
+
+		enc := base64.NewEncoder(base64.StdEncoding, bw)
+		if _, err := io.Copy(enc, file); err != nil {
+			_ = enc.Close()
+			_ = pw.CloseWithError(fmt.Errorf("ocr: stream base64 payload: %w", err))
+			return
+		}
+		if err := enc.Close(); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: close base64 encoder: %w", err))
+			return
+		}
+
+		tail := `","lang":` + strconv.Quote(lang) + `,"dpi":200}`
+		if _, err := bw.WriteString(tail); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: write json tail: %w", err))
+			return
+		}
+		if err := bw.Flush(); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("ocr: flush json stream: %w", err))
+			return
+		}
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+ocrPDFPath, pr)
+	if err != nil {
+		return "", fmt.Errorf("ocr: build JSON request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ocr: POST %s (json): %w", ocrPDFPath, err)
 	}
 	defer resp.Body.Close()
 
@@ -87,8 +191,12 @@ func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 		return "", fmt.Errorf("ocr: service returned HTTP %d", resp.StatusCode)
 	}
 
+	return decodeOCRText(resp.Body)
+}
+
+func decodeOCRText(r io.Reader) (string, error) {
 	var result ocrPDFResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(r).Decode(&result); err != nil {
 		return "", fmt.Errorf("ocr: decode response: %w", err)
 	}
 	if result.Text == "" {

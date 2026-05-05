@@ -13,66 +13,20 @@ export interface TranslateResponse {
 
 // --- async jobs API types ---
 
-interface JobResponse {
+export interface JobResponse {
   job_id: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
   translated_text?: string
   source?: string
   target?: string
   error?: string
+  processing_method?: 'pdf_text' | 'ocr'
 }
 
 const POLL_INTERVAL_MS = 600
 const MAX_POLLS = 100 // 60 s timeout
 
-/**
- * Translates text via the async jobs API (POST /api/v1/jobs → poll GET /api/v1/jobs/:id).
- * Falls back to an error if the job fails or times out.
- */
-export async function translate(req: TranslateRequest): Promise<TranslateResponse> {
-  // 1. Enqueue
-  const enqueueRes = await fetch('/api/v1/jobs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-  })
-
-  if (!enqueueRes.ok) {
-    const err = await enqueueRes.json().catch(() => ({ error: 'Unknown error' }))
-    throw buildTranslateError(enqueueRes.status, err)
-  }
-
-  const { job_id }: { job_id: string } = await enqueueRes.json()
-
-  // 2. Poll until done
-  for (let i = 0; i < MAX_POLLS; i++) {
-    await sleep(POLL_INTERVAL_MS)
-
-    const pollRes = await fetch(`/api/v1/jobs/${job_id}`)
-    if (!pollRes.ok) {
-      const err = await pollRes.json().catch(() => ({ error: 'Unknown error' }))
-      throw buildTranslateError(pollRes.status, err)
-    }
-
-    const job: JobResponse = await pollRes.json()
-
-    if (job.status === 'completed') {
-      return {
-        translated_text: job.translated_text ?? '',
-        source: job.source ?? req.source,
-        target: job.target ?? req.target,
-      }
-    }
-
-    if (job.status === 'failed') {
-      throw new Error(job.error ?? 'Translation job failed')
-    }
-
-    // 'pending' | 'processing' → keep polling
-  }
-
-  throw new Error('Translation timed out. Please try again.')
-}
+// ---------- shared helpers ----------
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -86,6 +40,76 @@ function buildTranslateError(status: number, err: { error?: string; request_id?:
   return new Error(err.error ?? `HTTP ${status}`)
 }
 
+/**
+ * Fetches a single job snapshot from GET /api/v1/jobs/:id.
+ */
+export async function fetchJob(jobId: string): Promise<JobResponse> {
+  const res = await fetch(`/api/v1/jobs/${jobId}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Unknown error' }))
+    throw buildTranslateError(res.status, err)
+  }
+  return res.json()
+}
+
+/**
+ * Polls GET /api/v1/jobs/:id until the job reaches a terminal state.
+ * Resolves with the completed TranslateResponse or rejects on failure/timeout.
+ *
+ * @param fallbackSource  source lang to use when job doesn't echo it back
+ * @param fallbackTarget  target lang to use when job doesn't echo it back
+ * @param failMsg         error message prefix on job failure
+ */
+async function pollJob(
+  jobId: string,
+  fallbackSource: string,
+  fallbackTarget: string,
+  failMsg = 'Translation job failed',
+): Promise<TranslateResponse> {
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await sleep(POLL_INTERVAL_MS)
+
+    const job = await fetchJob(jobId)
+
+    if (job.status === 'completed') {
+      return {
+        translated_text: job.translated_text ?? '',
+        source: job.source ?? fallbackSource,
+        target: job.target ?? fallbackTarget,
+      }
+    }
+
+    if (job.status === 'failed') {
+      throw new Error(job.error ?? failMsg)
+    }
+
+    // 'pending' | 'processing' → keep polling
+  }
+
+  throw new Error('Translation timed out. Please try again.')
+}
+
+// ---------- public API ----------
+
+/**
+ * Translates text via the async jobs API (POST /api/v1/jobs → poll GET /api/v1/jobs/:id).
+ */
+export async function translate(req: TranslateRequest): Promise<TranslateResponse> {
+  const enqueueRes = await fetch('/api/v1/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+
+  if (!enqueueRes.ok) {
+    const err = await enqueueRes.json().catch(() => ({ error: 'Unknown error' }))
+    throw buildTranslateError(enqueueRes.status, err)
+  }
+
+  const { job_id }: { job_id: string } = await enqueueRes.json()
+  return pollJob(job_id, req.source, req.target, 'Translation job failed')
+}
+
 export interface UploadPDFResponse {
   job_id: string
 }
@@ -93,10 +117,6 @@ export interface UploadPDFResponse {
 /**
  * Uploads a PDF file and enqueues a translate_pdf job
  * (POST /api/v1/jobs/pdf).
- *
- * @param file   - The PDF File object selected by the user.
- * @param source - Source language (ISO 639-1 or "auto").
- * @param target - Target language (ISO 639-1, required).
  */
 export async function uploadPDF(
   file: File,
@@ -118,6 +138,17 @@ export async function uploadPDF(
     throw buildTranslateError(enqueueRes.status, err)
   }
 
-  const data: UploadPDFResponse = await enqueueRes.json()
-  return data
+  return enqueueRes.json()
+}
+
+/**
+ * Uploads a PDF and polls until the translate_pdf job completes.
+ */
+export async function translatePDF(
+  file: File,
+  source: string,
+  target: string,
+): Promise<TranslateResponse> {
+  const { job_id } = await uploadPDF(file, source, target)
+  return pollJob(job_id, source, target, 'PDF translation job failed')
 }
