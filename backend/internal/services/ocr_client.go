@@ -25,6 +25,10 @@ type OCRClient interface {
 	// and returns the extracted plain text. lang is an ISO 639-1 code or
 	// "auto". An empty string for lang is treated as "auto".
 	ExtractText(filePath, lang string) (string, error)
+	// ExtractPages reads the PDF at filePath via the OCR service and returns
+	// per-page plain text in document order. If the service does not return
+	// per-page data, the full text is returned as a single-element slice.
+	ExtractPages(filePath, lang string) ([]string, error)
 }
 
 type ocrClient struct {
@@ -47,23 +51,27 @@ func NewOCRClient(ocrBaseURL, sharedStorageDir string) OCRClient {
 
 // ocrPDFResponse mirrors the relevant subset of OCRPdfResponse.
 type ocrPDFResponse struct {
+	Text  string          `json:"text"`
+	Pages []ocrPageResult `json:"pages"`
+}
+
+type ocrPageResult struct {
 	Text string `json:"text"`
 }
 
 const ocrPDFPath = "/ocr/pdf"
 
-// ExtractText streams the PDF to the OCR endpoint. It first tries
-// multipart/form-data (future contract), then falls back to streamed JSON
-// base64 (current contract) for compatibility.
-func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
+// fetchOCRResponse routes the PDF through shared-path → multipart → JSON-stream
+// strategies and returns the decoded OCR response.
+func (c *ocrClient) fetchOCRResponse(filePath, lang string) (ocrPDFResponse, error) {
 	if c.baseURL == "" {
-		return "", fmt.Errorf("ocr: service URL is not configured")
+		return ocrPDFResponse{}, fmt.Errorf("ocr: service URL is not configured")
 	}
 	if lang == "" {
 		lang = "auto"
 	}
 	if _, err := os.Stat(filePath); err != nil {
-		return "", fmt.Errorf("ocr: read file %q: %w", filePath, err)
+		return ocrPDFResponse{}, fmt.Errorf("ocr: read file %q: %w", filePath, err)
 	}
 
 	useShared := c.canUseSharedPath(filePath)
@@ -74,13 +82,13 @@ func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 	)
 
 	if useShared {
-		text, status, err := c.extractTextSharedPath(filePath, lang)
+		resp, status, err := c.extractOCRSharedPath(filePath, lang)
 		if err == nil {
 			slog.Info("ocr_request_strategy", "file", filePath, "strategy", "shared_path")
-			return text, nil
+			return resp, nil
 		}
 		if !shouldFallbackFromSharedPath(status) {
-			return "", err
+			return ocrPDFResponse{}, err
 		}
 		slog.Warn("ocr_shared_path_fallback",
 			"file", filePath,
@@ -89,10 +97,10 @@ func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 		)
 	}
 
-	text, status, err := c.extractTextMultipart(filePath, lang)
+	resp, status, err := c.extractOCRMultipart(filePath, lang)
 	if err == nil {
 		slog.Info("ocr_request_strategy", "file", filePath, "strategy", "multipart_upload")
-		return text, nil
+		return resp, nil
 	}
 
 	// The currently deployed OCR service expects JSON. Keep compatibility
@@ -103,14 +111,51 @@ func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 			"status", status,
 			"err", err,
 		)
-		text, err = c.extractTextJSONStream(filePath, lang)
-		if err == nil {
+		jsonResp, jsonErr := c.extractOCRJSONStream(filePath, lang)
+		if jsonErr == nil {
 			slog.Info("ocr_request_strategy", "file", filePath, "strategy", "json_base64")
 		}
-		return text, err
+		return jsonResp, jsonErr
 	}
 
-	return "", err
+	return ocrPDFResponse{}, err
+}
+
+// ExtractText streams the PDF to the OCR endpoint and returns the full
+// concatenated text. It first tries multipart/form-data, then falls back
+// to streamed JSON base64 for compatibility.
+func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
+	resp, err := c.fetchOCRResponse(filePath, lang)
+	if err != nil {
+		return "", err
+	}
+	if resp.Text == "" {
+		return "", fmt.Errorf("ocr: service returned empty text")
+	}
+	return resp.Text, nil
+}
+
+// ExtractPages streams the PDF to the OCR endpoint and returns per-page text
+// in document order. If the service response includes a pages array, each
+// element's text is returned. Otherwise the full text is wrapped in a
+// single-element slice for backward compatibility with older service versions.
+func (c *ocrClient) ExtractPages(filePath, lang string) ([]string, error) {
+	resp, err := c.fetchOCRResponse(filePath, lang)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Pages) > 0 {
+		pages := make([]string, len(resp.Pages))
+		for i, p := range resp.Pages {
+			pages[i] = p.Text
+		}
+		return pages, nil
+	}
+	// Older service versions only populate the top-level text field.
+	if resp.Text == "" {
+		return nil, fmt.Errorf("ocr: service returned empty response")
+	}
+	return []string{resp.Text}, nil
 }
 
 func (c *ocrClient) canUseSharedPath(filePath string) bool {
@@ -180,14 +225,14 @@ func (c *ocrClient) doWithRetry(buildReq func() (*http.Request, error), maxRetri
 	return nil, fmt.Errorf("ocr: all %d attempts failed: %w", maxRetries+1, lastErr)
 }
 
-func (c *ocrClient) extractTextSharedPath(filePath, lang string) (string, int, error) {
+func (c *ocrClient) extractOCRSharedPath(filePath, lang string) (ocrPDFResponse, int, error) {
 	body, err := json.Marshal(map[string]interface{}{
 		"file_path": filePath,
 		"lang":      lang,
 		"dpi":       200,
 	})
 	if err != nil {
-		return "", 0, fmt.Errorf("ocr: build shared-path request body: %w", err)
+		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: build shared-path request body: %w", err)
 	}
 
 	buildReq := func() (*http.Request, error) {
@@ -199,27 +244,27 @@ func (c *ocrClient) extractTextSharedPath(filePath, lang string) (string, int, e
 		return req, nil
 	}
 
-	resp, err := c.doWithRetry(buildReq, 2)
+	httpResp, err := c.doWithRetry(buildReq, 2)
 	if err != nil {
-		return "", 0, fmt.Errorf("ocr: POST %s (shared path): %w", ocrPDFPath, err)
+		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: POST %s (shared path): %w", ocrPDFPath, err)
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", resp.StatusCode, fmt.Errorf("ocr: service returned HTTP %d", resp.StatusCode)
+	if httpResp.StatusCode != http.StatusOK {
+		return ocrPDFResponse{}, httpResp.StatusCode, fmt.Errorf("ocr: service returned HTTP %d", httpResp.StatusCode)
 	}
 
-	text, err := decodeOCRText(resp.Body)
+	ocrResp, err := decodeOCRResponse(httpResp.Body)
 	if err != nil {
-		return "", resp.StatusCode, err
+		return ocrPDFResponse{}, httpResp.StatusCode, err
 	}
-	return text, resp.StatusCode, nil
+	return ocrResp, httpResp.StatusCode, nil
 }
 
-func (c *ocrClient) extractTextMultipart(filePath, lang string) (string, int, error) {
+func (c *ocrClient) extractOCRMultipart(filePath, lang string) (ocrPDFResponse, int, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", 0, fmt.Errorf("ocr: read file %q: %w", filePath, err)
+		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: read file %q: %w", filePath, err)
 	}
 	defer file.Close()
 
@@ -255,31 +300,31 @@ func (c *ocrClient) extractTextMultipart(filePath, lang string) (string, int, er
 
 	req, err := http.NewRequest(http.MethodPost, c.baseURL+ocrPDFPath, pr)
 	if err != nil {
-		return "", 0, fmt.Errorf("ocr: build multipart request: %w", err)
+		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: build multipart request: %w", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := c.httpClient.Do(req)
+	httpResp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("ocr: POST %s (multipart): %w", ocrPDFPath, err)
+		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: POST %s (multipart): %w", ocrPDFPath, err)
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", resp.StatusCode, fmt.Errorf("ocr: service returned HTTP %d", resp.StatusCode)
+	if httpResp.StatusCode != http.StatusOK {
+		return ocrPDFResponse{}, httpResp.StatusCode, fmt.Errorf("ocr: service returned HTTP %d", httpResp.StatusCode)
 	}
 
-	text, err := decodeOCRText(resp.Body)
+	ocrResp, err := decodeOCRResponse(httpResp.Body)
 	if err != nil {
-		return "", resp.StatusCode, err
+		return ocrPDFResponse{}, httpResp.StatusCode, err
 	}
-	return text, resp.StatusCode, nil
+	return ocrResp, httpResp.StatusCode, nil
 }
 
-func (c *ocrClient) extractTextJSONStream(filePath, lang string) (string, error) {
+func (c *ocrClient) extractOCRJSONStream(filePath, lang string) (ocrPDFResponse, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", fmt.Errorf("ocr: read file %q: %w", filePath, err)
+		return ocrPDFResponse{}, fmt.Errorf("ocr: read file %q: %w", filePath, err)
 	}
 	defer file.Close()
 
@@ -318,30 +363,30 @@ func (c *ocrClient) extractTextJSONStream(filePath, lang string) (string, error)
 
 	req, err := http.NewRequest(http.MethodPost, c.baseURL+ocrPDFPath, pr)
 	if err != nil {
-		return "", fmt.Errorf("ocr: build JSON request: %w", err)
+		return ocrPDFResponse{}, fmt.Errorf("ocr: build JSON request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	httpResp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ocr: POST %s (json): %w", ocrPDFPath, err)
+		return ocrPDFResponse{}, fmt.Errorf("ocr: POST %s (json): %w", ocrPDFPath, err)
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ocr: service returned HTTP %d", resp.StatusCode)
+	if httpResp.StatusCode != http.StatusOK {
+		return ocrPDFResponse{}, fmt.Errorf("ocr: service returned HTTP %d", httpResp.StatusCode)
 	}
 
-	return decodeOCRText(resp.Body)
+	return decodeOCRResponse(httpResp.Body)
 }
 
-func decodeOCRText(r io.Reader) (string, error) {
+func decodeOCRResponse(r io.Reader) (ocrPDFResponse, error) {
 	var result ocrPDFResponse
 	if err := json.NewDecoder(r).Decode(&result); err != nil {
-		return "", fmt.Errorf("ocr: decode response: %w", err)
+		return ocrPDFResponse{}, fmt.Errorf("ocr: decode response: %w", err)
 	}
-	if result.Text == "" {
-		return "", fmt.Errorf("ocr: service returned empty text")
+	if result.Text == "" && len(result.Pages) == 0 {
+		return ocrPDFResponse{}, fmt.Errorf("ocr: service returned empty response")
 	}
-	return result.Text, nil
+	return result, nil
 }

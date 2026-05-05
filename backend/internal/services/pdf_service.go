@@ -11,6 +11,10 @@ import (
 type PDFService interface {
 	// ExtractText reads the PDF at filePath and returns its full plain text.
 	ExtractText(filePath string) (string, error)
+	// ExtractPages reads the PDF at filePath and returns per-page plain text.
+	// The slice length equals the page count; empty pages are represented as
+	// empty strings rather than being omitted so callers can correlate by index.
+	ExtractPages(filePath string) ([]string, error)
 	// PageCount returns the number of pages in the PDF.
 	PageCount(filePath string) (int, error)
 }
@@ -57,6 +61,36 @@ func (s *pdfService) ExtractText(filePath string) (string, error) {
 		return "", fmt.Errorf("pdf: no text content found in %q (may be image-only; OCR required)", filePath)
 	}
 	return result, nil
+}
+
+// ExtractPages opens the PDF at filePath and returns per-page plain text.
+// Each entry in the returned slice corresponds to one page (1-indexed internally).
+// Pages whose text is empty (e.g. image-only pages) are represented as empty strings.
+func (s *pdfService) ExtractPages(filePath string) ([]string, error) {
+	f, r, err := pdf.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("pdf: open %q: %w", filePath, err)
+	}
+	defer f.Close()
+
+	totalPages := r.NumPage()
+	if totalPages == 0 {
+		return nil, fmt.Errorf("pdf: %q contains no pages", filePath)
+	}
+
+	pages := make([]string, totalPages)
+	for pageNum := 1; pageNum <= totalPages; pageNum++ {
+		page := r.Page(pageNum)
+		if page.V.IsNull() {
+			continue
+		}
+		text, err := page.GetPlainText(nil)
+		if err != nil {
+			return nil, fmt.Errorf("pdf: extract text from page %d of %q: %w", pageNum, filePath, err)
+		}
+		pages[pageNum-1] = strings.TrimSpace(text)
+	}
+	return pages, nil
 }
 
 func (s *pdfService) PageCount(filePath string) (int, error) {

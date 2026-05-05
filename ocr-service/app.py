@@ -40,6 +40,7 @@ def _get_env_int(name: str, default: int) -> int:
 
 MAX_PDF_UPLOAD_BYTES = _get_env_int("MAX_PDF_UPLOAD_BYTES", 100 * 1024 * 1024)
 MAX_PDF_PAGES = _get_env_int("MAX_PDF_PAGES", 200)
+MAX_PDF_DPI = _get_env_int("MAX_PDF_DPI", 300)
 OCR_SHARED_STORAGE_DIR = os.path.realpath(os.getenv("OCR_SHARED_STORAGE_DIR", "")) if os.getenv("OCR_SHARED_STORAGE_DIR", "") else ""
 
 app = FastAPI(title="LokLingo OCR Service", version="2.0.0")
@@ -138,7 +139,7 @@ class OCRPdfRequest(BaseModel):
     pdf_b64: str | None = Field(default=None, description="Base64-encoded PDF file")
     file_path: str | None = Field(default=None, description="Absolute path to a shared PDF file")
     lang: LangField = "auto"  # type: ignore[assignment]
-    dpi: int = Field(default=200, ge=72, le=400, description="Rendering DPI for each page")
+    dpi: int = Field(default=200, ge=72, le=400, description="Rendering DPI for each page — clamped to MAX_PDF_DPI at runtime")
 
 
 class PageResult(BaseModel):
@@ -199,8 +200,11 @@ def _parse_dpi(raw: object) -> int:
         dpi = int(raw)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid dpi value")
-    if dpi < 72 or dpi > 400:
-        raise HTTPException(status_code=422, detail="dpi must be between 72 and 400")
+    if dpi < 72:
+        raise HTTPException(status_code=422, detail="dpi must be at least 72")
+    if dpi > MAX_PDF_DPI:
+        logger.warning("Requested dpi=%d exceeds MAX_PDF_DPI=%d; clamping", dpi, MAX_PDF_DPI)
+        dpi = MAX_PDF_DPI
     return dpi
 
 
@@ -336,6 +340,7 @@ def _ocr_pdf_file(
             if not images:
                 raise ValueError(f"no image returned for page {page_num}")
             image = images[0]
+            del images  # release list reference before OCR to avoid holding two copies
         except Exception as exc:
             logger.exception("PDF→image conversion error on page %d: %s", page_num, exc)
             raise HTTPException(

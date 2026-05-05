@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"loklingo/backend/services"
@@ -62,6 +63,16 @@ func (m *mockPDFSvc) ExtractText(_ string) (string, error) {
 	return m.result, nil
 }
 
+func (m *mockPDFSvc) ExtractPages(_ string) ([]string, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.result == "" {
+		return []string{""}, nil
+	}
+	return []string{m.result}, nil
+}
+
 func (m *mockPDFSvc) PageCount(_ string) (int, error) {
 	if m.pageCountErr != nil {
 		return 0, m.pageCountErr
@@ -82,6 +93,16 @@ func (m *mockOCRSvc) ExtractText(_, _ string) (string, error) {
 		return "", m.err
 	}
 	return m.result, nil
+}
+
+func (m *mockOCRSvc) ExtractPages(_, _ string) ([]string, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.result == "" {
+		return []string{""}, nil
+	}
+	return []string{m.result}, nil
 }
 
 // ---------- tests ---------------------------------------------------------
@@ -454,5 +475,103 @@ func TestWorker_PDFJob_FileCleanedUpOnFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(tmpPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected temp file %s to be removed even on failure", tmpPath)
+	}
+}
+
+// mockMultiPagePDFSvc returns a configurable set of pages.
+type mockMultiPagePDFSvc struct {
+	pages        []string
+	err          error
+	pageCount    int
+	pageCountErr error
+}
+
+func (m *mockMultiPagePDFSvc) ExtractText(_ string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return strings.Join(m.pages, "\n"), nil
+}
+
+func (m *mockMultiPagePDFSvc) ExtractPages(_ string) ([]string, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.pages, nil
+}
+
+func (m *mockMultiPagePDFSvc) PageCount(_ string) (int, error) {
+	if m.pageCountErr != nil {
+		return 0, m.pageCountErr
+	}
+	if m.pageCount > 0 {
+		return m.pageCount, nil
+	}
+	return len(m.pages), nil
+}
+
+// mockPerPageTranslSvc records call order and maps input text to translated output.
+type mockPerPageTranslSvc struct {
+	translations map[string]string
+	callOrder    []string
+}
+
+func (m *mockPerPageTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	m.callOrder = append(m.callOrder, in.Text)
+	if out, ok := m.translations[in.Text]; ok {
+		return out, nil
+	}
+	return "translated:" + in.Text, nil
+}
+
+func TestWorker_PDFJob_MultiPage_TranslatesEachPageInOrder(t *testing.T) {
+	const page1 = "First page content"
+	const page2 = "Second page content"
+	const page3 = "Third page content"
+
+	store := &mockWorkerStore{}
+	pdfSvc := &mockMultiPagePDFSvc{pages: []string{page1, page2, page3}}
+	transSvc := &mockPerPageTranslSvc{
+		translations: map[string]string{
+			page1: "Erste Seite",
+			page2: "Zweite Seite",
+			page3: "Dritte Seite",
+		},
+	}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-multipage",
+		Type:     TypePDF,
+		FilePath: "/tmp/multipage.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+
+	// All three pages must be translated in order.
+	if len(transSvc.callOrder) != 3 {
+		t.Fatalf("expected 3 Translate calls, got %d", len(transSvc.callOrder))
+	}
+	if transSvc.callOrder[0] != page1 || transSvc.callOrder[1] != page2 || transSvc.callOrder[2] != page3 {
+		t.Fatalf("unexpected call order: %v", transSvc.callOrder)
+	}
+
+	want := "Erste Seite\n\nZweite Seite\n\nDritte Seite"
+	if store.lastJob.TranslatedText != want {
+		t.Fatalf("expected TranslatedText=%q, got %q", want, store.lastJob.TranslatedText)
+	}
+
+	// job.Text must be the joined extracted pages (used as cache key).
+	wantText := page1 + "\n\n" + page2 + "\n\n" + page3
+	if store.lastJob.Text != wantText {
+		t.Fatalf("expected job.Text=%q, got %q", wantText, store.lastJob.Text)
 	}
 }

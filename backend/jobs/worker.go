@@ -92,6 +92,17 @@ func normalizeText(s string) string {
 	return strings.Join(out, "\n\n")
 }
 
+// normalizePages applies normalizeText to each page and discards empty results.
+func normalizePages(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if n := normalizeText(p); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // PDFUploadDir is the shared location where CreatePDFJob writes uploaded files.
 // Workers read from here; both sides must agree on this path.
 const PDFUploadDir = "/tmp/loklingo"
@@ -154,6 +165,10 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
 
+	// pages holds per-page normalized text used for translation.
+	// For PDF jobs this is populated during extraction; for text jobs it wraps job.Text.
+	var pages []string
+
 	// For PDF jobs: extract text from the file before translating.
 	if job.Type == TypePDF {
 		if job.FilePath == "" {
@@ -180,9 +195,10 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 		}
 		extractStart := time.Now()
-		extracted, err := w.pdfService.ExtractText(job.FilePath)
+		pdfPages, err := w.pdfService.ExtractPages(job.FilePath)
 		extractMS = time.Since(extractStart).Milliseconds()
-		if err != nil || extracted == "" {
+		pages = normalizePages(pdfPages)
+		if err != nil || len(pages) == 0 {
 			reason := "empty text"
 			if err != nil {
 				reason = err.Error()
@@ -200,7 +216,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			slog.Warn("pdf text extraction failed, falling back to OCR", "job_id", job.ID, "file", job.FilePath, "reason", reason)
 			ocrTriggered = true
 			ocrStart := time.Now()
-			ocred, ocrErr := w.ocrClient.ExtractText(job.FilePath, job.Lang)
+			ocrPages, ocrErr := w.ocrClient.ExtractPages(job.FilePath, job.Lang)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			if ocrErr != nil {
 				slog.Error("OCR fallback also failed", "job_id", job.ID, "file", job.FilePath, "err", ocrErr)
@@ -224,12 +240,18 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				}
 				return
 			}
-			extracted = ocred
+			pages = normalizePages(ocrPages)
 			job.ProcessingMethod = "ocr"
 		} else {
 			job.ProcessingMethod = "pdf_text"
 		}
-		job.Text = normalizeText(extracted)
+		job.Text = strings.Join(pages, "\n\n")
+	}
+
+	// For non-PDF jobs job.Text is already set; wrap it as a single page so the
+	// translation loop below is uniform across all job types.
+	if job.Type != TypePDF {
+		pages = []string{job.Text}
 	}
 
 	// Check translation cache before calling the LLM.
@@ -265,17 +287,27 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 
 	translateStart := time.Now()
-	translated, err := w.service.Translate(services.TranslationInput{
-		Text:   job.Text,
-		Source: job.Source,
-		Target: job.Target,
-		Ctx:    ctx,
-	})
+	translatedPages := make([]string, 0, len(pages))
+	var translateErr error
+	for _, pageText := range pages {
+		var part string
+		part, translateErr = w.service.Translate(services.TranslationInput{
+			Text:   pageText,
+			Source: job.Source,
+			Target: job.Target,
+			Ctx:    ctx,
+		})
+		if translateErr != nil {
+			break
+		}
+		translatedPages = append(translatedPages, part)
+	}
+	translated := strings.Join(translatedPages, "\n\n")
 	translateMS = time.Since(translateStart).Milliseconds()
-	if err != nil {
-		slog.Error("translation failed", "job_id", job.ID, "err", err)
+	if translateErr != nil {
+		slog.Error("translation failed", "job_id", job.ID, "err", translateErr)
 		job.Status = StatusFailed
-		job.ErrorMsg = err.Error()
+		job.ErrorMsg = translateErr.Error()
 		if ocrTriggered {
 			ocrOutcome = "translation_failed"
 		}
