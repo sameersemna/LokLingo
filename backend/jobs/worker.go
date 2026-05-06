@@ -179,21 +179,21 @@ const translateMaxRetries = 3
 
 // translateChunkTimeout is the hard per-chunk deadline for a single translation
 // request. If exceeded, the chunk is immediately cancelled and split into halves
-// (split-before-retry). 20s bounds worst-case chunk latency while giving the LLM
+// (split-before-retry). 25s bounds worst-case chunk latency while giving the LLM
 // enough headroom on loaded hosts; most chunks complete in 3–12s.
 // Kept as a variable so tests can temporarily override it.
-var translateChunkTimeout = 20 * time.Second
+var translateChunkTimeout = 25 * time.Second
 
 // translateRetryBase is the initial back-off delay before the first retry.
 // Each subsequent retry doubles the delay (capped at translateRetryBase * 2^retries).
 // Kept as a variable so tests can temporarily override it.
 var translateRetryBase = 500 * time.Millisecond
 
-// slowChunkThreshold defines when a chunk translation is considered slow enough
-// to trigger adaptive chunk-size reduction. Aligned with translateChunkTimeout so
-// that any chunk that hits the timeout is also counted as slow.
-// Kept as a variable so tests can temporarily override it.
-var slowChunkThreshold = 20 * time.Second
+// slowChunkThreshold is the soft per-chunk latency threshold. Chunks that exceed
+// this value are logged as slow but are not cancelled or split. Set below the
+// hard translateChunkTimeout to surface latency regressions before they reach
+// the deadline. Kept as a variable so tests can temporarily override it.
+var slowChunkThreshold = 15 * time.Second
 
 // pdfChunkMinWords and pdfChunkMaxWords define the target PDF translation chunk
 // size in words. Chunks are built from contiguous page text units to reduce LLM
@@ -859,6 +859,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		consumedUnits := 0
 		for i, r := range results {
 			allResults = append(allResults, r)
+			// Adaptive reduction fires at the soft threshold so future chunks
+			// are pre-shrunk before they can reach the hard deadline.
 			if r.dur > slowChunkThreshold {
 				slowInBatch = true
 			}
