@@ -2,6 +2,7 @@ export interface TranslateRequest {
   text: string
   source: string
   target: string
+  mode?: string
 }
 
 export interface TranslateResponse {
@@ -98,7 +99,7 @@ export async function translate(req: TranslateRequest): Promise<TranslateRespons
   const enqueueRes = await fetch('/api/v1/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
+    body: JSON.stringify({ ...req, mode: req.mode ?? 'overlay' }),
   })
 
   if (!enqueueRes.ok) {
@@ -114,6 +115,10 @@ export interface UploadPDFResponse {
   job_id: string
 }
 
+export interface UploadImageResponse {
+  job_id: string
+}
+
 /**
  * Uploads a PDF file and enqueues a translate_pdf job
  * (POST /api/v1/jobs/pdf).
@@ -122,13 +127,44 @@ export async function uploadPDF(
   file: File,
   source: string,
   target: string,
+  mode = 'overlay',
 ): Promise<UploadPDFResponse> {
   const form = new FormData()
   form.append('file', file)
   form.append('source', source || 'auto')
   form.append('target', target)
+  form.append('mode', mode)
 
   const enqueueRes = await fetch('/api/v1/jobs/pdf', {
+    method: 'POST',
+    body: form,
+  })
+
+  if (!enqueueRes.ok) {
+    const err = await enqueueRes.json().catch(() => ({ error: 'Unknown error' }))
+    throw buildTranslateError(enqueueRes.status, err)
+  }
+
+  return enqueueRes.json()
+}
+
+/**
+ * Uploads an image file and enqueues a translate_image job
+ * (POST /api/v1/jobs/image).
+ */
+export async function uploadImage(
+  file: File,
+  source: string,
+  target: string,
+  mode = 'overlay',
+): Promise<UploadImageResponse> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('source', source || 'auto')
+  form.append('target', target)
+  form.append('mode', mode)
+
+  const enqueueRes = await fetch('/api/v1/jobs/image', {
     method: 'POST',
     body: form,
   })
@@ -148,7 +184,21 @@ export async function translatePDF(
   file: File,
   source: string,
   target: string,
+  mode = 'overlay',
 ): Promise<TranslateResponse> {
-  const { job_id } = await uploadPDF(file, source, target)
+  const { job_id } = await uploadPDF(file, source, target, mode)
   return pollJob(job_id, source, target, 'PDF translation job failed')
+}
+
+/**
+ * Uploads an image and polls until the translate_image job completes.
+ */
+export async function translateImage(
+  file: File,
+  source: string,
+  target: string,
+  mode = 'overlay',
+): Promise<TranslateResponse> {
+  const { job_id } = await uploadImage(file, source, target, mode)
+  return pollJob(job_id, source, target, 'Image translation job failed')
 }

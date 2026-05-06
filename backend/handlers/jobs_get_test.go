@@ -89,6 +89,76 @@ func TestGetJob_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetJob_ModeIncludedInResponse(t *testing.T) {
+	now := time.Now()
+	store := &getJobStore{job: &jobs.Job{
+		ID:        "job-456",
+		Type:      jobs.TypeText,
+		Status:    jobs.StatusCompleted,
+		Mode:      jobs.ModeLayout,
+		Source:    "en",
+		Target:    "fr",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}
+
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Get("/jobs/:id", h.GetJob)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/job-456", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["mode"] != jobs.ModeLayout {
+		t.Fatalf("expected mode=%q, got %#v", jobs.ModeLayout, body["mode"])
+	}
+}
+
+func TestGetJob_ModeDefaultsToOverlayWhenEmpty(t *testing.T) {
+	now := time.Now()
+	// Job with no Mode set (zero value) — simulates legacy jobs.
+	store := &getJobStore{job: &jobs.Job{
+		ID:        "job-789",
+		Status:    jobs.StatusPending,
+		Source:    "en",
+		Target:    "de",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}
+
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Get("/jobs/:id", h.GetJob)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/job-789", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// Empty string for legacy jobs: the field is present but blank.
+	if _, ok := body["mode"]; !ok {
+		t.Fatal("expected mode field to be present in response")
+	}
+}
+
 func TestGetJob_StoreError(t *testing.T) {
 	store := &getJobStore{err: errors.New("redis down")}
 	h := NewJobsHandler(store, 1024)

@@ -16,15 +16,28 @@ const (
 type JobType = string
 
 const (
-	TypeText JobType = "text"
-	TypePDF  JobType = "translate_pdf"
+	TypeText  JobType = "text"
+	TypePDF   JobType = "translate_pdf"
+	TypeImage JobType = "translate_image"
 )
+
+// Mode controls how translated content is rendered/applied.
+type Mode = string
+
+const (
+	ModeOverlay Mode = "overlay"
+	ModeLayout  Mode = "layout"
+)
+
+// DefaultMode is used when no mode is specified in a job request.
+const DefaultMode Mode = ModeOverlay
 
 // Job holds all state for one async translation request.
 type Job struct {
 	ID             string    `json:"id"`
 	Status         Status    `json:"status"`
 	Type           JobType   `json:"type,omitempty"`
+	Mode           Mode      `json:"mode"`
 	Text           string    `json:"text"`
 	Source         string    `json:"source"`
 	Target         string    `json:"target"`
@@ -33,8 +46,8 @@ type Job struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 
-	// PDF-job-specific fields.
-	FilePath         string `json:"file_path,omitempty"`         // path to the PDF on the worker's filesystem
+	// File-job-specific fields (PDF and image jobs).
+	FilePath         string `json:"file_path,omitempty"`         // path to the uploaded file on the worker's filesystem
 	Lang             string `json:"lang,omitempty"`              // OCR language hint (ISO 639-1 or "auto")
 	ProcessingMethod string `json:"processing_method,omitempty"` // "pdf_text" or "ocr"
 	TotalPages       int    `json:"total_pages,omitempty"`       // total translatable pages discovered by the worker

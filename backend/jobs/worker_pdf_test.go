@@ -1628,3 +1628,139 @@ func TestWorker_TranslateWithRetry_ClientTimeoutString(t *testing.T) {
 		t.Fatalf("expected 2 Translate calls (1 Client.Timeout + 1 success), got %d", totalCalls)
 	}
 }
+
+// ---------- mode branching -----------------------------------------------
+
+// TestWorker_EffectiveMode verifies that effectiveMode normalises "" → overlay
+// and passes through valid values unchanged.
+func TestWorker_EffectiveMode(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", ModeOverlay},
+		{ModeOverlay, ModeOverlay},
+		{ModeLayout, ModeLayout},
+	}
+	for _, tc := range cases {
+		got := effectiveMode(tc.input)
+		if got != tc.want {
+			t.Errorf("effectiveMode(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestWorker_LayoutMode_MarksJobFailed verifies that the layout pipeline stub
+// marks the job as failed with a descriptive error and calls store.Update.
+func TestWorker_LayoutMode_MarksJobFailed(t *testing.T) {
+	store := &mockWorkerStore{}
+	w := NewWorker(store, &mockTranslSvc{result: "ignored"}, &mockPDFSvc{}, nil, 0)
+
+	job := &Job{
+		ID:     "text-layout-1",
+		Type:   TypeText,
+		Mode:   ModeLayout,
+		Text:   "Hello world",
+		Source: "en",
+		Target: "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected store.Update to be called")
+	}
+	if store.lastJob.Status != StatusFailed {
+		t.Fatalf("expected status=failed for layout mode stub, got %s", store.lastJob.Status)
+	}
+	if store.lastJob.ErrorMsg == "" {
+		t.Fatal("expected non-empty ErrorMsg for layout mode stub")
+	}
+}
+
+// TestWorker_LayoutMode_TranslationServiceNotCalled verifies the overlay
+// translation service is NOT invoked when mode is "layout".
+func TestWorker_LayoutMode_TranslationServiceNotCalled(t *testing.T) {
+	store := &mockWorkerStore{}
+	callCount := 0
+	svc := &mockTranslSvcCounting{fn: func() { callCount++ }, result: "Hallo"}
+	w := NewWorker(store, svc, &mockPDFSvc{}, nil, 0)
+
+	job := &Job{
+		ID:     "text-layout-2",
+		Type:   TypeText,
+		Mode:   ModeLayout,
+		Text:   "Hello",
+		Source: "en",
+		Target: "de",
+	}
+	w.process(context.Background(), job)
+
+	if callCount != 0 {
+		t.Fatalf("expected 0 Translate calls for layout mode stub, got %d", callCount)
+	}
+}
+
+// TestWorker_OverlayMode_TranslatesNormally verifies that mode=overlay runs
+// the existing translation pipeline and completes successfully.
+func TestWorker_OverlayMode_TranslatesNormally(t *testing.T) {
+	store := &mockWorkerStore{}
+	w := NewWorker(store, &mockTranslSvc{result: "Hallo Welt"}, &mockPDFSvc{}, nil, 0)
+
+	job := &Job{
+		ID:     "text-overlay-1",
+		Type:   TypeText,
+		Mode:   ModeOverlay,
+		Text:   "Hello world",
+		Source: "en",
+		Target: "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected store.Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed for overlay mode, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText == "" {
+		t.Fatal("expected non-empty TranslatedText for overlay mode")
+	}
+}
+
+// TestWorker_EmptyMode_DefaultsToOverlay verifies that a job with no mode set
+// (legacy job) is processed as overlay, not routed to the layout stub.
+func TestWorker_EmptyMode_DefaultsToOverlay(t *testing.T) {
+	store := &mockWorkerStore{}
+	w := NewWorker(store, &mockTranslSvc{result: "Bonjour"}, &mockPDFSvc{}, nil, 0)
+
+	job := &Job{
+		ID:     "text-legacy-1",
+		Type:   TypeText,
+		Mode:   "", // legacy: no mode field
+		Text:   "Hello",
+		Source: "en",
+		Target: "fr",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected store.Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected legacy job to complete as overlay, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+}
+
+type mockTranslSvcCounting struct {
+	fn     func()
+	result string
+	err    error
+}
+
+func (m *mockTranslSvcCounting) Translate(_ services.TranslationInput) (string, error) {
+	m.fn()
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.result, nil
+}

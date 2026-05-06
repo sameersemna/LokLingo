@@ -176,3 +176,76 @@ func TestCreatePDFJob_FileTooLarge_Returns413(t *testing.T) {
 		t.Fatal("expected no enqueued job when file is too large")
 	}
 }
+
+func newMultipartPDFRequestWithMode(t *testing.T, pdfData []byte, target, source, mode string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	if pdfData != nil {
+		fw, err := w.CreateFormFile("file", "test.pdf")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := fw.Write(pdfData); err != nil {
+			t.Fatalf("write pdf data: %v", err)
+		}
+	}
+	if target != "" {
+		if err := w.WriteField("target", target); err != nil {
+			t.Fatalf("write target field: %v", err)
+		}
+	}
+	if source != "" {
+		if err := w.WriteField("source", source); err != nil {
+			t.Fatalf("write source field: %v", err)
+		}
+	}
+	if mode != "" {
+		if err := w.WriteField("mode", mode); err != nil {
+			t.Fatalf("write mode field: %v", err)
+		}
+	}
+	w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/pdf", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
+func TestCreatePDFJob_ModeDefaultsToOverlay(t *testing.T) {
+	cs := &captureStore{}
+	h := NewJobsHandler(cs, 25*1024*1024)
+	app := fiber.New()
+	app.Post("/jobs/pdf", h.CreatePDFJob)
+
+	// No mode field — should default to "overlay".
+	req := newMultipartPDFRequest(t, []byte("%PDF-1.4"), "de", "en")
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.Mode != jobs.ModeOverlay {
+		t.Fatalf("expected mode=%q, got %q", jobs.ModeOverlay, cs.job.Mode)
+	}
+}
+
+func TestCreatePDFJob_ModeLayout(t *testing.T) {
+	cs := &captureStore{}
+	h := NewJobsHandler(cs, 25*1024*1024)
+	app := fiber.New()
+	app.Post("/jobs/pdf", h.CreatePDFJob)
+
+	req := newMultipartPDFRequestWithMode(t, []byte("%PDF-1.4"), "de", "en", "layout")
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.Mode != jobs.ModeLayout {
+		t.Fatalf("expected mode=%q, got %q", jobs.ModeLayout, cs.job.Mode)
+	}
+}

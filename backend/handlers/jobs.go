@@ -36,6 +36,7 @@ func (h *JobsHandler) CreateJob(c *fiber.Ctx) error {
 		Text   string `json:"text"`
 		Source string `json:"source"`
 		Target string `json:"target"`
+		Mode   string `json:"mode"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return errResponse(c, fiber.StatusBadRequest, "invalid request body")
@@ -49,11 +50,15 @@ func (h *JobsHandler) CreateJob(c *fiber.Ctx) error {
 	if req.Source == "" {
 		req.Source = "auto"
 	}
+	if req.Mode == "" {
+		req.Mode = jobs.DefaultMode
+	}
 
 	now := time.Now()
 	job := &jobs.Job{
 		ID:        uuid.NewString(),
 		Status:    jobs.StatusPending,
+		Mode:      req.Mode,
 		Text:      req.Text,
 		Source:    req.Source,
 		Target:    req.Target,
@@ -91,6 +96,7 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 	resp := fiber.Map{
 		"job_id":     job.ID,
 		"status":     job.Status,
+		"mode":       job.Mode,
 		"source":     job.Source,
 		"target":     job.Target,
 		"created_at": job.CreatedAt,
@@ -131,6 +137,10 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 		source = "auto"
 	}
 	lang := c.FormValue("lang")
+	mode := c.FormValue("mode")
+	if mode == "" {
+		mode = jobs.DefaultMode
+	}
 
 	if err := os.MkdirAll(jobs.PDFUploadDir, 0o700); err != nil {
 		slog.Error("failed to create upload dir", "err", err)
@@ -149,6 +159,7 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 		ID:        uuid.NewString(),
 		Type:      jobs.TypePDF,
 		Status:    jobs.StatusPending,
+		Mode:      mode,
 		FilePath:  filePath,
 		Lang:      lang,
 		Source:    source,
@@ -158,6 +169,81 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	}
 	if err := h.store.Enqueue(c.Context(), job); err != nil {
 		slog.Error("failed to enqueue pdf job", "request_id", c.Locals("requestID"), "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
+	}
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"job_id": job.ID,
+	})
+}
+
+// isValidMode reports whether m is one of the accepted mode values.
+func isValidMode(m string) bool {
+	return m == jobs.ModeOverlay || m == jobs.ModeLayout
+}
+
+// CreateImageJob handles POST /api/v1/jobs/image.
+// Accepts multipart/form-data with an image file upload, saves it under
+// jobs.ImageUploadDir, enqueues a translate_image job, and returns 202 Accepted
+// with a job_id for polling. The file is NOT processed here.
+func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
+	file, err := c.FormFile("file")
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, "file is required (multipart field: file)")
+	}
+	if file.Size > h.maxPDFUploadBytes {
+		return errResponse(c, fiber.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds max size (%d bytes)", h.maxPDFUploadBytes))
+	}
+
+	target := c.FormValue("target")
+	if target == "" {
+		return errResponse(c, fiber.StatusBadRequest, "target is required")
+	}
+	source := c.FormValue("source")
+	if source == "" {
+		source = "auto"
+	}
+	lang := c.FormValue("lang")
+
+	mode := c.FormValue("mode")
+	if mode == "" {
+		mode = jobs.DefaultMode
+	}
+	if !isValidMode(mode) {
+		return errResponse(c, fiber.StatusBadRequest, `mode must be "overlay" or "layout"`)
+	}
+
+	if err := os.MkdirAll(jobs.ImageUploadDir, 0o700); err != nil {
+		slog.Error("failed to create image upload dir", "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to prepare upload directory")
+	}
+
+	ext := filepath.Ext(file.Filename)
+	if ext == "" {
+		ext = ".bin"
+	}
+	fileName := fmt.Sprintf("%s%s", uuid.NewString(), ext)
+	filePath := filepath.Join(jobs.ImageUploadDir, fileName)
+	if err := c.SaveFile(file, filePath); err != nil {
+		slog.Error("failed to save uploaded image", "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to save uploaded file")
+	}
+
+	now := time.Now()
+	job := &jobs.Job{
+		ID:        uuid.NewString(),
+		Type:      jobs.TypeImage,
+		Status:    jobs.StatusPending,
+		Mode:      mode,
+		FilePath:  filePath,
+		Lang:      lang,
+		Source:    source,
+		Target:    target,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := h.store.Enqueue(c.Context(), job); err != nil {
+		slog.Error("failed to enqueue image job", "request_id", c.Locals("requestID"), "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
 	}
 

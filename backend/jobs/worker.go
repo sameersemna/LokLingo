@@ -169,6 +169,9 @@ func normalizePages(raw []string) []string {
 // Workers read from here; both sides must agree on this path.
 const PDFUploadDir = "/tmp/loklingo"
 
+// ImageUploadDir is the shared location where CreateImageJob writes uploaded files.
+const ImageUploadDir = "/tmp/loklingo/images"
+
 // pdfTranslateConcurrency is the default maximum number of page-translation goroutines
 // that may be in-flight simultaneously. Override at construction via WithTranslateConcurrency.
 const pdfTranslateConcurrency = 3
@@ -618,7 +621,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	metrics := &retryMetrics{}
 	var chunkCount int
 
-	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
+	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "mode", job.Mode, "source", job.Source, "target", job.Target)
 
 	// pages holds per-page normalized text used for translation.
 	// For PDF jobs this is populated during extraction; for text jobs it wraps job.Text.
@@ -711,6 +714,21 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		pages = []string{job.Text}
 	}
 
+	// Branch on job.Mode to select the rendering/translation pipeline.
+	// effectiveMode normalises a missing mode value (legacy jobs) to ModeOverlay.
+	effectiveJobMode := effectiveMode(job.Mode)
+	slog.Info("translation_pipeline_selected",
+		"job_id", job.ID,
+		"mode", effectiveJobMode,
+		"job_type", job.Type,
+	)
+	switch effectiveJobMode {
+	case ModeLayout:
+		w.processLayoutMode(ctx, job)
+		return
+	default: // ModeOverlay — continue with the overlay translation pipeline below.
+	}
+
 	// Check translation cache before calling the LLM.
 	if cached, err := w.store.GetCached(ctx, job.Text, job.Source, job.Target); err == nil {
 		slog.Info("cache hit", "job_id", job.ID)
@@ -737,7 +755,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		if err := w.store.Update(ctx, job); err != nil {
 			slog.Error("update job result (cache hit)", "job_id", job.ID, "err", err)
 		}
-		slog.Info("job finished (cached)", "job_id", job.ID)
+		slog.Info("job finished (cached)", "job_id", job.ID, "mode", effectiveJobMode, "job_type", job.Type)
 		return
 	}
 
@@ -949,6 +967,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	slog.Info("job_finished",
 		"job_id", job.ID,
 		"job_type", job.Type,
+		"job_mode", job.Mode,
 		"status", job.Status,
 		"duration_ms", time.Since(startedAt).Milliseconds(),
 		"chunk_count", chunkCount,
@@ -957,4 +976,31 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		"timeout_retry_count", metrics.timeoutRetryCount.Load(),
 		"split_count", metrics.splitCount.Load(),
 	)
+}
+
+// effectiveMode returns job.Mode, defaulting to ModeOverlay for empty values.
+// This covers legacy jobs that were enqueued before the mode field was introduced.
+func effectiveMode(m Mode) Mode {
+	if m == "" {
+		return ModeOverlay
+	}
+	return m
+}
+
+// processLayoutMode is the entry point for the layout-preserving translation
+// pipeline. Full implementation is pending; this stub marks the job failed
+// until the layout pipeline is built out.
+func (w *Worker) processLayoutMode(ctx context.Context, job *Job) {
+	slog.Info("layout_pipeline_invoked",
+		"job_id", job.ID,
+		"mode", effectiveMode(job.Mode),
+		"job_type", job.Type,
+		"source", job.Source,
+		"target", job.Target,
+	)
+	job.Status = StatusFailed
+	job.ErrorMsg = "layout mode is not yet implemented"
+	if err := w.store.Update(ctx, job); err != nil {
+		slog.Error("update job result (layout stub)", "job_id", job.ID, "err", err)
+	}
 }

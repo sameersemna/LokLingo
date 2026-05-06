@@ -100,6 +100,7 @@ func main() {
 	api.Post("/translate", translateHandler.Translate)
 	api.Post("/jobs", jobsHandler.CreateJob)
 	api.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
+	api.Post("/jobs/image", jobsHandler.CreateImageJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)
 	api.Get("/metrics/ocr", middleware.InternalToken(cfg.InternalToken), ocrMetricsHandler.Summary)
 

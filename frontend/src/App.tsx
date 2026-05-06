@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { translate, uploadPDF } from "./api/translate"
-import { extractText } from "./api/ocr"
+import { translate, translateImage, uploadPDF } from "./api/translate"
 import { getReadiness, type ReadinessResponse } from "./api/health"
 import { PdfJobsPanel, saveStoredJob } from "./PdfJobsPanel"
 import "./App.css"
@@ -20,6 +19,10 @@ const LANGUAGES = [
 ]
 
 const TARGET_LANGUAGES = LANGUAGES.filter(l => l.code !== "auto")
+const TRANSLATION_MODES = [
+  { value: "overlay", label: "Basic (fast)" },
+  { value: "layout", label: "Layout-preserving" },
+] as const
 const MAX_CHARS = 2000
 const HISTORY_KEY = "loklingo-history"
 const MAX_HISTORY = 10
@@ -61,6 +64,7 @@ function App() {
   const [sourceText, setSourceText] = useState("")
   const [sourceLang, setSourceLang] = useState(() => loadLangs().source)
   const [targetLang, setTargetLang] = useState(() => loadLangs().target)
+  const [mode, setMode] = useState<string>("overlay")
   const [result, setResult] = useState("")
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
@@ -118,7 +122,7 @@ function App() {
     setResult("")
     setDetectedLang("")
     try {
-      const res = await translate({ text: sourceText, source: sourceLang, target: targetLang })
+      const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode })
       setResult(res.translated_text)
       // If auto-detect was used, reflect what the backend resolved it to
       if (sourceLang === "auto" && res.source && res.source !== "auto") {
@@ -138,7 +142,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [sourceText, sourceLang, targetLang, pushToast])
+  }, [sourceText, sourceLang, targetLang, mode, pushToast])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -172,7 +176,7 @@ function App() {
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       setPdfLoading(true)
       try {
-        const { job_id } = await uploadPDF(file, sourceLang, targetLang)
+        const { job_id } = await uploadPDF(file, sourceLang, targetLang, mode)
         saveStoredJob({
           job_id,
           filename: file.name,
@@ -200,11 +204,14 @@ function App() {
     }
     setOcrLoading(true)
     try {
-      const res = await extractText(file, sourceLang === 'auto' ? 'auto' : sourceLang)
-      setSourceText(res.text)
-      pushToast(`OCR complete — confidence ${Math.round(res.confidence * 100)}%`, "success")
+      const res = await translateImage(file, sourceLang, targetLang, mode)
+      setResult(res.translated_text)
+      if (sourceLang === "auto" && res.source && res.source !== "auto") {
+        setDetectedLang(res.source)
+      }
+      pushToast("Image translated", "success")
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : "OCR failed", "error")
+      pushToast(err instanceof Error ? err.message : "Image translation failed", "error")
     } finally {
       setOcrLoading(false)
       if (fileRef.current) fileRef.current.value = ""
@@ -371,6 +378,21 @@ function App() {
           </select>
         </div>
 
+        <div className="mode-row">
+          <label className="mode-label" htmlFor="translation-mode">Mode</label>
+          <select
+            id="translation-mode"
+            className="mode-select"
+            aria-label="Translation mode"
+            value={mode}
+            onChange={e => setMode(e.target.value)}
+          >
+            {TRANSLATION_MODES.map(m => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+
         <div className="panels">
           {/* Source panel */}
           <div className="panel">
@@ -398,10 +420,10 @@ function App() {
                 />
                 <label htmlFor="ocr-file" className="icon-btn" title="Extract text from image (OCR) or queue a PDF translation">
                   {ocrLoading
-                    ? <><span className="spinner spinner-sm" aria-hidden="true" /> Extracting…</>
+                    ? <><span className="spinner spinner-sm" aria-hidden="true" /> Translating image…</>
                     : pdfLoading
                     ? <><span className="spinner spinner-sm" aria-hidden="true" /> Uploading…</>
-                    : "📷 OCR / PDF"
+                    : "📷 Image / PDF"
                   }
                 </label>
                 {sourceText && (
