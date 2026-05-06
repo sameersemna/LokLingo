@@ -66,6 +66,7 @@ function App() {
   const [targetLang, setTargetLang] = useState(() => loadLangs().target)
   const [mode, setMode] = useState<string>("overlay")
   const [result, setResult] = useState("")
+  const [resultImageUrl, setResultImageUrl] = useState<string | null>(null)
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -120,10 +121,12 @@ function App() {
     if (!sourceText.trim()) return
     setLoading(true)
     setResult("")
+    setResultImageUrl(null)
     setDetectedLang("")
     try {
       const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode })
       setResult(res.translated_text)
+      setResultImageUrl(res.image_url ?? null)
       // If auto-detect was used, reflect what the backend resolved it to
       if (sourceLang === "auto" && res.source && res.source !== "auto") {
         setDetectedLang(res.source)
@@ -168,6 +171,7 @@ function App() {
     setTargetLang(sourceLang)
     setSourceText(result)
     setResult(sourceText)
+    setResultImageUrl(null)
     setDetectedLang("")
   }
 
@@ -206,6 +210,7 @@ function App() {
     try {
       const res = await translateImage(file, sourceLang, targetLang, mode)
       setResult(res.translated_text)
+      setResultImageUrl(res.image_url ?? null)
       if (sourceLang === "auto" && res.source && res.source !== "auto") {
         setDetectedLang(res.source)
       }
@@ -328,6 +333,7 @@ function App() {
                   setSourceLang(h.sourceLang)
                   setTargetLang(h.targetLang)
                   setResult(h.result)
+                  setResultImageUrl(null)
                   setShowHistory(false)
                 }}>
                   <div className="history-langs">
@@ -430,7 +436,7 @@ function App() {
                   <button
                     className="icon-btn"
                     title="Clear"
-                    onClick={() => { setSourceText(""); setResult(""); setDetectedLang("") }}
+                    onClick={() => { setSourceText(""); setResult(""); setResultImageUrl(null); setDetectedLang("") }}
                   >
                     ✕ Clear
                   </button>
@@ -448,7 +454,19 @@ function App() {
                   {pdfLoading ? 'Translating PDF…' : 'Translating…'}
                 </span>
               ) : (
-                <div className="result-text">{result}</div>
+                <>
+                  <div className="result-text">{result}</div>
+                  {resultImageUrl && (
+                    <div className="result-image-wrap">
+                      <img
+                        className="result-image"
+                        src={resultImageUrl}
+                        alt="Translated output preview"
+                        loading="lazy"
+                      />
+                    </div>
+                  )}
+                </>
               )}
             </div>
             {result && !loading && (

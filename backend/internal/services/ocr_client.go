@@ -29,6 +29,9 @@ type OCRClient interface {
 	// per-page plain text in document order. If the service does not return
 	// per-page data, the full text is returned as a single-element slice.
 	ExtractPages(filePath, lang string) ([]string, error)
+	// ExtractImageBlocks reads an image file and returns OCR blocks with text
+	// and axis-aligned bounding boxes.
+	ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, error)
 }
 
 type ocrClient struct {
@@ -55,11 +58,24 @@ type ocrPDFResponse struct {
 	Pages []ocrPageResult `json:"pages"`
 }
 
+// OCRTextBlock mirrors TextBlock from the OCR service.
+type OCRTextBlock struct {
+	Text string    `json:"text"`
+	Bbox []float64 `json:"bbox"` // [x1, y1, x2, y2]
+}
+
 type ocrPageResult struct {
-	Text string `json:"text"`
+	Text   string         `json:"text"`
+	Blocks []OCRTextBlock `json:"blocks"`
+}
+
+type ocrImageResponse struct {
+	Text   string         `json:"text"`
+	Blocks []OCRTextBlock `json:"blocks"`
 }
 
 const ocrPDFPath = "/ocr/pdf"
+const ocrImagePath = "/ocr/image"
 
 // fetchOCRResponse routes the PDF through shared-path → multipart → JSON-stream
 // strategies and returns the decoded OCR response.
@@ -156,6 +172,56 @@ func (c *ocrClient) ExtractPages(filePath, lang string) ([]string, error) {
 		return nil, fmt.Errorf("ocr: service returned empty response")
 	}
 	return []string{resp.Text}, nil
+}
+
+func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("ocr: service URL is not configured")
+	}
+	if lang == "" {
+		lang = "auto"
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("ocr: read image %q: %w", filePath, err)
+	}
+	mimeType := http.DetectContentType(raw)
+	body, err := json.Marshal(map[string]interface{}{
+		"image_b64": base64.StdEncoding.EncodeToString(raw),
+		"mime_type": mimeType,
+		"lang":      lang,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ocr: build image OCR request body: %w", err)
+	}
+
+	buildReq := func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, c.baseURL+ocrImagePath, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("ocr: build image request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}
+
+	httpResp, err := c.doWithRetry(buildReq, 1)
+	if err != nil {
+		return nil, fmt.Errorf("ocr: POST %s: %w", ocrImagePath, err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ocr: service returned HTTP %d", httpResp.StatusCode)
+	}
+
+	var decoded ocrImageResponse
+	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("ocr: decode image response: %w", err)
+	}
+	if len(decoded.Blocks) == 0 {
+		return nil, fmt.Errorf("ocr: image response returned no blocks")
+	}
+	return decoded.Blocks, nil
 }
 
 func (c *ocrClient) canUseSharedPath(filePath string) bool {

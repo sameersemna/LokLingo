@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	internalservices "loklingo/backend/internal/services"
 	"loklingo/backend/services"
 )
 
@@ -89,6 +90,7 @@ func (m *mockPDFSvc) PageCount(_ string) (int, error) {
 type mockOCRSvc struct {
 	result string
 	err    error
+	blocks []internalservices.OCRTextBlock
 }
 
 func (m *mockOCRSvc) ExtractText(_, _ string) (string, error) {
@@ -106,6 +108,19 @@ func (m *mockOCRSvc) ExtractPages(_, _ string) ([]string, error) {
 		return []string{""}, nil
 	}
 	return []string{m.result}, nil
+}
+
+func (m *mockOCRSvc) ExtractImageBlocks(_, _ string) ([]internalservices.OCRTextBlock, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if len(m.blocks) > 0 {
+		return m.blocks, nil
+	}
+	if strings.TrimSpace(m.result) == "" {
+		return nil, nil
+	}
+	return []internalservices.OCRTextBlock{{Text: m.result, Bbox: []float64{0, 0, 20, 20}}}, nil
 }
 
 // ---------- tests ---------------------------------------------------------

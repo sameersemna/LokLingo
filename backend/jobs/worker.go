@@ -602,11 +602,11 @@ func cleanStaleUploads(dir string, maxAge time.Duration) {
 }
 
 func (w *Worker) process(ctx context.Context, job *Job) {
-	// Best-effort: remove the uploaded PDF once the job reaches a terminal state.
+	// Best-effort: remove uploaded source files once the job reaches a terminal state.
 	defer func() {
-		if job.Type == TypePDF && job.FilePath != "" {
+		if (job.Type == TypePDF || job.Type == TypeImage) && job.FilePath != "" {
 			if err := os.Remove(job.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				slog.Warn("pdf_cleanup_failed", "job_id", job.ID, "file", job.FilePath, "err", err)
+				slog.Warn("source_file_cleanup_failed", "job_id", job.ID, "file", job.FilePath, "err", err)
 			}
 		}
 	}()
@@ -727,6 +727,171 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		w.processLayoutMode(ctx, job)
 		return
 	default: // ModeOverlay — continue with the overlay translation pipeline below.
+	}
+
+	if job.Type == TypeImage {
+		if job.FilePath == "" {
+			job.Status = StatusFailed
+			job.ErrorMsg = "file_path is required for translate_image jobs"
+			if err := w.store.Update(ctx, job); err != nil {
+				slog.Error("update image job result (missing file_path)", "job_id", job.ID, "err", err)
+			}
+			return
+		}
+		if w.ocrClient == nil {
+			job.Status = StatusFailed
+			job.ErrorMsg = "ocr client is required for translate_image jobs"
+			if err := w.store.Update(ctx, job); err != nil {
+				slog.Error("update image job result (missing ocr client)", "job_id", job.ID, "err", err)
+			}
+			return
+		}
+
+		job.Status = StatusProcessing
+		if err := w.store.Update(ctx, job); err != nil {
+			slog.Error("update image job to processing", "job_id", job.ID, "err", err)
+		}
+
+		blocks, err := w.ocrClient.ExtractImageBlocks(job.FilePath, job.Lang)
+		if err != nil {
+			job.Status = StatusFailed
+			job.ErrorMsg = fmt.Sprintf("image OCR failed: %v", err)
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (ocr failed)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+
+		translatedTexts := make([]string, len(blocks))
+		segmentText := make([]string, 0, len(blocks))
+		segmentBlockIdx := make([]int, 0, len(blocks))
+		for i, b := range blocks {
+			sourceText := strings.TrimSpace(b.Text)
+			if sourceText == "" {
+				continue
+			}
+			segmentText = append(segmentText, sourceText)
+			segmentBlockIdx = append(segmentBlockIdx, i)
+		}
+
+		if len(segmentText) == 0 {
+			job.Status = StatusFailed
+			job.ErrorMsg = "image OCR returned no translatable text"
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (no text)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+
+		units := buildChunkUnits(segmentText, w.chunkMaxWords)
+		chunks := buildTextChunks(units, w.chunkMinWords, w.chunkMaxWords)
+		if len(chunks) == 0 {
+			job.Status = StatusFailed
+			job.ErrorMsg = "image OCR returned no translatable text"
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (no chunks)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+
+		results := make([][]chunkUnit, len(chunks))
+		errByChunk := make([]error, len(chunks))
+		maxParallel := w.translateConcurrency
+		if maxParallel <= 0 {
+			maxParallel = 1
+		}
+		sem := make(chan struct{}, maxParallel)
+		var wg sync.WaitGroup
+		for i, chunk := range chunks {
+			wg.Add(1)
+			go func(idx int, c textChunk) {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					errByChunk[idx] = ctx.Err()
+					return
+				}
+				defer func() { <-sem }()
+				translatedUnits, terr := w.translateChunk(ctx, c, job.Source, job.Target, metrics)
+				if terr != nil {
+					errByChunk[idx] = terr
+					return
+				}
+				results[idx] = translatedUnits
+			}(i, chunk)
+		}
+		wg.Wait()
+
+		translatedPartsBySegment := make([][]string, len(segmentText))
+		for i := range results {
+			if errByChunk[i] != nil {
+				job.Status = StatusFailed
+				job.ErrorMsg = errByChunk[i].Error()
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update image job result (translation failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+			for _, u := range results[i] {
+				if u.pageIndex >= 0 && u.pageIndex < len(translatedPartsBySegment) {
+					translatedPartsBySegment[u.pageIndex] = append(translatedPartsBySegment[u.pageIndex], strings.TrimSpace(u.text))
+				}
+			}
+		}
+
+		fullSource := make([]string, 0, len(segmentText))
+		fullTarget := make([]string, 0, len(segmentText))
+		for segIdx, blockIdx := range segmentBlockIdx {
+			translated := strings.TrimSpace(strings.Join(translatedPartsBySegment[segIdx], " "))
+			if translated == "" {
+				continue
+			}
+			translatedTexts[blockIdx] = translated
+			fullSource = append(fullSource, segmentText[segIdx])
+			fullTarget = append(fullTarget, translated)
+		}
+
+		if len(fullTarget) == 0 {
+			job.Status = StatusFailed
+			job.ErrorMsg = "image OCR returned no translatable text"
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (empty translation)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+
+		renderBlocks := make([]internalservices.ImageTextBlock, len(blocks))
+		for i, b := range blocks {
+			renderBlocks[i] = internalservices.ImageTextBlock{Text: b.Text, Bbox: b.Bbox}
+		}
+		outPath, err := internalservices.DrawTextOnImage(job.FilePath, renderBlocks, translatedTexts)
+		if err != nil {
+			job.Status = StatusFailed
+			job.ErrorMsg = fmt.Sprintf("image rendering failed: %v", err)
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (render failed)", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+
+		job.Text = strings.Join(fullSource, "\n")
+		job.TranslatedText = strings.Join(fullTarget, "\n")
+		job.OutputFilePath = outPath
+		job.Status = StatusCompleted
+		if err := w.store.SetCached(ctx, job.Text, job.Source, job.Target, job.TranslatedText); err != nil {
+			slog.Warn("failed to cache image translation", "job_id", job.ID, "err", err)
+		}
+		if err := w.store.Update(ctx, job); err != nil {
+			slog.Error("update image job result", "job_id", job.ID, "err", err)
+		}
+		slog.Info("image_job_finished",
+			"job_id", job.ID,
+			"output_file_path", job.OutputFilePath,
+			"blocks", len(blocks),
+			"status", job.Status,
+		)
+		return
 	}
 
 	// Check translation cache before calling the LLM.

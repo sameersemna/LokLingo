@@ -9,6 +9,7 @@ export interface TranslateResponse {
   translated_text: string
   source: string
   target: string
+  image_url?: string
   cached?: boolean
 }
 
@@ -18,6 +19,7 @@ export interface JobResponse {
   job_id: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
   translated_text?: string
+  image_url?: string
   source?: string
   target?: string
   error?: string
@@ -77,6 +79,7 @@ async function pollJob(
         translated_text: job.translated_text ?? '',
         source: job.source ?? fallbackSource,
         target: job.target ?? fallbackTarget,
+        image_url: job.image_url,
       }
     }
 

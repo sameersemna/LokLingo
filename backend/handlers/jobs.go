@@ -108,6 +108,12 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 	}
 	if job.Status == jobs.StatusCompleted {
 		resp["translated_text"] = job.TranslatedText
+		if job.OutputFilePath != "" {
+			resp["output_file_path"] = job.OutputFilePath
+			if job.Type == jobs.TypeImage {
+				resp["image_url"] = fmt.Sprintf("/api/v1/jobs/%s/output", job.ID)
+			}
+		}
 	}
 	if job.Status == jobs.StatusFailed {
 		resp["error"] = job.ErrorMsg
@@ -250,4 +256,56 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"job_id": job.ID,
 	})
+}
+
+// DownloadJobOutput handles GET /api/v1/jobs/:id/output.
+// Streams the rendered output file (e.g. translated image) for a completed job.
+// Returns 404 when the job does not exist, has no output, or is not yet complete.
+func (h *JobsHandler) DownloadJobOutput(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if id == "" {
+		return errResponse(c, fiber.StatusBadRequest, "job id is required")
+	}
+
+	job, err := h.store.Get(c.Context(), id)
+	if errors.Is(err, jobs.ErrNotFound) {
+		return errResponse(c, fiber.StatusNotFound, "job not found")
+	}
+	if err != nil {
+		slog.Error("failed to retrieve job", "request_id", c.Locals("requestID"), "job_id", id, "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to retrieve job")
+	}
+
+	if job.Status != jobs.StatusCompleted || job.OutputFilePath == "" {
+		return errResponse(c, fiber.StatusNotFound, "output not available")
+	}
+
+	// Guard against directory traversal: the output must live under ImageUploadDir.
+	clean := filepath.Clean(job.OutputFilePath)
+	allowedDir := filepath.Clean(jobs.ImageUploadDir)
+	if len(clean) <= len(allowedDir) || clean[:len(allowedDir)+1] != allowedDir+"/" {
+		slog.Error("output_file_path outside allowed dir", "path", clean)
+		return errResponse(c, fiber.StatusForbidden, "output not accessible")
+	}
+
+	if _, err := os.Stat(clean); err != nil {
+		return errResponse(c, fiber.StatusNotFound, "output file not found")
+	}
+
+	ext := filepath.Ext(clean)
+	contentType := "application/octet-stream"
+	switch ext {
+	case ".png":
+		contentType = "image/png"
+	case ".jpg", ".jpeg":
+		contentType = "image/jpeg"
+	case ".gif":
+		contentType = "image/gif"
+	case ".webp":
+		contentType = "image/webp"
+	}
+
+	c.Set("Content-Type", contentType)
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(clean)))
+	return c.SendFile(clean)
 }

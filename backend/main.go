@@ -102,6 +102,7 @@ func main() {
 	api.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
 	api.Post("/jobs/image", jobsHandler.CreateImageJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)
+	api.Get("/jobs/:id/output", jobsHandler.DownloadJobOutput)
 	api.Get("/metrics/ocr", middleware.InternalToken(cfg.InternalToken), ocrMetricsHandler.Summary)
 
 	slog.Info("LokLingo backend starting", "port", cfg.Port)

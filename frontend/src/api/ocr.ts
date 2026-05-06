@@ -1,14 +1,10 @@
 const OCR_BASE = '/ocr'
 
-export interface BoundingBox {
-  /** 4 corner points [[x,y], …] in clockwise order */
-  points: number[][]
-}
-
 export interface TextBlock {
   text: string
   confidence: number
-  bbox: BoundingBox
+  /** Axis-aligned bounding box [x1, y1, x2, y2] */
+  bbox: [number, number, number, number]
 }
 
 export interface OCRImageResponse {

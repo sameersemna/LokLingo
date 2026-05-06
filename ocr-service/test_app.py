@@ -133,7 +133,7 @@ class TestSummarise(unittest.TestCase):
             ocr_app.TextBlock(
                 text=t,
                 confidence=c,
-                bbox=ocr_app.BoundingBox(points=[[0, 0], [1, 0], [1, 1], [0, 1]]),
+                bbox=[0.0, 0.0, 1.0, 1.0],
             )
             for t, c in entries
         ]

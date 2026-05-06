@@ -111,16 +111,14 @@ LangField = Annotated[
 ]
 
 
-class BoundingBox(BaseModel):
-    points: list[list[float]] = Field(
-        description="4 corner points [[x,y], …] in clockwise order (top-left first)"
-    )
-
-
 class TextBlock(BaseModel):
     text: str
     confidence: float = Field(ge=0.0, le=1.0)
-    bbox: BoundingBox
+    bbox: list[float] = Field(
+        description="Axis-aligned bounding box [x1, y1, x2, y2]",
+        min_length=4,
+        max_length=4,
+    )
 
 
 class OCRImageRequest(BaseModel):
@@ -168,11 +166,14 @@ def _ocr_pil_image(image: Image.Image, lang: str) -> list[TextBlock]:
     for page in result or []:
         for line in page or []:
             bbox_raw, (text, conf) = line
+            xs = [pt[0] for pt in bbox_raw]
+            ys = [pt[1] for pt in bbox_raw]
+            bbox = [min(xs), min(ys), max(xs), max(ys)]
             blocks.append(
                 TextBlock(
                     text=text,
                     confidence=round(float(conf), 4),
-                    bbox=BoundingBox(points=[list(pt) for pt in bbox_raw]),
+                    bbox=bbox,
                 )
             )
     return blocks

@@ -42,6 +42,7 @@ type Job struct {
 	Source         string    `json:"source"`
 	Target         string    `json:"target"`
 	TranslatedText string    `json:"translated_text,omitempty"`
+	OutputFilePath string    `json:"output_file_path,omitempty"`
 	ErrorMsg       string    `json:"error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`

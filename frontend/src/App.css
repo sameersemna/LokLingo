@@ -705,6 +705,20 @@ body {
   color: var(--text);
 }
 
+.result-image-wrap {
+  margin-top: 0.8rem;
+}
+
+.result-image {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
 .status {
   color: var(--text-muted);
   font-style: italic;
