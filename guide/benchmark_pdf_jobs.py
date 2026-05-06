@@ -38,6 +38,9 @@ class BenchmarkResult:
     max_chunk_latency_ms: int | None
     processed_pages: int | None
     total_pages: int | None
+    total_retry_events: int | None
+    timeout_retry_count: int | None
+    split_count: int | None
     error: str | None
 
 
@@ -213,10 +216,13 @@ def _fetch_logs_from_file(log_file: str, since: datetime) -> list[dict[str, Any]
 def extract_metrics_from_logs(
     records: list[dict[str, Any]],
     job_id: str,
-) -> tuple[int | None, int | None, int | None]:
+) -> tuple[int | None, int | None, int | None, int | None, int | None, int | None]:
     job_duration_ms: int | None = None
     chunk_count: int | None = None
     max_chunk_latency_ms: int | None = None
+    total_retry_events: int | None = None
+    timeout_retry_count: int | None = None
+    split_count: int | None = None
 
     for rec in records:
         rec_job_id = rec.get("job_id")
@@ -234,8 +240,14 @@ def extract_metrics_from_logs(
                 job_duration_ms = int(rec["duration_ms"])
             if isinstance(rec.get("chunk_count"), int):
                 chunk_count = int(rec["chunk_count"])
+            if isinstance(rec.get("total_retry_events"), int):
+                total_retry_events = int(rec["total_retry_events"])
+            if isinstance(rec.get("timeout_retry_count"), int):
+                timeout_retry_count = int(rec["timeout_retry_count"])
+            if isinstance(rec.get("split_count"), int):
+                split_count = int(rec["split_count"])
 
-    return job_duration_ms, chunk_count, max_chunk_latency_ms
+    return job_duration_ms, chunk_count, max_chunk_latency_ms, total_retry_events, timeout_retry_count, split_count
 
 
 def run_single_benchmark(
@@ -287,7 +299,7 @@ def run_single_benchmark(
     elif log_mode == "file":
         records = _fetch_logs_from_file(backend_log_file, since)
 
-    job_duration_ms, chunk_count, max_chunk_latency_ms = extract_metrics_from_logs(records, job_id)
+    job_duration_ms, chunk_count, max_chunk_latency_ms, total_retry_events, timeout_retry_count, split_count = extract_metrics_from_logs(records, job_id)
 
     return BenchmarkResult(
         label=label,
@@ -300,6 +312,9 @@ def run_single_benchmark(
         max_chunk_latency_ms=max_chunk_latency_ms,
         processed_pages=int(processed_pages) if isinstance(processed_pages, int) else None,
         total_pages=int(total_pages) if isinstance(total_pages, int) else None,
+        total_retry_events=total_retry_events,
+        timeout_retry_count=timeout_retry_count,
+        split_count=split_count,
         error=str(error_msg) if error_msg is not None else None,
     )
 
@@ -319,10 +334,13 @@ def print_report(results: list[BenchmarkResult]) -> None:
         "job_duration_ms",
         "chunk_count",
         "max_chunk_latency_ms",
+        "total_retry_events",
+        "timeout_retry_count",
+        "split_count",
         "pages",
     ]
     print("\n" + " | ".join(header))
-    print("-" * 140)
+    print("-" * 180)
     for r in results:
         pages = "n/a"
         if r.processed_pages is not None or r.total_pages is not None:
@@ -337,6 +355,9 @@ def print_report(results: list[BenchmarkResult]) -> None:
                     _fmt_ms(r.job_duration_ms),
                     "n/a" if r.chunk_count is None else str(r.chunk_count),
                     _fmt_ms(r.max_chunk_latency_ms),
+                    "n/a" if r.total_retry_events is None else str(r.total_retry_events),
+                    "n/a" if r.timeout_retry_count is None else str(r.timeout_retry_count),
+                    "n/a" if r.split_count is None else str(r.split_count),
                     pages,
                 ]
             )

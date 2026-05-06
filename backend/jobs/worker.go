@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,20 +177,30 @@ const pdfTranslateConcurrency = 3
 // error (e.g. HTTP 429 rate-limit) before the page translation is failed.
 const translateMaxRetries = 3
 
+// translateChunkTimeout is the hard per-chunk deadline for a single translation
+// request. If exceeded, the chunk is immediately cancelled and split into halves
+// (split-before-retry). 20s bounds worst-case chunk latency while giving the LLM
+// enough headroom on loaded hosts; most chunks complete in 3–12s.
+// Kept as a variable so tests can temporarily override it.
+var translateChunkTimeout = 20 * time.Second
+
 // translateRetryBase is the initial back-off delay before the first retry.
 // Each subsequent retry doubles the delay (capped at translateRetryBase * 2^retries).
-const translateRetryBase = 500 * time.Millisecond
-
-// slowChunkThreshold defines when a chunk translation is considered slow.
 // Kept as a variable so tests can temporarily override it.
-var slowChunkThreshold = 30 * time.Second
+var translateRetryBase = 500 * time.Millisecond
+
+// slowChunkThreshold defines when a chunk translation is considered slow enough
+// to trigger adaptive chunk-size reduction. Aligned with translateChunkTimeout so
+// that any chunk that hits the timeout is also counted as slow.
+// Kept as a variable so tests can temporarily override it.
+var slowChunkThreshold = 20 * time.Second
 
 // pdfChunkMinWords and pdfChunkMaxWords define the target PDF translation chunk
 // size in words. Chunks are built from contiguous page text units to reduce LLM
 // per-chunk latency and variance while keeping inputs within a safe token budget.
-// Target: 300–500 words per chunk.
-const pdfChunkMinWords = 250
-const pdfChunkMaxWords = 500
+// Target: 80–150 words per chunk; hard timeout + split-before-retry keep outliers bounded.
+const pdfChunkMinWords = 80
+const pdfChunkMaxWords = 150
 
 const pdfChunkSep = "\n\n[[[LK_PAGE_BREAK]]]\n\n"
 
@@ -204,7 +215,38 @@ type textChunk struct {
 	words int
 }
 
-const minAdaptiveChunkWordsFloor = 100
+type retryMetrics struct {
+	translateRetryCount atomic.Int64
+	timeoutRetryCount   atomic.Int64
+	splitCount          atomic.Int64
+}
+
+func (m *retryMetrics) incTranslateRetry() {
+	if m != nil {
+		m.translateRetryCount.Add(1)
+	}
+}
+
+func (m *retryMetrics) incTimeoutRetry() {
+	if m != nil {
+		m.timeoutRetryCount.Add(1)
+	}
+}
+
+func (m *retryMetrics) incSplit() {
+	if m != nil {
+		m.splitCount.Add(1)
+	}
+}
+
+func (m *retryMetrics) totalRetryEvents() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.translateRetryCount.Load() + m.timeoutRetryCount.Load() + m.splitCount.Load()
+}
+
+const minAdaptiveChunkWordsFloor = 40
 
 // isRateLimitError reports whether err looks like an HTTP 429 / rate-limit
 // response from LiteLLM.  The service wraps the status as a formatted string
@@ -228,8 +270,15 @@ func isTransientNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// net.Error with Timeout() covers http.Client deadline/timeout errors,
+	// including "Client.Timeout exceeded while awaiting headers" and i/o timeouts.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
 	msg := err.Error()
 	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "Client.Timeout exceeded") ||
 		strings.Contains(msg, "net/http: request canceled") ||
 		strings.Contains(msg, "connection timed out") ||
 		strings.Contains(msg, "connection reset by peer") ||
@@ -244,8 +293,8 @@ func isTransientNetworkError(err error) bool {
 // immediately.  If the job context is already cancelled or expired the call
 // returns ctx.Err() without retrying.
 // Acquires a slot from the global LLM semaphore before calling the service.
-// retries is incremented (atomically) each time a retry is issued; it may be nil.
-func (w *Worker) translateWithRetry(ctx context.Context, text, source, target string, retries *atomic.Int64) (string, error) {
+// metrics is incremented (atomically) each time a retry/split event is issued; it may be nil.
+func (w *Worker) translateWithRetry(ctx context.Context, text, source, target string, metrics *retryMetrics) (string, error) {
 	// Acquire global LLM concurrency slot; respect context cancellation.
 	select {
 	case w.globalLLMSem <- struct{}{}:
@@ -266,17 +315,23 @@ func (w *Worker) translateWithRetry(ctx context.Context, text, source, target st
 		if err == nil {
 			return result, nil
 		}
-		isRetryable := isRateLimitError(err) || isTransientNetworkError(err)
+		isRateLimit := isRateLimitError(err)
+		isNetTimeout := isTransientNetworkError(err)
+		isRetryable := isRateLimit || isNetTimeout
 		// Never retry if the job context is already done, or we've exhausted attempts.
 		if !isRetryable || attempt >= translateMaxRetries || ctx.Err() != nil {
 			return "", err
 		}
-		if retries != nil {
-			retries.Add(1)
+		metrics.incTranslateRetry()
+		errKind := "rate_limit"
+		if isNetTimeout {
+			errKind = "network_timeout"
 		}
 		slog.Warn("translate transient error, backing off",
 			"attempt", attempt+1,
+			"max_attempts", translateMaxRetries+1,
 			"backoff_ms", delay.Milliseconds(),
+			"err_kind", errKind,
 			"err", err,
 		)
 		select {
@@ -354,58 +409,155 @@ func reduceChunkWordRange(minWords, maxWords int) (int, int) {
 	if newMin < minAdaptiveChunkWordsFloor {
 		newMin = minAdaptiveChunkWordsFloor
 	}
+	if newMin > minWords {
+		newMin = minWords
+	}
 	if newMax < newMin {
 		newMax = newMin
 	}
 	return newMin, newMax
 }
 
-func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, target string, retries *atomic.Int64) ([]chunkUnit, error) {
+func isChunkTimeoutError(parentCtx context.Context, chunkCtx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if parentCtx != nil && parentCtx.Err() != nil {
+		return false
+	}
+	if chunkCtx != nil && errors.Is(chunkCtx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "context deadline exceeded")
+}
+
+func sumUnitWords(units []chunkUnit) int {
+	total := 0
+	for _, u := range units {
+		total += u.words
+	}
+	return total
+}
+
+func (w *Worker) translateWithChunkTimeout(ctx context.Context, text, source, target string, metrics *retryMetrics) (string, error) {
+	timeout := translateChunkTimeout
+	if timeout <= 0 {
+		return w.translateWithRetry(ctx, text, source, target, metrics)
+	}
+	chunkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return w.translateWithRetry(chunkCtx, text, source, target, metrics)
+}
+
+func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, target string, metrics *retryMetrics) ([]chunkUnit, error) {
 	if len(chunk.units) == 1 {
-		translated, err := w.translateWithRetry(ctx, chunk.units[0].text, source, target, retries)
-		if err != nil {
-			return nil, err
+		// Single-unit chunks: cannot split further, so fail immediately on timeout
+		// (do not retry the same slow chunk).
+		translated, err := w.translateWithChunkTimeout(ctx, chunk.units[0].text, source, target, metrics)
+		if err == nil {
+			return []chunkUnit{{
+				pageIndex: chunk.units[0].pageIndex,
+				text:      translated,
+				words:     len(strings.Fields(translated)),
+			}}, nil
 		}
-		return []chunkUnit{{
-			pageIndex: chunk.units[0].pageIndex,
-			text:      translated,
-			words:     len(strings.Fields(translated)),
-		}}, nil
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Log timeout failure
+		if isChunkTimeoutError(ctx, nil, err) {
+			slog.Warn("single_unit_chunk_timeout_fail",
+				"chunk_words", chunk.words,
+				"timeout_s", int(translateChunkTimeout.Seconds()),
+				"err", err,
+			)
+		}
+		return nil, err
 	}
 
+	// Multi-unit chunks: on timeout, immediately split (do not retry the same slow chunk).
 	parts := make([]string, 0, len(chunk.units))
 	for _, u := range chunk.units {
 		parts = append(parts, u.text)
 	}
 	payload := strings.Join(parts, pdfChunkSep)
-	translated, err := w.translateWithRetry(ctx, payload, source, target, retries)
-	if err != nil {
-		return nil, err
-	}
 
-	split := strings.Split(translated, pdfChunkSep)
-	if len(split) != len(chunk.units) {
-		// Fallback: if the model modified the delimiter, translate units one-by-one.
-		out := make([]chunkUnit, 0, len(chunk.units))
-		for _, u := range chunk.units {
-			part, perr := w.translateWithRetry(ctx, u.text, source, target, retries)
-			if perr != nil {
-				return nil, perr
+	chunkCtx, cancel := context.WithTimeout(ctx, translateChunkTimeout)
+	translated, err := w.translateWithRetry(chunkCtx, payload, source, target, metrics)
+	cancel()
+
+	if err == nil {
+		split := strings.Split(translated, pdfChunkSep)
+		if len(split) != len(chunk.units) {
+			// Fallback: if the model modified the delimiter, translate units one-by-one.
+			out := make([]chunkUnit, 0, len(chunk.units))
+			for _, u := range chunk.units {
+				part, perr := w.translateWithRetry(ctx, u.text, source, target, metrics)
+				if perr != nil {
+					return nil, perr
+				}
+				out = append(out, chunkUnit{pageIndex: u.pageIndex, text: part, words: len(strings.Fields(part))})
 			}
-			out = append(out, chunkUnit{pageIndex: u.pageIndex, text: part, words: len(strings.Fields(part))})
+			return out, nil
+		}
+
+		out := make([]chunkUnit, 0, len(split))
+		for i, s := range split {
+			out = append(out, chunkUnit{
+				pageIndex: chunk.units[i].pageIndex,
+				text:      strings.TrimSpace(s),
+				words:     len(strings.Fields(s)),
+			})
 		}
 		return out, nil
 	}
 
-	out := make([]chunkUnit, 0, len(split))
-	for i, s := range split {
-		out = append(out, chunkUnit{
-			pageIndex: chunk.units[i].pageIndex,
-			text:      strings.TrimSpace(s),
-			words:     len(strings.Fields(s)),
-		})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	return out, nil
+
+	// split-before-retry: for multi-unit chunks, always split on failure instead
+	// of propagating or retrying the same combined payload. Timeout errors are
+	// distinguished for metrics; all other errors also trigger a split so that
+	// single-unit sub-chunks can succeed independently with full retry logic.
+	mid := len(chunk.units) / 2
+	if mid == 0 {
+		mid = 1
+	}
+	leftUnits := chunk.units[:mid]
+	rightUnits := chunk.units[mid:]
+	if isChunkTimeoutError(ctx, nil, err) {
+		metrics.incTimeoutRetry()
+		metrics.incSplit()
+		slog.Warn("chunk_timeout_split",
+			"chunk_words", chunk.words,
+			"chunk_units", len(chunk.units),
+			"left_words", sumUnitWords(leftUnits),
+			"left_units", len(leftUnits),
+			"right_words", sumUnitWords(rightUnits),
+			"right_units", len(rightUnits),
+			"timeout_s", int(translateChunkTimeout.Seconds()),
+			"err", err,
+		)
+	} else {
+		metrics.incSplit()
+		slog.Warn("chunk_error_split",
+			"chunk_words", chunk.words,
+			"chunk_units", len(chunk.units),
+			"left_units", len(leftUnits),
+			"right_units", len(rightUnits),
+			"err", err,
+		)
+	}
+	left, lerr := w.translateChunk(ctx, textChunk{units: leftUnits, words: sumUnitWords(leftUnits)}, source, target, metrics)
+	if lerr != nil {
+		return nil, lerr
+	}
+	right, rerr := w.translateChunk(ctx, textChunk{units: rightUnits, words: sumUnitWords(rightUnits)}, source, target, metrics)
+	if rerr != nil {
+		return nil, rerr
+	}
+	return append(left, right...), nil
 }
 
 // cleanStaleUploads removes files under dir that are older than maxAge.
@@ -463,7 +615,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	var ocrTriggered bool
 	var ocrReason string
 	var ocrOutcome string
-	var retryCount atomic.Int64
+	metrics := &retryMetrics{}
 	var chunkCount int
 
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "source", job.Source, "target", job.Target)
@@ -642,7 +794,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				}
 				defer func() { <-sem }()
 				chunkStart := time.Now()
-				translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target, &retryCount)
+				translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target, metrics)
 				chunkEnd := time.Now()
 				chunkDur := chunkEnd.Sub(chunkStart)
 				chunkDurMs := chunkDur.Milliseconds()
@@ -798,6 +950,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		"status", job.Status,
 		"duration_ms", time.Since(startedAt).Milliseconds(),
 		"chunk_count", chunkCount,
-		"retry_count", retryCount.Load(),
+		"retry_count", metrics.totalRetryEvents(),
+		"total_retry_events", metrics.totalRetryEvents(),
+		"timeout_retry_count", metrics.timeoutRetryCount.Load(),
+		"split_count", metrics.splitCount.Load(),
 	)
 }

@@ -21,8 +21,8 @@ type Config struct {
 	MaxPDFPages                  int
 	TranslateConcurrency         int    // max concurrent LLM page-translation requests per job; default 3
 	MaxLLMConcurrency            int    // max total concurrent LLM calls across all jobs (global); default 10
-	TranslateChunkMinWords       int    // preferred minimum words per translation chunk; default 500
-	TranslateChunkMaxWords       int    // hard cap words per translation chunk; default 1000
+	TranslateChunkMinWords       int    // preferred minimum words per translation chunk; default 80
+	TranslateChunkMaxWords       int    // hard cap words per translation chunk; default 150
 	LiteLLMRequestTimeoutSeconds int    // HTTP client timeout for LLM calls in seconds; default 300 (5 min)
 	InternalToken                string // optional; enforces X-Internal-Token on internal routes
 }
@@ -44,8 +44,8 @@ func Load() *Config {
 		MaxPDFPages:                  getEnvInt("MAX_PDF_PAGES", 300),
 		TranslateConcurrency:         getEnvInt("TRANSLATE_CONCURRENCY", 3),
 		MaxLLMConcurrency:            getEnvInt("MAX_LLM_CONCURRENCY", 10),
-		TranslateChunkMinWords:       getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 500),
-		TranslateChunkMaxWords:       getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 1000),
+		TranslateChunkMinWords:       getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 80),
+		TranslateChunkMaxWords:       getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 150),
 		LiteLLMRequestTimeoutSeconds: getEnvInt("LITELLM_REQUEST_TIMEOUT_SECONDS", 300),
 		InternalToken:                getEnv("INTERNAL_TOKEN", ""),
 	}
