@@ -8,44 +8,46 @@ import (
 )
 
 type Config struct {
-	AppEnv                 string
-	Port                   string
-	LiteLLMBaseURL         string
-	LiteLLMAPIKey          string
-	LiteLLMModel           string
-	OCRServiceURL          string
-	OCRSharedStorageDir    string
-	RedisURL               string
-	PostgresDSN            string // optional; enables Postgres analytics sink when set
-	MaxPDFUploadBytes      int64
-	MaxPDFPages            int
-	TranslateConcurrency   int    // max concurrent LLM page-translation requests per job; default 3
-	MaxLLMConcurrency      int    // max total concurrent LLM calls across all jobs (global); default 10
-	TranslateChunkMinWords int    // preferred minimum words per translation chunk; default 500
-	TranslateChunkMaxWords int    // hard cap words per translation chunk; default 1000
-	InternalToken          string // optional; enforces X-Internal-Token on internal routes
+	AppEnv                       string
+	Port                         string
+	LiteLLMBaseURL               string
+	LiteLLMAPIKey                string
+	LiteLLMModel                 string
+	OCRServiceURL                string
+	OCRSharedStorageDir          string
+	RedisURL                     string
+	PostgresDSN                  string // optional; enables Postgres analytics sink when set
+	MaxPDFUploadBytes            int64
+	MaxPDFPages                  int
+	TranslateConcurrency         int    // max concurrent LLM page-translation requests per job; default 3
+	MaxLLMConcurrency            int    // max total concurrent LLM calls across all jobs (global); default 10
+	TranslateChunkMinWords       int    // preferred minimum words per translation chunk; default 500
+	TranslateChunkMaxWords       int    // hard cap words per translation chunk; default 1000
+	LiteLLMRequestTimeoutSeconds int    // HTTP client timeout for LLM calls in seconds; default 300 (5 min)
+	InternalToken                string // optional; enforces X-Internal-Token on internal routes
 }
 
 func Load() *Config {
 	appEnv := getEnv("APP_ENV", "development")
 
 	return &Config{
-		AppEnv:                 appEnv,
-		Port:                   getEnv("PORT", "8080"),
-		LiteLLMBaseURL:         getEnv("LITELLM_BASE_URL", ""),
-		LiteLLMAPIKey:          getEnv("LITELLM_API_KEY", ""),
-		LiteLLMModel:           getEnv("LITELLM_MODEL", ""),
-		OCRServiceURL:          getEnv("OCR_SERVICE_URL", ""),
-		OCRSharedStorageDir:    getEnv("OCR_SHARED_STORAGE_DIR", ""),
-		RedisURL:               resolveRedisURL(appEnv),
-		PostgresDSN:            getEnv("POSTGRES_DSN", ""),
-		MaxPDFUploadBytes:      getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
-		MaxPDFPages:            getEnvInt("MAX_PDF_PAGES", 300),
-		TranslateConcurrency:   getEnvInt("TRANSLATE_CONCURRENCY", 3),
-		MaxLLMConcurrency:      getEnvInt("MAX_LLM_CONCURRENCY", 10),
-		TranslateChunkMinWords: getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 500),
-		TranslateChunkMaxWords: getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 1000),
-		InternalToken:          getEnv("INTERNAL_TOKEN", ""),
+		AppEnv:                       appEnv,
+		Port:                         getEnv("PORT", "8080"),
+		LiteLLMBaseURL:               getEnv("LITELLM_BASE_URL", ""),
+		LiteLLMAPIKey:                getEnv("LITELLM_API_KEY", ""),
+		LiteLLMModel:                 getEnv("LITELLM_MODEL", ""),
+		OCRServiceURL:                getEnv("OCR_SERVICE_URL", ""),
+		OCRSharedStorageDir:          getEnv("OCR_SHARED_STORAGE_DIR", ""),
+		RedisURL:                     resolveRedisURL(appEnv),
+		PostgresDSN:                  getEnv("POSTGRES_DSN", ""),
+		MaxPDFUploadBytes:            getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
+		MaxPDFPages:                  getEnvInt("MAX_PDF_PAGES", 300),
+		TranslateConcurrency:         getEnvInt("TRANSLATE_CONCURRENCY", 3),
+		MaxLLMConcurrency:            getEnvInt("MAX_LLM_CONCURRENCY", 10),
+		TranslateChunkMinWords:       getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 500),
+		TranslateChunkMaxWords:       getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 1000),
+		LiteLLMRequestTimeoutSeconds: getEnvInt("LITELLM_REQUEST_TIMEOUT_SECONDS", 300),
+		InternalToken:                getEnv("INTERNAL_TOKEN", ""),
 	}
 }
 
@@ -81,6 +83,9 @@ func (c *Config) Validate() error {
 	}
 	if c.TranslateChunkMaxWords < c.TranslateChunkMinWords {
 		invalid = append(invalid, "TRANSLATE_CHUNK_MAX_WORDS must be >= TRANSLATE_CHUNK_MIN_WORDS")
+	}
+	if c.LiteLLMRequestTimeoutSeconds <= 0 {
+		invalid = append(invalid, "LITELLM_REQUEST_TIMEOUT_SECONDS must be >= 1")
 	}
 
 	if len(invalid) > 0 {

@@ -789,7 +789,149 @@ func TestWorker_TranslateWithRetry_NonRetryableErrorIsImmediate(t *testing.T) {
 	}
 }
 
-// TestWorker_WithTranslateConcurrency_Option verifies that the WorkerOption
+// ---------- transient network error retry tests --------------------------
+
+// transientFailTranslSvc fails with a configurable error for the first
+// `failTimes` calls, then succeeds with `result`.
+type transientFailTranslSvc struct {
+	mu        sync.Mutex
+	calls     int
+	failTimes int
+	failErr   string
+	result    string
+}
+
+func (m *transientFailTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls <= m.failTimes {
+		return "", errors.New(m.failErr)
+	}
+	if m.result != "" {
+		return m.result, nil
+	}
+	return "translated:" + in.Text, nil
+}
+
+// TestWorker_TranslateWithRetry_RetriesOnNetworkTimeout verifies that a
+// network timeout error is retried and ultimately succeeds.
+func TestWorker_TranslateWithRetry_RetriesOnNetworkTimeout(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Hello world"}
+	transSvc := &transientFailTranslSvc{
+		failTimes: 2,
+		failErr:   "net/http: request canceled (Client.Timeout exceeded while awaiting headers): i/o timeout",
+		result:    "Hallo Welt",
+	}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-retry-timeout",
+		Type:     TypePDF,
+		FilePath: "/tmp/timeout.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed after timeout retries, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText != "Hallo Welt" {
+		t.Fatalf("expected 'Hallo Welt', got %q", store.lastJob.TranslatedText)
+	}
+	transSvc.mu.Lock()
+	totalCalls := transSvc.calls
+	transSvc.mu.Unlock()
+	if totalCalls != 3 {
+		t.Fatalf("expected 3 Translate calls (2 timeouts + 1 success), got %d", totalCalls)
+	}
+}
+
+// TestWorker_TranslateWithRetry_RetriesOnDeadlineExceeded verifies that a
+// wrapped "context deadline exceeded" error (e.g. an internal HTTP request
+// timeout, not the job context) is retried and ultimately succeeds.
+func TestWorker_TranslateWithRetry_RetriesOnDeadlineExceeded(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Hello world"}
+	transSvc := &transientFailTranslSvc{
+		failTimes: 1,
+		failErr:   "Post \"http://litellm:4000/chat/completions\": context deadline exceeded",
+		result:    "Hallo Welt",
+	}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-retry-deadline",
+		Type:     TypePDF,
+		FilePath: "/tmp/deadline.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed after deadline retry, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText != "Hallo Welt" {
+		t.Fatalf("expected 'Hallo Welt', got %q", store.lastJob.TranslatedText)
+	}
+	transSvc.mu.Lock()
+	totalCalls := transSvc.calls
+	transSvc.mu.Unlock()
+	if totalCalls != 2 {
+		t.Fatalf("expected 2 Translate calls (1 deadline + 1 success), got %d", totalCalls)
+	}
+}
+
+// TestWorker_TranslateWithRetry_NoRetryOnCancelledJobContext verifies that
+// when the job's own context is cancelled, a transient error is NOT retried.
+func TestWorker_TranslateWithRetry_NoRetryOnCancelledJobContext(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Hello world"}
+
+	// Always fail with a transient error — but we'll cancel the context first.
+	transSvc := &transientFailTranslSvc{
+		failTimes: 99,
+		failErr:   "i/o timeout",
+	}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the job even starts
+
+	job := &Job{
+		ID:       "pdf-retry-ctx-cancelled",
+		Type:     TypePDF,
+		FilePath: "/tmp/cancelled.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(ctx, job)
+
+	// Job must be failed (context cancelled → no successful translation).
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusFailed {
+		t.Fatalf("expected status=failed for cancelled context, got %s", store.lastJob.Status)
+	}
+	// Must not have retried after the context was already done.
+	transSvc.mu.Lock()
+	totalCalls := transSvc.calls
+	transSvc.mu.Unlock()
+	if totalCalls > 1 {
+		t.Fatalf("expected at most 1 Translate call for cancelled context, got %d", totalCalls)
+	}
+}
+
 // correctly overrides the default concurrency.
 func TestWorker_WithTranslateConcurrency_Option(t *testing.T) {
 	const customConcurrency = 5
@@ -839,6 +981,77 @@ func (m *callCountingChunkSvc) Translate(in services.TranslationInput) (string, 
 		parts[i] = "translated:" + p
 	}
 	return strings.Join(parts, pdfChunkSep), nil
+}
+
+type adaptiveChunkSvc struct {
+	mu            sync.Mutex
+	calls         int
+	wordsPerCall  []int
+	firstCallSlow time.Duration
+}
+
+func (m *adaptiveChunkSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
+	m.calls++
+	callNum := m.calls
+	m.wordsPerCall = append(m.wordsPerCall, len(strings.Fields(in.Text)))
+	m.mu.Unlock()
+
+	if callNum == 1 && m.firstCallSlow > 0 {
+		time.Sleep(m.firstCallSlow)
+	}
+
+	parts := strings.Split(in.Text, pdfChunkSep)
+	for i, p := range parts {
+		parts[i] = "translated:" + p
+	}
+	return strings.Join(parts, pdfChunkSep), nil
+}
+
+type timingProfileTranslSvc struct {
+	mu            sync.Mutex
+	callDurations []time.Duration
+	fixedLatency  time.Duration
+}
+
+func (m *timingProfileTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	start := time.Now()
+	if m.fixedLatency > 0 {
+		time.Sleep(m.fixedLatency)
+	}
+	parts := strings.Split(in.Text, pdfChunkSep)
+	for i, p := range parts {
+		parts[i] = "translated:" + p
+	}
+	dur := time.Since(start)
+	m.mu.Lock()
+	m.callDurations = append(m.callDurations, dur)
+	m.mu.Unlock()
+	return strings.Join(parts, pdfChunkSep), nil
+}
+
+func (m *timingProfileTranslSvc) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callDurations = nil
+}
+
+func (m *timingProfileTranslSvc) maxCallDuration() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var max time.Duration
+	for _, d := range m.callDurations {
+		if d > max {
+			max = d
+		}
+	}
+	return max
+}
+
+func (m *timingProfileTranslSvc) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.callDurations)
 }
 
 func TestWorker_PDFJob_Chunking_ReducesLLMCallsAndPreservesOrder(t *testing.T) {
@@ -929,6 +1142,128 @@ func TestWorker_PDFJob_CustomChunkWordRange_ChangesCallCount(t *testing.T) {
 	if calls < 2 {
 		t.Fatalf("expected at least 2 calls with tighter chunk cap, got %d", calls)
 	}
+}
+
+func TestWorker_PDFJob_AdaptiveChunkSizing_ReducesAfterSlowChunk(t *testing.T) {
+	origSlowThreshold := slowChunkThreshold
+	slowChunkThreshold = 1 * time.Millisecond
+	defer func() { slowChunkThreshold = origSlowThreshold }()
+
+	mkPage := func(tag string) string {
+		// 60 words/page helps expose rechunking differences between 250/500 and 200/400.
+		return strings.TrimSpace(strings.Repeat(tag+" ", 60))
+	}
+	pages := make([]string, 32)
+	for i := range pages {
+		pages[i] = mkPage(fmt.Sprintf("p%d", i+1))
+	}
+
+	store := &mockWorkerStore{}
+	pdfSvc := &mockMultiPagePDFSvc{pages: pages}
+	transSvc := &adaptiveChunkSvc{firstCallSlow: 5 * time.Millisecond}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-adaptive-chunking",
+		Type:     TypePDF,
+		FilePath: "/tmp/adaptive.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil || store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected completed job, got %v", store.lastJob)
+	}
+
+	transSvc.mu.Lock()
+	calls := transSvc.calls
+	wordsPerCall := append([]int(nil), transSvc.wordsPerCall...)
+	transSvc.mu.Unlock()
+
+	// Without adaptive resizing this shape yields 4 calls; after a slow chunk in
+	// the first batch we expect the final work to split into an extra call.
+	if calls != 5 {
+		t.Fatalf("expected 5 Translate calls with adaptive chunk shrinking, got %d", calls)
+	}
+	if len(wordsPerCall) != calls {
+		t.Fatalf("expected wordsPerCall length=%d, got %d", calls, len(wordsPerCall))
+	}
+	// First chunk should be around the default 480-word size (8 x 60).
+	if wordsPerCall[0] < 450 {
+		t.Fatalf("expected first chunk near default size (~480 words), got %d", wordsPerCall[0])
+	}
+	// At least one later call should be smaller than the default chunk size due to adaptation.
+	sawReduced := false
+	for _, w := range wordsPerCall[1:] {
+		if w < 450 {
+			sawReduced = true
+			break
+		}
+	}
+	if !sawReduced {
+		t.Fatalf("expected adaptive sizing to produce at least one reduced chunk; words/call=%v", wordsPerCall)
+	}
+}
+
+func TestWorker_PDFJob_TimingProfiles_SmallMediumLarge(t *testing.T) {
+	mkPages := func(pageCount int, wordsPerPage int) []string {
+		pages := make([]string, pageCount)
+		for i := 0; i < pageCount; i++ {
+			tag := fmt.Sprintf("p%d", i+1)
+			pages[i] = strings.TrimSpace(strings.Repeat(tag+" ", wordsPerPage))
+		}
+		return pages
+	}
+
+	runCase := func(name string, pageCount int) (time.Duration, time.Duration, int, Status) {
+		store := &mockWorkerStore{}
+		pdfSvc := &mockMultiPagePDFSvc{pages: mkPages(pageCount, 60)}
+		transSvc := &timingProfileTranslSvc{fixedLatency: 35 * time.Millisecond}
+		w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+		job := &Job{
+			ID:       "pdf-timing-" + name,
+			Type:     TypePDF,
+			FilePath: "/tmp/" + name + ".pdf",
+			Source:   "en",
+			Target:   "de",
+		}
+
+		start := time.Now()
+		w.process(context.Background(), job)
+		total := time.Since(start)
+		maxChunk := transSvc.maxCallDuration()
+		calls := transSvc.callCount()
+		if store.lastJob == nil {
+			t.Fatalf("%s: expected updated job", name)
+		}
+		if store.lastJob.Status != StatusCompleted {
+			t.Fatalf("%s: expected completed job, got %s (err: %s)", name, store.lastJob.Status, store.lastJob.ErrorMsg)
+		}
+		if store.lastJob.ProcessedPages != pageCount {
+			t.Fatalf("%s: expected ProcessedPages=%d, got %d", name, pageCount, store.lastJob.ProcessedPages)
+		}
+		t.Logf("TIMING_PROFILE name=%s pages=%d total_ms=%d max_chunk_ms=%d calls=%d", name, pageCount, total.Milliseconds(), maxChunk.Milliseconds(), calls)
+		return total, maxChunk, calls, store.lastJob.Status
+	}
+
+	smallTotal, smallMaxChunk, _, _ := runCase("small", 5)
+	mediumTotal, mediumMaxChunk, _, _ := runCase("medium", 20)
+	largeTotal, largeMaxChunk, _, largeStatus := runCase("large", 50)
+
+	if !(smallTotal <= mediumTotal && mediumTotal <= largeTotal) {
+		t.Fatalf("expected non-decreasing timing by size; small=%v medium=%v large=%v", smallTotal, mediumTotal, largeTotal)
+	}
+
+	globalMaxChunk := smallMaxChunk
+	if mediumMaxChunk > globalMaxChunk {
+		globalMaxChunk = mediumMaxChunk
+	}
+	if largeMaxChunk > globalMaxChunk {
+		globalMaxChunk = largeMaxChunk
+	}
+	t.Logf("TIMING_SUMMARY small_ms=%d medium_ms=%d large_ms=%d max_chunk_ms=%d large_completed=%t", smallTotal.Milliseconds(), mediumTotal.Milliseconds(), largeTotal.Milliseconds(), globalMaxChunk.Milliseconds(), largeStatus == StatusCompleted)
 }
 
 func TestWorker_WithPDFChunkWordRange_ClampsInvalidRange(t *testing.T) {

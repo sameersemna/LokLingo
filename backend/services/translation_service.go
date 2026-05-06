@@ -32,9 +32,13 @@ type translationService struct {
 }
 
 func NewTranslationService(cfg *config.Config) TranslationService {
+	timeout := time.Duration(cfg.LiteLLMRequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 300 * time.Second // 5-minute safe default
+	}
 	return &translationService{
 		cfg:    cfg,
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{Timeout: timeout},
 	}
 }
 

@@ -43,14 +43,15 @@ func TestConfigValidateRequiresRuntimeDependencies(t *testing.T) {
 
 func TestConfigValidatePassesForCompleteConfig(t *testing.T) {
 	cfg := &Config{
-		LiteLLMBaseURL:         "http://latitude:11435",
-		LiteLLMModel:           "ollama/llama3.2:latest",
-		OCRServiceURL:          "http://loklingo-ocr:8000",
-		RedisURL:               "redis://loklingo-redis:6379",
-		TranslateConcurrency:   3,
-		MaxLLMConcurrency:      10,
-		TranslateChunkMinWords: 500,
-		TranslateChunkMaxWords: 1000,
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "ollama/llama3.2:latest",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       500,
+		TranslateChunkMaxWords:       1000,
+		LiteLLMRequestTimeoutSeconds: 300,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -114,13 +115,14 @@ func TestConfigValidateRejectsInvalidTranslationLimits(t *testing.T) {
 
 func TestConfigValidateRejectsInvalidChunkRange(t *testing.T) {
 	cfg := &Config{
-		LiteLLMBaseURL:         "http://latitude:11435",
-		LiteLLMModel:           "ollama/llama3.2:latest",
-		OCRServiceURL:          "http://loklingo-ocr:8000",
-		RedisURL:               "redis://loklingo-redis:6379",
-		TranslateConcurrency:   3,
-		TranslateChunkMinWords: 1000,
-		TranslateChunkMaxWords: 500,
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "ollama/llama3.2:latest",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		TranslateChunkMinWords:       1000,
+		TranslateChunkMaxWords:       500,
+		LiteLLMRequestTimeoutSeconds: 300,
 	}
 
 	err := cfg.Validate()
@@ -129,5 +131,36 @@ func TestConfigValidateRejectsInvalidChunkRange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "TRANSLATE_CHUNK_MAX_WORDS") {
 		t.Fatalf("expected validation error to mention TRANSLATE_CHUNK_MAX_WORDS, got %q", err.Error())
+	}
+}
+
+func TestLoadReadsLiteLLMRequestTimeoutSeconds(t *testing.T) {
+	t.Setenv("LITELLM_REQUEST_TIMEOUT_SECONDS", "600")
+
+	cfg := Load()
+	if cfg.LiteLLMRequestTimeoutSeconds != 600 {
+		t.Fatalf("expected LiteLLMRequestTimeoutSeconds=600, got %d", cfg.LiteLLMRequestTimeoutSeconds)
+	}
+}
+
+func TestConfigValidateRejectsZeroRequestTimeout(t *testing.T) {
+	cfg := &Config{
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "ollama/llama3.2:latest",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       250,
+		TranslateChunkMaxWords:       500,
+		LiteLLMRequestTimeoutSeconds: 0,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for zero timeout, got nil")
+	}
+	if !strings.Contains(err.Error(), "LITELLM_REQUEST_TIMEOUT_SECONDS") {
+		t.Fatalf("expected validation error to mention LITELLM_REQUEST_TIMEOUT_SECONDS, got %q", err.Error())
 	}
 }

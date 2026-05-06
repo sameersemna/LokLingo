@@ -180,11 +180,16 @@ const translateMaxRetries = 3
 // Each subsequent retry doubles the delay (capped at translateRetryBase * 2^retries).
 const translateRetryBase = 500 * time.Millisecond
 
+// slowChunkThreshold defines when a chunk translation is considered slow.
+// Kept as a variable so tests can temporarily override it.
+var slowChunkThreshold = 30 * time.Second
+
 // pdfChunkMinWords and pdfChunkMaxWords define the target PDF translation chunk
 // size in words. Chunks are built from contiguous page text units to reduce LLM
-// call count while keeping inputs within a safer token budget.
-const pdfChunkMinWords = 500
-const pdfChunkMaxWords = 1000
+// per-chunk latency and variance while keeping inputs within a safe token budget.
+// Target: 300–500 words per chunk.
+const pdfChunkMinWords = 250
+const pdfChunkMaxWords = 500
 
 const pdfChunkSep = "\n\n[[[LK_PAGE_BREAK]]]\n\n"
 
@@ -199,6 +204,8 @@ type textChunk struct {
 	words int
 }
 
+const minAdaptiveChunkWordsFloor = 100
+
 // isRateLimitError reports whether err looks like an HTTP 429 / rate-limit
 // response from LiteLLM.  The service wraps the status as a formatted string
 // so we match on substrings rather than a sentinel error type.
@@ -212,8 +219,30 @@ func isRateLimitError(err error) bool {
 		strings.Contains(msg, "rate_limit")
 }
 
+// isTransientNetworkError reports whether err is a transient network or timeout
+// failure that is safe to retry.  It matches common patterns produced by the
+// Go HTTP client and upstream proxies.  Importantly, it does NOT treat a
+// cancelled job context as retryable — callers must check ctx.Err() separately
+// before deciding to retry.
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "net/http: request canceled") ||
+		strings.Contains(msg, "connection timed out") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "timeout")
+}
+
 // translateWithRetry calls w.service.Translate with exponential back-off on
-// rate-limit errors.  Non-retryable errors are returned immediately.
+// rate-limit and transient network errors.  Non-retryable errors are returned
+// immediately.  If the job context is already cancelled or expired the call
+// returns ctx.Err() without retrying.
 // Acquires a slot from the global LLM semaphore before calling the service.
 // retries is incremented (atomically) each time a retry is issued; it may be nil.
 func (w *Worker) translateWithRetry(ctx context.Context, text, source, target string, retries *atomic.Int64) (string, error) {
@@ -237,15 +266,18 @@ func (w *Worker) translateWithRetry(ctx context.Context, text, source, target st
 		if err == nil {
 			return result, nil
 		}
-		if !isRateLimitError(err) || attempt >= translateMaxRetries {
+		isRetryable := isRateLimitError(err) || isTransientNetworkError(err)
+		// Never retry if the job context is already done, or we've exhausted attempts.
+		if !isRetryable || attempt >= translateMaxRetries || ctx.Err() != nil {
 			return "", err
 		}
 		if retries != nil {
 			retries.Add(1)
 		}
-		slog.Warn("translate rate-limited, backing off",
+		slog.Warn("translate transient error, backing off",
 			"attempt", attempt+1,
 			"backoff_ms", delay.Milliseconds(),
+			"err", err,
 		)
 		select {
 		case <-time.After(delay):
@@ -308,6 +340,24 @@ func buildTextChunks(units []chunkUnit, minWords, maxWords int) []textChunk {
 		chunks = append(chunks, current)
 	}
 	return chunks
+}
+
+func reduceChunkWordRange(minWords, maxWords int) (int, int) {
+	if minWords <= 0 {
+		minWords = minAdaptiveChunkWordsFloor
+	}
+	if maxWords < minWords {
+		maxWords = minWords
+	}
+	newMin := int(float64(minWords) * 0.8)
+	newMax := int(float64(maxWords) * 0.8)
+	if newMin < minAdaptiveChunkWordsFloor {
+		newMin = minAdaptiveChunkWordsFloor
+	}
+	if newMax < newMin {
+		newMax = newMin
+	}
+	return newMin, newMax
 }
 
 func (w *Worker) translateChunk(ctx context.Context, chunk textChunk, source, target string, retries *atomic.Int64) ([]chunkUnit, error) {
@@ -548,10 +598,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	type pageResult struct {
 		units []chunkUnit
 		err   error
+		dur   time.Duration
 	}
 	units := buildChunkUnits(pages, w.chunkMaxWords)
-	chunks := buildTextChunks(units, w.chunkMinWords, w.chunkMaxWords)
-	chunkCount = len(chunks)
 	unitTargetsByPage := make([]int, len(pages))
 	for _, u := range units {
 		if u.pageIndex >= 0 && u.pageIndex < len(unitTargetsByPage) {
@@ -559,64 +608,136 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 	}
 	unitDoneByPage := make([]int, len(pages))
-	results := make([]pageResult, len(chunks))
-	sem := make(chan struct{}, w.translateConcurrency)
-	var wg sync.WaitGroup
+	allResults := make([]pageResult, 0, len(units))
 	var progressMu sync.Mutex
-	for i, chunk := range chunks {
-		wg.Add(1)
-		go func(idx int, c textChunk) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				results[idx] = pageResult{err: ctx.Err()}
-				return
-			}
-			defer func() { <-sem }()
-			chunkStart := time.Now()
-			translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target, &retryCount)
-			chunkDurMs := time.Since(chunkStart).Milliseconds()
-			if err != nil {
-				slog.Error("chunk_translation_failed",
-					"job_id", job.ID,
-					"job_type", job.Type,
-					"chunk_idx", idx,
-					"duration_ms", chunkDurMs,
-					"err", err,
-				)
-			} else {
-				slog.Info("chunk_translated",
-					"job_id", job.ID,
-					"job_type", job.Type,
-					"chunk_idx", idx,
-					"chunk_words", c.words,
-					"duration_ms", chunkDurMs,
-				)
-			}
-			if err == nil && job.Type == TypePDF {
-				progressMu.Lock()
-				for _, u := range translatedUnits {
-					if u.pageIndex < 0 || u.pageIndex >= len(unitDoneByPage) {
-						continue
-					}
-					unitDoneByPage[u.pageIndex]++
-					if unitDoneByPage[u.pageIndex] == unitTargetsByPage[u.pageIndex] {
-						job.ProcessedPages++
-						if uerr := w.store.Update(ctx, job); uerr != nil {
-							slog.Error("update pdf progress", "job_id", job.ID, "processed_pages", job.ProcessedPages, "err", uerr)
+	chunkIdxOffset := 0
+	remainingUnits := units
+	adaptiveMinWords := w.chunkMinWords
+	adaptiveMaxWords := w.chunkMaxWords
+	for len(remainingUnits) > 0 {
+		chunks := buildTextChunks(remainingUnits, adaptiveMinWords, adaptiveMaxWords)
+		if len(chunks) == 0 {
+			break
+		}
+		batchSize := w.translateConcurrency
+		if batchSize <= 0 {
+			batchSize = 1
+		}
+		if batchSize > len(chunks) {
+			batchSize = len(chunks)
+		}
+		batch := chunks[:batchSize]
+		results := make([]pageResult, len(batch))
+		sem := make(chan struct{}, w.translateConcurrency)
+		var wg sync.WaitGroup
+		for i, chunk := range batch {
+			wg.Add(1)
+			go func(idx int, c textChunk) {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					results[idx] = pageResult{err: ctx.Err()}
+					return
+				}
+				defer func() { <-sem }()
+				chunkStart := time.Now()
+				translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target, &retryCount)
+				chunkEnd := time.Now()
+				chunkDur := chunkEnd.Sub(chunkStart)
+				chunkDurMs := chunkDur.Milliseconds()
+				chunkStartTS := chunkStart.UTC().Format(time.RFC3339Nano)
+				chunkEndTS := chunkEnd.UTC().Format(time.RFC3339Nano)
+				chunkIdx := chunkIdxOffset + idx
+				if chunkDur > slowChunkThreshold {
+					slog.Warn("slow_chunk_translation",
+						"job_id", job.ID,
+						"job_type", job.Type,
+						"chunk_idx", chunkIdx,
+						"chunk_words", c.words,
+						"start_time", chunkStartTS,
+						"end_time", chunkEndTS,
+						"duration_ms", chunkDurMs,
+					)
+				}
+				if err != nil {
+					slog.Error("chunk_translation_failed",
+						"job_id", job.ID,
+						"job_type", job.Type,
+						"chunk_idx", chunkIdx,
+						"chunk_words", c.words,
+						"start_time", chunkStartTS,
+						"end_time", chunkEndTS,
+						"duration_ms", chunkDurMs,
+						"err", err,
+					)
+				} else {
+					slog.Info("chunk_translated",
+						"job_id", job.ID,
+						"job_type", job.Type,
+						"chunk_idx", chunkIdx,
+						"chunk_words", c.words,
+						"start_time", chunkStartTS,
+						"end_time", chunkEndTS,
+						"duration_ms", chunkDurMs,
+					)
+				}
+				if err == nil && job.Type == TypePDF {
+					progressMu.Lock()
+					for _, u := range translatedUnits {
+						if u.pageIndex < 0 || u.pageIndex >= len(unitDoneByPage) {
+							continue
+						}
+						unitDoneByPage[u.pageIndex]++
+						if unitDoneByPage[u.pageIndex] == unitTargetsByPage[u.pageIndex] {
+							job.ProcessedPages++
+							if uerr := w.store.Update(ctx, job); uerr != nil {
+								slog.Error("update pdf progress", "job_id", job.ID, "processed_pages", job.ProcessedPages, "err", uerr)
+							}
 						}
 					}
+					progressMu.Unlock()
 				}
-				progressMu.Unlock()
+				results[idx] = pageResult{units: translatedUnits, err: err, dur: chunkDur}
+			}(i, chunk)
+		}
+		wg.Wait()
+
+		slowInBatch := false
+		consumedUnits := 0
+		for i, r := range results {
+			allResults = append(allResults, r)
+			if r.dur > slowChunkThreshold {
+				slowInBatch = true
 			}
-			results[idx] = pageResult{units: translatedUnits, err: err}
-		}(i, chunk)
+			consumedUnits += len(batch[i].units)
+		}
+		chunkCount += len(batch)
+		chunkIdxOffset += len(batch)
+		if consumedUnits > len(remainingUnits) {
+			consumedUnits = len(remainingUnits)
+		}
+		remainingUnits = remainingUnits[consumedUnits:]
+
+		if slowInBatch && len(remainingUnits) > 0 {
+			nextMin, nextMax := reduceChunkWordRange(adaptiveMinWords, adaptiveMaxWords)
+			if nextMin != adaptiveMinWords || nextMax != adaptiveMaxWords {
+				slog.Warn("adaptive_chunk_sizing_reduced",
+					"job_id", job.ID,
+					"job_type", job.Type,
+					"previous_min_words", adaptiveMinWords,
+					"previous_max_words", adaptiveMaxWords,
+					"next_min_words", nextMin,
+					"next_max_words", nextMax,
+				)
+				adaptiveMinWords = nextMin
+				adaptiveMaxWords = nextMax
+			}
+		}
 	}
-	wg.Wait()
 	translatedPageParts := make([][]string, len(pages))
 	var translateErr error
-	for _, r := range results {
+	for _, r := range allResults {
 		if r.err != nil {
 			translateErr = r.err
 			break
