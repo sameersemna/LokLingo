@@ -19,6 +19,7 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 	"golang.org/x/text/unicode/bidi"
 )
@@ -43,7 +44,14 @@ const (
 	// Require most runes to be CJK before applying vertical rendering.
 	overlayVerticalCJKMinRatio = 0.8
 	// Keep vertical CJK text from becoming too small in narrow columns.
-	overlayVerticalMinFontBoost = 2
+	overlayVerticalMinFontBoost = 4
+	// Very narrow vertical columns need an extra readability boost.
+	overlayVerticalNarrowWidthThreshold = 24
+	overlayVerticalNarrowFontBoost      = 2
+	// Vertical text can tolerate tighter side padding than horizontal text.
+	overlayVerticalMinPadding = 2
+	// Draw a second ink pass offset by 1px to slightly thicken vertical glyphs.
+	overlayVerticalExtraStrokePx = 1
 )
 
 var overlayFontData = mustParseOverlayFont()
@@ -528,6 +536,12 @@ func isDescenderRune(r rune) bool {
 // clipRect restricts all pixel writes to the overlay box, preventing the
 // shadow offset from bleeding into adjacent image regions.
 func drawTextLine(dst *image.RGBA, fontSize float64, line string, dotX, baselineY int, inkColor color.Color, clipRect image.Rectangle) {
+	drawTextLineStyled(dst, fontSize, line, dotX, baselineY, inkColor, clipRect, 0)
+}
+
+// drawTextLineStyled renders text like drawTextLine and optionally adds a small
+// extra ink pass offset horizontally to slightly thicken glyphs.
+func drawTextLineStyled(dst *image.RGBA, fontSize float64, line string, dotX, baselineY int, inkColor color.Color, clipRect image.Rectangle, extraInkX int) {
 	clipped := dst.SubImage(clipRect).(*image.RGBA)
 	shadow := shadowColorFor(inkColor)
 	dot := fixed.P(dotX, baselineY)
@@ -552,8 +566,40 @@ func drawTextLine(dst *image.RGBA, fontSize float64, line string, dotX, baseline
 			Dot:  dot,
 		}
 		d.DrawString(seg.text)
+		if extraInkX > 0 {
+			bd := &font.Drawer{
+				Dst:  clipped,
+				Src:  image.NewUniform(inkColor),
+				Face: face,
+				Dot:  fixed.P(dot.X.Ceil()+extraInkX, baselineY),
+			}
+			bd.DrawString(seg.text)
+		}
 		dot = d.Dot
 	}
+}
+
+func verticalTextPadding(boxWidth int, opts OverlayOptions) int {
+	if boxWidth <= 0 {
+		return opts.TextPadding
+	}
+	target := max(overlayVerticalMinPadding, boxWidth/10)
+	return min(opts.TextPadding, target)
+}
+
+func verticalMinFontSize(opts OverlayOptions, availW int) int {
+	minVerticalFont := opts.MinFontSize + overlayVerticalMinFontBoost
+	if availW <= overlayVerticalNarrowWidthThreshold {
+		minVerticalFont += overlayVerticalNarrowFontBoost
+	}
+	if minVerticalFont > opts.MaxFontSize {
+		return opts.MaxFontSize
+	}
+	return minVerticalFont
+}
+
+func verticalExtraStrokeWidth() int {
+	return overlayVerticalExtraStrokePx
 }
 
 // drawVerticalTextBlock renders confident CJK vertical text top-to-bottom.
@@ -565,17 +611,15 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 		return false, nil
 	}
 
-	pad := opts.TextPadding
+	pad := verticalTextPadding(box.Dx(), opts)
 	availW := box.Dx() - (pad * 2)
 	availH := box.Dy() - (pad * 2)
 	if availW <= 0 || availH <= 0 {
 		return false, nil
 	}
 
-	minVerticalFont := opts.MinFontSize + overlayVerticalMinFontBoost
-	if minVerticalFont > opts.MaxFontSize {
-		minVerticalFont = opts.MaxFontSize
-	}
+	minVerticalFont := verticalMinFontSize(opts, availW)
+	extraStrokeW := verticalExtraStrokeWidth()
 	fontSize := min(opts.MaxFontSize, max(minVerticalFont, availW))
 	if fontSize <= 0 {
 		fontSize = minVerticalFont
@@ -608,6 +652,7 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 				maxGlyphW = w
 			}
 		}
+		maxGlyphW += extraStrokeW
 
 		if textH <= box.Dy() && maxGlyphW <= availW {
 			if opts.EraseBBox {
@@ -628,7 +673,7 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 				if baselineY > box.Max.Y-pad {
 					break
 				}
-				drawTextLine(dst, float64(fontSize), string(r), dotX, baselineY, inkColor, box)
+				drawTextLineStyled(dst, float64(fontSize), string(r), dotX, baselineY, inkColor, box, extraStrokeW)
 				baselineY += lineHeight
 			}
 			return true, nil
@@ -802,7 +847,10 @@ func fitTextLayout(text string, maxWidth, maxHeight, minFontSize, maxFontSize in
 		}
 		lineHeight := approximateLineHeight(fontSize)
 		topInset := approximateTopInset(fontSize)
-		if topInset+len(lines)*lineHeight <= maxHeight {
+		ascent := approximateAscent(fontSize)
+		// Match the actual render formula: topInset + ascent + (N-1)*lineHeight
+		// rather than the over-estimate topInset + N*lineHeight.
+		if topInset+ascent+(len(lines)-1)*lineHeight <= maxHeight {
 			return textLayout{
 				fontSize:   float64(fontSize),
 				lineHeight: lineHeight,
@@ -824,7 +872,10 @@ func fitTextLayout(text string, maxWidth, maxHeight, minFontSize, maxFontSize in
 		return fitWordToWidth(word, maxW, f)
 	}
 	lines := wrapLines(text, maxWidth, measureFn, splitFn)
-	maxLines := max(1, max(1, maxHeight-topInset)/lineHeight)
+	// How many lines fit: topInset + ascent + (N-1)*lineHeight <= maxHeight
+	// => N <= (maxHeight - topInset - ascent) / lineHeight + 1
+	ascent := approximateAscent(fontSize)
+	maxLines := max(1, (maxHeight-topInset-ascent)/lineHeight+1)
 	if len(lines) > maxLines {
 		lines = truncateWithEllipsisFn(lines, maxLines, maxWidth, measureFn)
 	}
@@ -978,6 +1029,18 @@ func approximateLineHeight(fontSize int) int {
 func approximateTopInset(fontSize int) int {
 	// Add a small font-size-based inset so larger fonts do not feel glued to the top edge.
 	return max(1, int(math.Round(float64(fontSize)*0.15)))
+}
+
+// approximateAscent returns a conservative pixel estimate of the font ascent
+// (distance from baseline to the top of most glyphs) at the given font size.
+// Used by fitTextLayout to match the actual block height formula
+// (topInset + ascent + (N-1)*lineHeight) without loading a font face.
+// The coefficient 0.82 is calibrated to goregular; fallback fonts are similar.
+func approximateAscent(fontSize int) int {
+	if fontSize <= 0 {
+		return 1
+	}
+	return max(1, int(math.Round(float64(fontSize)*0.82)))
 }
 
 // truncateWithEllipsis keeps the first maxLines lines and appends '…' to the
@@ -1565,15 +1628,20 @@ func (e *fallbackFontEntry) face(fontSize float64) (font.Face, error) {
 	return loadFaceFromFont(f, &e.faceCache, fontSize)
 }
 
-// fontFaceCoversText returns true if face has glyphs for every non-whitespace
-// rune in text. It uses GlyphAdvance: a false ok signals a missing glyph.
-func fontFaceCoversText(face font.Face, text string) bool {
+// fontCoversText returns true if f has a real (non-notdef) glyph for every
+// visible rune in text. It uses sfnt.GlyphIndex with a fresh local buffer so
+// the check is thread-safe even when f is shared across goroutines. Whitespace
+// and Unicode format characters (category Cf: zero-width joiners, directional
+// marks, etc.) are skipped because they carry no visible glyph and many
+// otherwise-correct fonts omit them from their cmap.
+func fontCoversText(f *opentype.Font, text string) bool {
+	var buf sfnt.Buffer
 	for _, r := range text {
-		if unicode.IsSpace(r) {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
-		_, ok := face.GlyphAdvance(r)
-		if !ok {
+		x, err := f.GlyphIndex(&buf, r)
+		if err != nil || x == 0 {
 			return false
 		}
 	}
@@ -1584,14 +1652,19 @@ func fontFaceCoversText(face font.Face, text string) bool {
 // in text, falling back to goregular when no entry matches.
 func faceForFallback(text string, fontSize float64) (font.Face, error) {
 	for _, entry := range fallbackFonts {
-		face, err := entry.face(fontSize)
-		if err != nil {
+		f := entry.load()
+		if f == nil {
 			// Font not available on this system; try next.
 			continue
 		}
-		if fontFaceCoversText(face, text) {
-			return face, nil
+		if !fontCoversText(f, text) {
+			continue
 		}
+		face, err := entry.face(fontSize)
+		if err != nil {
+			continue
+		}
+		return face, nil
 	}
 	// No fallback covers the text; use goregular (may produce tofu for some runes).
 	return loadOverlayFace(fontSize)
@@ -1605,13 +1678,13 @@ func fontCoverageWarning(text string) string {
 	if !needsFallbackFont(text) {
 		return ""
 	}
-	// Try each fallback at a nominal size; if any covers the text, we're fine.
+	// Try each fallback; if any covers the text, we're fine.
 	for _, entry := range fallbackFonts {
-		face, err := entry.face(12)
-		if err != nil {
+		f := entry.load()
+		if f == nil {
 			continue
 		}
-		if fontFaceCoversText(face, text) {
+		if fontCoversText(f, text) {
 			return ""
 		}
 	}

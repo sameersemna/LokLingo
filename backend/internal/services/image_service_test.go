@@ -229,8 +229,11 @@ func TestFitTextLayout_ReducesFontSizeToFitHeight(t *testing.T) {
 	if layout.fontSize >= overlayMaxFontSize {
 		t.Fatalf("expected reduced font size, got %v", layout.fontSize)
 	}
-	if layout.topInset+len(layout.lines)*layout.lineHeight > 24 {
-		t.Fatalf("layout height %d exceeds box height 24", layout.topInset+len(layout.lines)*layout.lineHeight)
+	// Validate against the actual renderer formula: topInset + ascent + (N-1)*lineHeight.
+	n := len(layout.lines)
+	blockH := layout.topInset + int(layout.lineHeight) + (n-1)*layout.lineHeight
+	if blockH > 24 {
+		t.Fatalf("layout block height %d exceeds box height 24 (lines=%d fontSize=%v)", blockH, n, layout.fontSize)
 	}
 }
 
@@ -259,6 +262,64 @@ func TestApproximateTopInset_ScalesWithFontSize(t *testing.T) {
 	}
 	if large <= small {
 		t.Fatalf("expected larger font to have larger top inset, got small=%d large=%d", small, large)
+	}
+}
+
+func TestApproximateAscent_IsPositiveAndScales(t *testing.T) {
+	for _, fs := range []int{8, 12, 16, 20, 32} {
+		a := approximateAscent(fs)
+		if a <= 0 {
+			t.Errorf("approximateAscent(%d) = %d, want > 0", fs, a)
+		}
+		if a >= approximateLineHeight(fs) {
+			t.Errorf("approximateAscent(%d) = %d must be < lineHeight %d", fs, a, approximateLineHeight(fs))
+		}
+	}
+}
+
+// TestFitTextLayout_HeightGuarantee verifies that the layout's block height
+// (using the actual renderer formula: topInset + ascent + (N-1)*lineHeight)
+// never exceeds the given maxHeight.
+func TestFitTextLayout_HeightGuarantee(t *testing.T) {
+	cases := []struct {
+		text       string
+		maxW, maxH int
+	}{
+		{"alpha beta gamma delta epsilon", 80, 30},
+		{"hello world", 60, 20},
+		{"one two three four five six seven eight", 100, 50},
+		{"short text", 200, 100},
+	}
+	for _, tc := range cases {
+		layout := fitTextLayout(tc.text, tc.maxW, tc.maxH, overlayMinFontSize, overlayMaxFontSize)
+		if len(layout.lines) == 0 {
+			continue // empty — no layout possible
+		}
+		n := len(layout.lines)
+		fs := int(layout.fontSize)
+		blockH := layout.topInset + approximateAscent(fs) + max(0, n-1)*layout.lineHeight
+		if blockH > tc.maxH {
+			t.Errorf("text=%q maxW=%d maxH=%d: blockH=%d > maxH (fontSize=%v lines=%d)",
+				tc.text, tc.maxW, tc.maxH, blockH, layout.fontSize, n)
+		}
+	}
+}
+
+// TestFitTextLayout_CorrectFormulaPrefersLargerFont checks that the corrected
+// height formula allows a larger font than the old formula (N*lineHeight) in at
+// least one of several representative boxes. This detects regression back to
+// the overestimate.
+func TestFitTextLayout_CorrectFormulaPrefersLargerFont(t *testing.T) {
+	// A box just tall enough that the new formula allows one more pt of font.
+	// At fontSize F: ascent≈0.82F, lineHeight≈1.24F, topInset≈0.15F.
+	// 1-line new formula: 0.15F + 0.82F = 0.97F <= maxH.
+	// 1-line old formula: 0.15F + 1.24F = 1.39F <= maxH.
+	// So for maxH between 0.97F and 1.39F the new formula admits F but old does not.
+	// At F=20: new admits maxH>=20, old requires maxH>=28.
+	// Use "Single" (1 word, won't wrap) with maxH=22 and expect fontSize>=20.
+	layout := fitTextLayout("Single", 200, 22, overlayMinFontSize, overlayMaxFontSize)
+	if int(layout.fontSize) < 20 {
+		t.Fatalf("expected fontSize >= 20 for 1-line text in 22px box, got %.0f", layout.fontSize)
 	}
 }
 
@@ -618,6 +679,39 @@ func TestVerticalCJKRunes_FiltersNonCJKAndSpaces(t *testing.T) {
 	}
 }
 
+func TestVerticalTextPadding_ReducesPaddingForNarrowColumns(t *testing.T) {
+	opts := DefaultOverlayOptions()
+	if got := verticalTextPadding(20, opts); got != overlayVerticalMinPadding {
+		t.Fatalf("verticalTextPadding(20) = %d, want %d", got, overlayVerticalMinPadding)
+	}
+	if got := verticalTextPadding(80, opts); got != opts.TextPadding {
+		t.Fatalf("verticalTextPadding(80) = %d, want %d", got, opts.TextPadding)
+	}
+}
+
+func TestVerticalMinFontSize_NarrowColumnsGetExtraBoost(t *testing.T) {
+	opts := DefaultOverlayOptions()
+	narrow := verticalMinFontSize(opts, overlayVerticalNarrowWidthThreshold)
+	wide := verticalMinFontSize(opts, overlayVerticalNarrowWidthThreshold+10)
+	if narrow <= wide {
+		t.Fatalf("expected narrow vertical min font > wide min font, got narrow=%d wide=%d", narrow, wide)
+	}
+}
+
+func TestDrawVerticalTextBlock_NarrowColumnStillDraws(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 28, 150))
+	box := image.Rect(0, 0, 28, 150)
+	candidate := overlayCandidate{box: box, text: "日本語縦書き"}
+
+	drew, err := drawVerticalTextBlock(img, candidate, box, DefaultOverlayOptions())
+	if err != nil {
+		t.Fatalf("drawVerticalTextBlock returned error: %v", err)
+	}
+	if !drew {
+		t.Fatal("expected narrow vertical CJK block to draw successfully")
+	}
+}
+
 func TestAvgRegionLuminance_WhiteImageReturnsOne(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 40, 40))
 	for y := 0; y < 40; y++ {
@@ -900,6 +994,62 @@ func TestIsFallbackRune_LatinFalse(t *testing.T) {
 			t.Errorf("isFallbackRune(%U) = true, want false", r)
 		}
 	}
+}
+
+// TestFontCoversText_GoregularCoversLatin verifies that the goregular font
+// (overlayFontData) covers basic Latin text.
+func TestFontCoversText_GoregularCoversLatin(t *testing.T) {
+	if !fontCoversText(overlayFontData, "Hello, world!") {
+		t.Fatal("expected goregular to cover basic Latin text")
+	}
+}
+
+// TestFontCoversText_GoregularMissesCJK verifies that goregular does NOT cover
+// CJK characters (the check must return false, not silently accept them).
+func TestFontCoversText_GoregularMissesCJK(t *testing.T) {
+	if fontCoversText(overlayFontData, "日本語") {
+		t.Fatal("goregular must not report coverage for CJK text")
+	}
+}
+
+// TestFontCoversText_SkipsFormatCharacters verifies that invisible Unicode
+// format characters (category Cf: ZWJ, ZWNJ, directional marks) are skipped
+// so a font is not incorrectly rejected for lacking their cmap entries.
+func TestFontCoversText_SkipsFormatCharacters(t *testing.T) {
+	// U+200D ZWJ and U+200C ZWNJ are Cf characters; goregular covers the
+	// surrounding Latin but need not have ZWJ/ZWNJ glyphs.
+	text := "A\u200DB" // A + ZWJ + B
+	if !fontCoversText(overlayFontData, text) {
+		t.Fatal("fontCoversText must skip Cf format chars and accept the font")
+	}
+}
+
+// TestFontCoversText_ReturnsFalseOnFirstMissingRune verifies that a single
+// missing rune causes the function to return false immediately.
+func TestFontCoversText_ReturnsFalseOnFirstMissingRune(t *testing.T) {
+	// Mix a Latin word (covered by goregular) with one Arabic rune (not covered).
+	text := "Hello\u0627" // Hello + Arabic letter Alef
+	if fontCoversText(overlayFontData, text) {
+		t.Fatal("fontCoversText must return false when any rune is missing")
+	}
+}
+
+// TestFontCoversText_ConcurrentSafe exercises fontCoversText from many
+// goroutines simultaneously to confirm there is no data race on the shared
+// font buffer.  Run with -race to catch any remaining issues.
+func TestFontCoversText_ConcurrentSafe(t *testing.T) {
+	const workers = 20
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				fontCoversText(overlayFontData, "Hello")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestNeedsFallbackFont_CJKText(t *testing.T) {
