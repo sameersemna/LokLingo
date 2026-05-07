@@ -197,3 +197,45 @@ func TestWorker_ImageJob_LayoutMode_RendersOutputImage(t *testing.T) {
 		t.Fatalf("expected rendered output image to exist: %v", err)
 	}
 }
+
+func TestApplyLayoutModeBBoxOptions_DefaultAndGeometry(t *testing.T) {
+	opts := internalservices.DefaultOverlayOptions()
+	applyLayoutModeBBoxOptions(&opts, -1)
+
+	if opts.BboxShrinkPx != 0 {
+		t.Fatalf("expected BboxShrinkPx=0, got %d", opts.BboxShrinkPx)
+	}
+	if !opts.EraseBBox {
+		t.Fatal("expected EraseBBox=true")
+	}
+	if opts.TextPadding != 3 {
+		t.Fatalf("expected default TextPadding=3, got %d", opts.TextPadding)
+	}
+}
+
+func TestApplyLayoutModeBBoxOptions_ClampRequestedPadding(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested int
+		want      int
+	}{
+		{name: "below range", requested: 0, want: 2},
+		{name: "within range lower", requested: 2, want: 2},
+		{name: "within range middle", requested: 3, want: 3},
+		{name: "within range upper", requested: 4, want: 4},
+		{name: "above range", requested: 6, want: 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := internalservices.DefaultOverlayOptions()
+			applyLayoutModeBBoxOptions(&opts, tt.requested)
+			if opts.TextPadding != tt.want {
+				t.Fatalf("requested=%d: expected TextPadding=%d, got %d", tt.requested, tt.want, opts.TextPadding)
+			}
+			if opts.BboxShrinkPx != 0 {
+				t.Fatalf("requested=%d: expected BboxShrinkPx=0, got %d", tt.requested, opts.BboxShrinkPx)
+			}
+		})
+	}
+}

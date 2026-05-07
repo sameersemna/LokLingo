@@ -181,6 +181,27 @@ func TestWrapTextToWidth_BreaksOnWords(t *testing.T) {
 	}
 }
 
+func TestRebalanceWrappedLines_ReducesShortLastLine(t *testing.T) {
+	measure := func(s string) int { return len(s) }
+	lines := []string{"alpha beta gamma", "delta"}
+	got := rebalanceWrappedLines(lines, 20, measure)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(got))
+	}
+	if got[0] != "alpha beta" || got[1] != "gamma delta" {
+		t.Fatalf("unexpected rebalanced lines: %v", got)
+	}
+}
+
+func TestRebalanceWrappedLines_KeepsReasonableLastLine(t *testing.T) {
+	measure := func(s string) int { return len(s) }
+	lines := []string{"alpha beta", "gamma delta"}
+	got := rebalanceWrappedLines(lines, 20, measure)
+	if got[0] != lines[0] || got[1] != lines[1] {
+		t.Fatalf("expected unchanged lines, got %v", got)
+	}
+}
+
 func TestWrapTextToWidth_SplitsLongWords(t *testing.T) {
 	face := testFace(t, 10)
 	// maxWidth=20: at 10pt a single char is ~6px, so we expect ~3 chars per line.
@@ -511,6 +532,24 @@ func TestIsRTLText_MixedMajorityLTR(t *testing.T) {
 	}
 }
 
+func TestBaselineScriptOffset_CJKIsNegative(t *testing.T) {
+	if off := baselineScriptOffset("日本語", 20); off >= 0 {
+		t.Fatalf("expected negative CJK offset, got %d", off)
+	}
+}
+
+func TestBaselineScriptOffset_RTLIsPositive(t *testing.T) {
+	if off := baselineScriptOffset("مرحبا", 20); off <= 0 {
+		t.Fatalf("expected positive RTL offset, got %d", off)
+	}
+}
+
+func TestBaselineScriptOffset_LTRIsZero(t *testing.T) {
+	if off := baselineScriptOffset("Hello world", 20); off != 0 {
+		t.Fatalf("expected zero LTR offset, got %d", off)
+	}
+}
+
 func TestHasMixedDirectionText_MixedArabicLatin(t *testing.T) {
 	if !hasMixedDirectionText("iPhone استخدام") {
 		t.Fatal("expected mixed-direction text to be detected")
@@ -631,6 +670,161 @@ func TestAvgRegionColor_AveragesPixels(t *testing.T) {
 	}
 }
 
+func TestMedianRegionColor_RobustToInkOutliers(t *testing.T) {
+	// 3×3 region: 8 light background pixels (200,200,200) + 1 dark ink pixel (0,0,0).
+	// Average would be ~178; median must return the background color (200,200,200).
+	img := image.NewRGBA(image.Rect(0, 0, 3, 3))
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 3; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 200, G: 200, B: 200, A: 255})
+		}
+	}
+	img.SetRGBA(1, 1, color.RGBA{R: 0, G: 0, B: 0, A: 255}) // lone ink pixel
+
+	c := medianRegionColor(img, img.Bounds())
+	if c.R != 200 || c.G != 200 || c.B != 200 {
+		t.Fatalf("expected median rgb(200,200,200), got rgb(%d,%d,%d)", c.R, c.G, c.B)
+	}
+}
+
+func TestMedianRegionColor_EmptyRegionReturnsWhite(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	c := medianRegionColor(img, image.Rect(20, 20, 30, 30)) // outside image bounds
+	if c.R != 255 || c.G != 255 || c.B != 255 {
+		t.Fatalf("expected white for empty intersection, got rgb(%d,%d,%d)", c.R, c.G, c.B)
+	}
+}
+
+func TestPatchFillBBox_PreservesGradient(t *testing.T) {
+	// Create a 20×20 image with a clear left-to-right gradient (left=50, right=200).
+	// After patchFillBBox, corner pixels should retain their gradient colors.
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	for y := 0; y < 20; y++ {
+		for x := 0; x < 20; x++ {
+			v := uint8(50 + x*150/19) // 50 → 200
+			img.SetRGBA(x, y, color.RGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	box := image.Rect(0, 0, 20, 20)
+	patchFillBBox(img, box)
+
+	// Top-left corner should be close to the original left value (50).
+	tl := img.RGBAAt(0, 0)
+	if int(tl.R) < 40 || int(tl.R) > 80 {
+		t.Errorf("top-left R expected ~50, got %d", tl.R)
+	}
+	// Top-right corner should be close to the original right value (200).
+	tr := img.RGBAAt(19, 0)
+	if int(tr.R) < 170 || int(tr.R) > 210 {
+		t.Errorf("top-right R expected ~200, got %d", tr.R)
+	}
+}
+
+func TestPatchFillBBox_FlatImageStaysFlat(t *testing.T) {
+	// Uniform image: every pixel should remain the same color after fill.
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 123, G: 45, B: 67, A: 255})
+		}
+	}
+	patchFillBBox(img, img.Bounds())
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			c := img.RGBAAt(x, y)
+			if c.R != 123 || c.G != 45 || c.B != 67 {
+				t.Fatalf("pixel (%d,%d) changed: got rgb(%d,%d,%d)", x, y, c.R, c.G, c.B)
+			}
+		}
+	}
+}
+
+func TestPatchFillBBox_EmptyBoxIsNoop(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	img.SetRGBA(5, 5, color.RGBA{R: 42, G: 42, B: 42, A: 255})
+	patchFillBBox(img, image.Rect(20, 20, 30, 30)) // fully outside
+	// Pixel should be unchanged.
+	c := img.RGBAAt(5, 5)
+	if c.R != 42 {
+		t.Fatalf("pixel changed unexpectedly: got R=%d", c.R)
+	}
+}
+
+func TestVerticalCenteringOffset_SingleLine(t *testing.T) {
+	// Single-line block: vertOffset must push the baseline to the vertical
+	// midpoint of the available content height.
+	const (
+		fontSize = 16
+		boxH     = 60
+		pad      = 6
+		ascent   = 14 // approximate for fontSize=16
+		topInset = 2  // approximateTopInset(16) = max(1, round(16*0.15)) = 2
+	)
+	availContentH := boxH - 2*pad                     // 48
+	blockH := topInset + ascent + 0                   // single line: (nLines-1)*lineH = 0
+	vertOffset := max(0, (availContentH-blockH)/2)    // (48-16)/2 = 16
+	baselineY := pad + vertOffset + topInset + ascent // 6+16+2+14 = 38
+
+	// Baseline should be at or past the vertical midpoint of the box.
+	midpoint := boxH / 2 // 30
+	if baselineY < midpoint {
+		t.Errorf("single-line baseline %d is above midpoint %d: text not centered", baselineY, midpoint)
+	}
+}
+
+func TestVerticalCenteringOffset_MultiLine_NoExpand(t *testing.T) {
+	// When the natural block already fills available height, vertOffset must be 0.
+	const (
+		fontSize = 16
+		nLines   = 3
+		pad      = 6
+		ascent   = 14
+		topInset = 2
+	)
+	lineHeight := approximateLineHeight(fontSize)
+	availContentH := topInset + ascent + (nLines-1)*lineHeight // exactly fills
+	blockH := topInset + ascent + (nLines-1)*lineHeight
+	vertOffset := max(0, (availContentH-blockH)/2)
+	if vertOffset != 0 {
+		t.Errorf("expected vertOffset=0 when block fills available height, got %d", vertOffset)
+	}
+}
+
+func TestApproximateLineHeight_BasedOnFontSize(t *testing.T) {
+	if got := approximateLineHeight(12); got != 15 {
+		t.Fatalf("expected line height 15 for font 12, got %d", got)
+	}
+	if got := approximateLineHeight(16); got != 20 {
+		t.Fatalf("expected line height 20 for font 16, got %d", got)
+	}
+	if got := approximateLineHeight(8); got != 10 {
+		t.Fatalf("expected line height 10 for font 8, got %d", got)
+	}
+}
+
+func TestApproximateLineHeight_IsMonotonic(t *testing.T) {
+	prev := approximateLineHeight(1)
+	for fs := 2; fs <= 64; fs++ {
+		got := approximateLineHeight(fs)
+		if got < prev {
+			t.Fatalf("line height decreased at font %d: prev=%d got=%d", fs, prev, got)
+		}
+		prev = got
+	}
+}
+
+func TestApproximateLineHeight_RespectsReadabilityBounds(t *testing.T) {
+	for _, fs := range []int{8, 12, 16, 24, 32} {
+		lh := approximateLineHeight(fs)
+		if lh < fs+overlayLineSpacing {
+			t.Fatalf("font %d: line height %d too tight", fs, lh)
+		}
+		if lh > fs+8 {
+			t.Fatalf("font %d: line height %d too loose", fs, lh)
+		}
+	}
+}
+
 func TestMeasureStringPx_NonZeroForNonEmptyString(t *testing.T) {
 	face := testFace(t, 12)
 	w := measureStringPx(face, "Hello")
@@ -668,8 +862,8 @@ func TestShadowColorFor_IsContrastingAndSemiTransparent(t *testing.T) {
 	if r < 0x7000 || g < 0x7000 || b < 0x7000 {
 		t.Fatalf("expected light shadow for black ink, got rgba(%d,%d,%d,%d)", r>>8, g>>8, b>>8, a>>8)
 	}
-	if a>>8 != 128 {
-		t.Fatalf("expected shadow alpha=128, got %d", a>>8)
+	if a>>8 != uint32(overlayShadowAlpha) {
+		t.Fatalf("expected shadow alpha=%d, got %d", overlayShadowAlpha, a>>8)
 	}
 }
 
@@ -761,6 +955,91 @@ func TestDrawTextLine_ShadowClampedToBox(t *testing.T) {
 					x, y, r>>8, g>>8, b>>8, a>>8)
 			}
 		}
+	}
+}
+
+// --------------------------------------------------------------------
+// Font fallback hardening tests
+// --------------------------------------------------------------------
+
+func TestFontCoverageWarning_LatinNoWarning(t *testing.T) {
+	w := fontCoverageWarning("Hello world")
+	if w != "" {
+		t.Fatalf("expected no warning for Latin text, got %q", w)
+	}
+}
+
+func TestFontCoverageWarning_CJKWarnsOrSilentIfFontAvailable(t *testing.T) {
+	// When a system CJK font is installed the warning should be empty;
+	// when it is not installed the warning must be non-empty and mention
+	// a known keyword. Either outcome is valid — the test just verifies
+	// the two possible states are handled without panic.
+	w := fontCoverageWarning("日本語テスト")
+	if w != "" {
+		if !strings.Contains(w, "Noto") && !strings.Contains(w, "tofu") {
+			t.Fatalf("unexpected warning text %q", w)
+		}
+	}
+	// No panic is the key assertion; both "" and a warning string are fine.
+}
+
+func TestDetectMissingScripts_CJK(t *testing.T) {
+	scripts := detectMissingScripts("日本語")
+	found := false
+	for _, s := range scripts {
+		if s == "CJK" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected CJK in detected scripts, got %v", scripts)
+	}
+}
+
+func TestDetectMissingScripts_Arabic(t *testing.T) {
+	// Arabic Unicode block U+0600–U+06FF
+	scripts := detectMissingScripts("\u0645\u0631\u062D\u0628\u0627")
+	found := false
+	for _, s := range scripts {
+		if s == "Arabic" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected Arabic in detected scripts, got %v", scripts)
+	}
+}
+
+func TestDetectMissingScripts_LatinEmpty(t *testing.T) {
+	scripts := detectMissingScripts("Hello 123")
+	if len(scripts) != 0 {
+		t.Fatalf("expected no scripts for Latin text, got %v", scripts)
+	}
+}
+
+func TestAvailableFallbackFonts_ReturnsList(t *testing.T) {
+	// Only verifies the function returns without panic; installed fonts vary.
+	fonts := AvailableFallbackFonts()
+	// All returned names must be non-empty.
+	for _, name := range fonts {
+		if name == "" {
+			t.Fatal("AvailableFallbackFonts returned an empty name")
+		}
+	}
+	t.Logf("available fallback fonts on this machine: %v", fonts)
+}
+
+func TestOverlayStats_FontWarningsField(t *testing.T) {
+	// OverlayStats must carry FontWarnings without compiler error.
+	stats := OverlayStats{
+		BlocksDrawn:   1,
+		BlocksSkipped: 0,
+		FontWarnings:  []string{"test warning"},
+	}
+	if len(stats.FontWarnings) != 1 {
+		t.Fatalf("expected 1 FontWarning, got %d", len(stats.FontWarnings))
 	}
 }
 

@@ -93,6 +93,24 @@ func NewWorker(store Store, service services.TranslationService, pdfService inte
 	return w
 }
 
+func applyLayoutModeBBoxOptions(opts *internalservices.OverlayOptions, requestedPadding int) {
+	// Keep full OCR geometry in layout mode, but avoid edge collisions with
+	// a small internal text padding window.
+	opts.EraseBBox = true
+	opts.BboxShrinkPx = 0
+	opts.TextPadding = 3
+	if requestedPadding >= 0 {
+		switch {
+		case requestedPadding < 2:
+			opts.TextPadding = 2
+		case requestedPadding > 4:
+			opts.TextPadding = 4
+		default:
+			opts.TextPadding = requestedPadding
+		}
+	}
+}
+
 // Run blocks, processing jobs until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	slog.Info("translation worker started")
@@ -869,9 +887,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 		renderOpts := internalservices.DefaultOverlayOptions()
 		if effectiveJobMode == ModeLayout {
-			// Layout mode uses erase+redraw while keeping original OCR geometry.
-			renderOpts.EraseBBox = true
-			renderOpts.BboxShrinkPx = 0
+			// Layout mode keeps original OCR geometry and uses minimal internal
+			// padding so text does not touch bbox edges.
+			applyLayoutModeBBoxOptions(&renderOpts, job.TextPadding)
 		}
 		if job.JPEGQuality > 0 {
 			renderOpts.JPEGQuality = job.JPEGQuality
@@ -879,7 +897,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		if job.BgAlpha >= 0 {
 			renderOpts.BgAlpha = uint8(job.BgAlpha)
 		}
-		if job.TextPadding >= 0 {
+		if job.TextPadding >= 0 && effectiveJobMode != ModeLayout {
 			renderOpts.TextPadding = job.TextPadding
 		}
 		outPath, renderStats, err := internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, renderOpts)

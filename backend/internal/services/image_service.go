@@ -34,6 +34,7 @@ const (
 	overlayMaxOverlapPct = 0.45
 	overlayNearbyBoxDist = 30
 	overlayBgAlpha       = uint8(220)
+	overlayShadowAlpha   = uint8(96)
 	overlayLumThreshold  = 0.5
 	// A box is considered strongly vertical when height is at least this multiple of width.
 	overlayVerticalAspectThreshold = 2.2
@@ -127,8 +128,9 @@ type ImageTextBlock struct {
 
 // OverlayStats holds counters from a single DrawTextOnImageWithOptions call.
 type OverlayStats struct {
-	BlocksDrawn   int // blocks for which text was successfully rendered
-	BlocksSkipped int // blocks that were filtered out (overlap, duplicate, empty layout, etc.)
+	BlocksDrawn   int      // blocks for which text was successfully rendered
+	BlocksSkipped int      // blocks that were filtered out (overlap, duplicate, empty layout, etc.)
+	FontWarnings  []string // non-empty when a block contained runes with no covering fallback font
 }
 
 // DrawTextOnImage loads an image, draws translated text inside OCR block regions,
@@ -205,6 +207,7 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 	drawn := make([]overlayCandidate, 0, count)
 	drawnBoxes := make([]image.Rectangle, 0, count)
 	skipped := 0
+	var fontWarnings []string
 	for _, candidate := range candidates {
 		box := candidate.box
 		if shouldSkipForOverlap(box, drawnBoxes) {
@@ -259,32 +262,39 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 		}
 
 		if opts.EraseBBox {
-			// Erase original OCR text first by filling the whole bbox with the sampled
-			// average region color from the source image.
-			eraseColor := avgRegionColor(rgba, box)
-			draw.Draw(rgba, box, &image.Uniform{C: eraseColor}, image.Point{}, draw.Src)
+			// Erase original OCR text using a gradient-preserving patch fill so that
+			// gradients and shadows are reproduced instead of a flat color block.
+			patchFillBBox(rgba, box)
 		}
 
-		// Compute the minimum background height needed to contain the laid-out text.
-		// The fill above already clears the full bbox; this shrink-wrapped region is
-		// used only as the clip bounds for translated text rendering.
+		// Warn once per block when no system font can cover the text (tofu risk).
+		if w := fontCoverageWarning(candidate.text); w != "" {
+			fontWarnings = append(fontWarnings, w)
+			slog.Warn("font coverage gap detected", "warning", w)
+		}
+
 		ascentCacheMap := &overlayAscentCache
 		if needsFallbackFont(candidate.text) {
 			ascentCacheMap = &fallbackAscentCache
 		}
 		ascent := cachedAscent(face, ascentCacheMap, layout.fontSize)
 		pad := opts.TextPadding
-		textH := pad + ascent + layout.topInset +
-			(len(layout.lines)-1)*layout.lineHeight + pad
-		paintBox := image.Rect(box.Min.X, box.Min.Y, box.Max.X, min(box.Min.Y+textH, box.Max.Y))
+		nLines := len(layout.lines)
+		availContentH := box.Dy() - 2*pad
+
+		// Keep line spacing consistent inside each block: line height depends on
+		// font size and does not stretch to fill extra bbox space.
+		blockH := layout.topInset + ascent + (nLines-1)*layout.lineHeight
+		vertOffset := max(0, (availContentH-blockH)/2)
+		baselineY := box.Min.Y + pad + vertOffset + layout.topInset + ascent
+		baselineY += baselineScriptOffset(candidate.text, layout.fontSize)
 
 		// Choose ink based on the erased background region luminance.
 		srcLum := avgRegionLuminance(rgba, box)
 		inkColor := inkColorForBackground(srcLum)
 		rtl := isRTLText(candidate.text)
-		baselineY := box.Min.Y + ascent + pad + layout.topInset
 		for _, line := range layout.lines {
-			if baselineY > paintBox.Max.Y-pad {
+			if baselineY > box.Max.Y-pad {
 				break
 			}
 			renderLine := reorderBidiForRendering(line)
@@ -297,13 +307,13 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 					dotX = box.Min.X + pad
 				}
 			}
-			drawTextLine(rgba, layout.fontSize, renderLine, dotX, baselineY, inkColor, paintBox)
+			drawTextLine(rgba, layout.fontSize, renderLine, dotX, baselineY, inkColor, box)
 			baselineY += layout.lineHeight
 		}
 		drawn = append(drawn, candidate)
 		drawnBoxes = append(drawnBoxes, box)
 	}
-	stats := OverlayStats{BlocksDrawn: len(drawn), BlocksSkipped: skipped}
+	stats := OverlayStats{BlocksDrawn: len(drawn), BlocksSkipped: skipped, FontWarnings: fontWarnings}
 
 	ext := strings.ToLower(filepath.Ext(imagePath))
 	base := strings.TrimSuffix(imagePath, filepath.Ext(imagePath))
@@ -407,12 +417,57 @@ func shouldSkipForOverlap(candidate image.Rectangle, existing []image.Rectangle)
 	return false
 }
 
-// shadowColorFor returns a 50%-opacity contrasting colour to use as a text drop-shadow.
+// shadowColorFor returns a softened contrasting colour used as a text drop-shadow.
 func shadowColorFor(ink color.Color) color.Color {
 	r, g, b, _ := ink.RGBA()
-	// Invert (0xffff → 0, 0 → 0xffff) and scale to 8-bit with 50% alpha.
-	inv := func(c uint32) uint8 { return uint8((0xffff - c) >> 8) }
-	return color.RGBA{R: inv(r), G: inv(g), B: inv(b), A: 128}
+	inkR := uint8(r >> 8)
+	inkG := uint8(g >> 8)
+	inkB := uint8(b >> 8)
+	inv := func(c uint8) uint8 { return 255 - c }
+	// Mostly inverted for contrast, slightly blended toward ink tone to avoid
+	// harsh halo edges on textured backgrounds.
+	blend := func(inverted, ink uint8) uint8 {
+		return uint8((int(inverted)*8 + int(ink)*2) / 10)
+	}
+	return color.RGBA{
+		R: blend(inv(inkR), inkR),
+		G: blend(inv(inkG), inkG),
+		B: blend(inv(inkB), inkB),
+		A: overlayShadowAlpha,
+	}
+}
+
+func baselineScriptOffset(text string, fontSize float64) int {
+	if strings.TrimSpace(text) == "" {
+		return 0
+	}
+	total := 0
+	cjk := 0
+	rtl := 0
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		total++
+		if isCJKRune(r) {
+			cjk++
+		}
+		if isRTLRune(r) {
+			rtl++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	// CJK runs can look optically low with Latin-centric ascent metrics.
+	if cjk*10 >= total*7 {
+		return -max(1, int(math.Round(fontSize*0.04)))
+	}
+	// RTL runs can read better with a tiny downward optical nudge.
+	if rtl*2 >= total {
+		return max(1, int(math.Round(fontSize*0.03)))
+	}
+	return 0
 }
 
 // drawTextLine renders line at (dotX, baselineY) with a 1-pixel drop-shadow.
@@ -498,20 +553,24 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 
 		if textH <= box.Dy() && maxGlyphW <= availW {
 			if opts.EraseBBox {
-				eraseColor := avgRegionColor(dst, box)
-				draw.Draw(dst, box, &image.Uniform{C: eraseColor}, image.Point{}, draw.Src)
+				patchFillBBox(dst, box)
 			}
 			srcLum := avgRegionLuminance(dst, box)
-			paintBox := image.Rect(box.Min.X, box.Min.Y, box.Max.X, min(box.Min.Y+textH, box.Max.Y))
 			inkColor := inkColorForBackground(srcLum)
 
+			nGlyphs := len(runes)
+			availContentH := box.Dy() - 2*pad
+			// Vertical centering with consistent font-size-based line spacing.
+			blockH := topInset + ascent + (nGlyphs-1)*lineHeight
+			vertOffset := max(0, (availContentH-blockH)/2)
 			dotX := box.Min.X + pad + max(0, (availW-maxGlyphW)/2)
-			baselineY := box.Min.Y + ascent + pad + topInset
+			baselineY := box.Min.Y + pad + vertOffset + topInset + ascent
+			baselineY += baselineScriptOffset(string(runes), float64(fontSize))
 			for _, r := range runes {
-				if baselineY > paintBox.Max.Y-pad {
+				if baselineY > box.Max.Y-pad {
 					break
 				}
-				drawTextLine(dst, float64(fontSize), string(r), dotX, baselineY, inkColor, paintBox)
+				drawTextLine(dst, float64(fontSize), string(r), dotX, baselineY, inkColor, box)
 				baselineY += lineHeight
 			}
 			return true, nil
@@ -636,8 +695,10 @@ type OverlayOptions struct {
 	// BboxShrinkPx shrinks OCR bboxes inward before drawing. Default: 2.
 	// Set to 0 to preserve original bbox coordinates.
 	BboxShrinkPx int
-	// EraseBBox controls whether OCR bboxes are pre-filled with sampled average
-	// color before drawing translated text. Default: true.
+	// EraseBBox controls whether OCR bboxes are erased before drawing translated
+	// text. The erase uses a gradient-preserving patch fill (median per 4×4 cell,
+	// bilinear-interpolated) to avoid flat color blocks and preserve texture.
+	// Default: true.
 	EraseBBox bool
 }
 
@@ -776,11 +837,76 @@ func wrapLines(text string, maxWidth int, measureFn func(string) int, splitFn fu
 	}
 
 	flushCurrent()
-	return lines
+	return rebalanceWrappedLines(lines, maxWidth, measureFn)
+}
+
+// rebalanceWrappedLines avoids very short final lines by moving one or two
+// trailing words from the previous line when both lines remain within maxWidth.
+func rebalanceWrappedLines(lines []string, maxWidth int, measureFn func(string) int) []string {
+	if len(lines) < 2 || maxWidth <= 0 {
+		return lines
+	}
+	lastIdx := len(lines) - 1
+	prev := strings.TrimSpace(lines[lastIdx-1])
+	last := strings.TrimSpace(lines[lastIdx])
+	if prev == "" || last == "" {
+		return lines
+	}
+	if float64(measureFn(last)) >= float64(maxWidth)*0.45 {
+		return lines
+	}
+	prevWords := strings.Fields(prev)
+	if len(prevWords) < 2 {
+		return lines
+	}
+	absInt := func(v int) int {
+		if v < 0 {
+			return -v
+		}
+		return v
+	}
+	bestPrev := prev
+	bestLast := last
+	bestDelta := absInt(measureFn(prev) - measureFn(last))
+	for take := 1; take <= 2 && len(prevWords)-take >= 1; take++ {
+		moved := strings.Join(prevWords[len(prevWords)-take:], " ")
+		newPrev := strings.Join(prevWords[:len(prevWords)-take], " ")
+		newLast := strings.TrimSpace(moved + " " + last)
+		if measureFn(newPrev) > maxWidth || measureFn(newLast) > maxWidth {
+			continue
+		}
+		delta := absInt(measureFn(newPrev) - measureFn(newLast))
+		if delta < bestDelta {
+			bestPrev = newPrev
+			bestLast = newLast
+			bestDelta = delta
+		}
+	}
+	if bestPrev == prev && bestLast == last {
+		return lines
+	}
+	out := append([]string(nil), lines...)
+	out[lastIdx-1] = bestPrev
+	out[lastIdx] = bestLast
+	return out
 }
 
 func approximateLineHeight(fontSize int) int {
-	return max(1, fontSize+overlayLineSpacing)
+	if fontSize <= 0 {
+		return 1
+	}
+	// Readability target: around 1.24x of font size, with hard bounds to avoid
+	// cramped (too tight) or overly airy (too loose) line spacing.
+	target := int(math.Round(float64(fontSize) * 1.24))
+	minH := fontSize + overlayLineSpacing
+	maxH := fontSize + 8
+	if target < minH {
+		return minH
+	}
+	if target > maxH {
+		return maxH
+	}
+	return target
 }
 
 func approximateTopInset(fontSize int) int {
@@ -1002,6 +1128,102 @@ func avgRegionColor(img *image.RGBA, r image.Rectangle) color.RGBA {
 	}
 }
 
+// medianRegionColor computes the per-channel median color of pixels in region r
+// sampled at a stride. Median is more robust than average when the region
+// contains text-ink outliers: as long as background pixels outnumber ink pixels
+// the median returns a background-representative color.
+func medianRegionColor(img *image.RGBA, r image.Rectangle) color.RGBA {
+	r = r.Intersect(img.Bounds())
+	if r.Empty() {
+		return color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	}
+	step := max(1, min(r.Dx(), r.Dy())/16)
+	var rs, gs, bs []uint8
+	for y := r.Min.Y; y < r.Max.Y; y += step {
+		for x := r.Min.X; x < r.Max.X; x += step {
+			c := img.RGBAAt(x, y)
+			rs = append(rs, c.R)
+			gs = append(gs, c.G)
+			bs = append(bs, c.B)
+		}
+	}
+	if len(rs) == 0 {
+		return color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	}
+	sort.Slice(rs, func(i, j int) bool { return rs[i] < rs[j] })
+	sort.Slice(gs, func(i, j int) bool { return gs[i] < gs[j] })
+	sort.Slice(bs, func(i, j int) bool { return bs[i] < bs[j] })
+	mid := len(rs) / 2
+	return color.RGBA{R: rs[mid], G: gs[mid], B: bs[mid], A: 255}
+}
+
+// patchFillBBox fills box on dst using a gradient-preserving patch fill.
+// The bbox is divided into a 4×4 coarse grid; each cell's representative color
+// is the per-channel median of its sampled pixels (robust to text-ink outliers).
+// Every destination pixel is then written as a bilinear interpolation of its
+// four surrounding cell medians, so gradients and shadows are reproduced rather
+// than collapsed into a flat block.
+func patchFillBBox(dst *image.RGBA, box image.Rectangle) {
+	r := box.Intersect(dst.Bounds())
+	if r.Empty() {
+		return
+	}
+	const gridN = 4
+	var cellColors [gridN][gridN]color.RGBA
+	for gy := 0; gy < gridN; gy++ {
+		for gx := 0; gx < gridN; gx++ {
+			x0 := r.Min.X + gx*r.Dx()/gridN
+			y0 := r.Min.Y + gy*r.Dy()/gridN
+			x1 := r.Min.X + (gx+1)*r.Dx()/gridN
+			y1 := r.Min.Y + (gy+1)*r.Dy()/gridN
+			cell := image.Rect(x0, y0, x1, y1)
+			cellColors[gy][gx] = medianRegionColor(dst, cell)
+		}
+	}
+	w := r.Dx()
+	h := r.Dy()
+	if w < 2 {
+		w = 2
+	}
+	if h < 2 {
+		h = 2
+	}
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		fy := float64(y-r.Min.Y) * float64(gridN-1) / float64(h-1)
+		gy0 := int(fy)
+		if gy0 > gridN-2 {
+			gy0 = gridN - 2
+		}
+		gy1 := gy0 + 1
+		ty := fy - float64(gy0)
+		for x := r.Min.X; x < r.Max.X; x++ {
+			fx := float64(x-r.Min.X) * float64(gridN-1) / float64(w-1)
+			gx0 := int(fx)
+			if gx0 > gridN-2 {
+				gx0 = gridN - 2
+			}
+			gx1 := gx0 + 1
+			tx := fx - float64(gx0)
+			c00 := cellColors[gy0][gx0]
+			c10 := cellColors[gy0][gx1]
+			c01 := cellColors[gy1][gx0]
+			c11 := cellColors[gy1][gx1]
+			r0 := float64(c00.R)*(1-tx) + float64(c10.R)*tx
+			r1 := float64(c01.R)*(1-tx) + float64(c11.R)*tx
+			g0 := float64(c00.G)*(1-tx) + float64(c10.G)*tx
+			g1 := float64(c01.G)*(1-tx) + float64(c11.G)*tx
+			b0 := float64(c00.B)*(1-tx) + float64(c10.B)*tx
+			b1 := float64(c01.B)*(1-tx) + float64(c11.B)*tx
+			dst.SetRGBA(x, y, color.RGBA{
+				R: uint8(r0*(1-ty) + r1*ty),
+				G: uint8(g0*(1-ty) + g1*ty),
+				B: uint8(b0*(1-ty) + b1*ty),
+				A: 255,
+			})
+		}
+	}
+}
+
 // inkColorForBackground chooses black or white ink based on background
 // luminance, so translated text remains legible on the erased fill color.
 func inkColorForBackground(srcLum float64) color.Color {
@@ -1123,6 +1345,100 @@ func faceForFallback(text string, fontSize float64) (font.Face, error) {
 	return loadOverlayFace(fontSize)
 }
 
+// fontCoverageWarning returns a non-empty string when text requires a fallback
+// font but no system fallback is available or covers all runes. The string
+// identifies the text snippet (truncated) and names the scripts detected so
+// callers can surface actionable install hints.
+func fontCoverageWarning(text string) string {
+	if !needsFallbackFont(text) {
+		return ""
+	}
+	// Try each fallback at a nominal size; if any covers the text, we're fine.
+	for _, entry := range fallbackFonts {
+		face, err := entry.face(12)
+		if err != nil {
+			continue
+		}
+		if fontFaceCoversText(face, text) {
+			return ""
+		}
+	}
+	// Identify which scripts are present in the text for a useful hint.
+	scripts := detectMissingScripts(text)
+	snippet := text
+	if len([]rune(snippet)) > 20 {
+		snippet = string([]rune(snippet)[:20]) + "…"
+	}
+	return fmt.Sprintf(
+		"no system font covers %q (scripts: %s); install Noto fonts to fix tofu boxes",
+		snippet, strings.Join(scripts, ", "),
+	)
+}
+
+// detectMissingScripts returns human-readable script names for fallback runes
+// found in text. Used to build actionable install hints in font warnings.
+func detectMissingScripts(text string) []string {
+	seen := make(map[string]bool)
+	for _, r := range text {
+		if !isFallbackRune(r) {
+			continue
+		}
+		switch {
+		case r >= 0x4E00 && r <= 0x9FFF,
+			r >= 0x2E80 && r <= 0x2EFF,
+			r >= 0x3000 && r <= 0x303F,
+			r >= 0x3040 && r <= 0x30FF,
+			r >= 0xF900 && r <= 0xFAFF,
+			r >= 0x20000 && r <= 0x2A6DF:
+			seen["CJK"] = true
+		case r >= 0xAC00 && r <= 0xD7AF,
+			r >= 0x1100 && r <= 0x11FF:
+			seen["Hangul"] = true
+		case r >= 0x0600 && r <= 0x06FF,
+			r >= 0x0750 && r <= 0x077F,
+			r >= 0x08A0 && r <= 0x08FF:
+			seen["Arabic"] = true
+		case r >= 0x0590 && r <= 0x05FF:
+			seen["Hebrew"] = true
+		case r >= 0x0900 && r <= 0x097F:
+			seen["Devanagari"] = true
+		case r >= 0x0980 && r <= 0x09FF:
+			seen["Bengali"] = true
+		case r >= 0x0B80 && r <= 0x0BFF:
+			seen["Tamil"] = true
+		case r >= 0x0C00 && r <= 0x0C7F:
+			seen["Telugu"] = true
+		case r >= 0x0C80 && r <= 0x0CFF:
+			seen["Kannada"] = true
+		case r >= 0x0D00 && r <= 0x0D7F:
+			seen["Malayalam"] = true
+		case r >= 0x0E00 && r <= 0x0E7F:
+			seen["Thai"] = true
+		default:
+			seen["other-non-Latin"] = true
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// AvailableFallbackFonts probes each fallback font entry and returns the names
+// of fonts that were successfully loaded from the local filesystem. Useful for
+// health checks and startup diagnostics.
+func AvailableFallbackFonts() []string {
+	var available []string
+	for _, entry := range fallbackFonts {
+		if f := entry.load(); f != nil {
+			available = append(available, entry.name)
+		}
+	}
+	return available
+}
+
 // isCJKRune reports whether r is a CJK ideograph or Hangul syllable — scripts
 // that have no inter-word spaces, so word-wrapping must split at rune boundaries.
 func isCJKRune(r rune) bool {
@@ -1179,9 +1495,13 @@ func expandCJKTokens(words []string) []string {
 }
 
 // isCJKRune reports whether r belongs to a script that goregular cannot render
-// (CJK, Devanagari, Indic, Thai, Hangul, and related blocks).
+// (Arabic, CJK, Devanagari, Indic, Thai, Hangul, and related blocks).
 func isFallbackRune(r rune) bool {
-	return (r >= 0x0900 && r <= 0x097F) || // Devanagari
+	return (r >= 0x0600 && r <= 0x06FF) || // Arabic
+		(r >= 0x0750 && r <= 0x077F) || // Arabic Supplement
+		(r >= 0x08A0 && r <= 0x08FF) || // Arabic Extended-A
+		(r >= 0x0590 && r <= 0x05FF) || // Hebrew
+		(r >= 0x0900 && r <= 0x097F) || // Devanagari
 		(r >= 0x0980 && r <= 0x09FF) || // Bengali
 		(r >= 0x0A00 && r <= 0x0A7F) || // Gurmukhi
 		(r >= 0x0A80 && r <= 0x0AFF) || // Gujarati
