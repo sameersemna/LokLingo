@@ -24,22 +24,26 @@ import (
 )
 
 const (
-	overlayTextPadding   = 6
-	overlayLineSpacing   = 2
-	overlayMinFontSize   = 8
-	overlayMaxFontSize   = 32
-	overlayBboxShrinkPx  = 2
-	overlayMinDrawWidth  = 24
-	overlayMinDrawHeight = 24
-	overlayMaxOverlapPct = 0.45
-	overlayNearbyBoxDist = 30
-	overlayBgAlpha       = uint8(220)
-	overlayShadowAlpha   = uint8(96)
-	overlayLumThreshold  = 0.5
+	overlayTextPadding     = 6
+	overlayLineSpacing     = 2
+	overlayMinFontSize     = 8
+	overlayMaxFontSize     = 32
+	overlayBboxShrinkPx    = 2
+	overlayMinDrawWidth    = 24
+	overlayMinDrawHeight   = 24
+	overlayMaxOverlapPct   = 0.45
+	overlayNearbyBoxDist   = 30
+	overlayBgAlpha         = uint8(220)
+	overlayShadowAlpha     = uint8(96)
+	overlayLumThreshold    = 0.5
+	overlayPatchFeatherPx  = 2
+	overlayPatchBlurRadius = 1
 	// A box is considered strongly vertical when height is at least this multiple of width.
 	overlayVerticalAspectThreshold = 2.2
 	// Require most runes to be CJK before applying vertical rendering.
 	overlayVerticalCJKMinRatio = 0.8
+	// Keep vertical CJK text from becoming too small in narrow columns.
+	overlayVerticalMinFontBoost = 2
 )
 
 var overlayFontData = mustParseOverlayFont()
@@ -83,8 +87,16 @@ var fallbackFonts = []*fallbackFontEntry{
 		paths: []string{
 			// Alpine (apk font-noto-cjk)
 			"/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/noto/NotoSansCJKsc-Regular.otf",
+			"/usr/share/fonts/noto/NotoSansCJKtc-Regular.otf",
+			"/usr/share/fonts/noto/NotoSansCJKjp-Regular.otf",
+			"/usr/share/fonts/noto/NotoSansCJKkr-Regular.otf",
 			// Debian/Ubuntu opentype path
 			"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+			"/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf",
+			"/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+			"/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
 			"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
 			"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
 			"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
@@ -96,10 +108,14 @@ var fallbackFonts = []*fallbackFontEntry{
 		paths: []string{
 			// Alpine (apk font-noto-arabic)
 			"/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
+			"/usr/share/fonts/noto/NotoNaskhArabic-Regular.ttf",
 			// Debian/Ubuntu
 			"/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+			"/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
 			"/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
+			"/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
 			"/usr/share/fonts/google-noto/NotoSansArabic-Regular.ttf",
+			"/usr/share/fonts/google-noto/NotoNaskhArabic-Regular.ttf",
 		},
 	},
 	{
@@ -264,7 +280,7 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 		if opts.EraseBBox {
 			// Erase original OCR text using a gradient-preserving patch fill so that
 			// gradients and shadows are reproduced instead of a flat color block.
-			patchFillBBox(rgba, box)
+			patchFillBBoxWithOptions(rgba, box, opts)
 		}
 
 		// Warn once per block when no system font can cover the text (tofu risk).
@@ -442,6 +458,8 @@ func baselineScriptOffset(text string, fontSize float64) int {
 		return 0
 	}
 	total := 0
+	letters := 0
+	descenders := 0
 	cjk := 0
 	rtl := 0
 	for _, r := range text {
@@ -449,6 +467,12 @@ func baselineScriptOffset(text string, fontSize float64) int {
 			continue
 		}
 		total++
+		if unicode.IsLetter(r) {
+			letters++
+			if isDescenderRune(r) {
+				descenders++
+			}
+		}
 		if isCJKRune(r) {
 			cjk++
 		}
@@ -459,15 +483,42 @@ func baselineScriptOffset(text string, fontSize float64) int {
 	if total == 0 {
 		return 0
 	}
+
+	// Apply a small optical upward nudge so text appears centered by eye.
+	// 5-10% of font-size target: baseline starts at ~7% up.
+	offset := -max(1, int(math.Round(fontSize*0.07)))
+
+	// Descender-heavy strings (e.g. "gypqj") need less upward nudge.
+	// Cap compensation at ~5% of font size so text does not sink too low.
+	if letters > 0 && descenders > 0 {
+		ratio := float64(descenders) / float64(letters)
+		normalized := ratio / 0.55
+		if normalized > 1.0 {
+			normalized = 1.0
+		}
+		offset += int(math.Round(fontSize * 0.05 * normalized))
+	}
+
 	// CJK runs can look optically low with Latin-centric ascent metrics.
 	if cjk*10 >= total*7 {
-		return -max(1, int(math.Round(fontSize*0.04)))
+		offset -= max(1, int(math.Round(fontSize*0.02)))
 	}
-	// RTL runs can read better with a tiny downward optical nudge.
+
+	// RTL runs typically have deeper bowls/descenders, so reduce the upward nudge.
 	if rtl*2 >= total {
-		return max(1, int(math.Round(fontSize*0.03)))
+		offset += max(1, int(math.Round(fontSize*0.04)))
 	}
-	return 0
+
+	return offset
+}
+
+func isDescenderRune(r rune) bool {
+	// Include common descender-heavy Latin glyphs.
+	switch unicode.ToLower(r) {
+	case 'g', 'j', 'p', 'q', 'y':
+		return true
+	}
+	return false
 }
 
 // drawTextLine renders line at (dotX, baselineY) with a 1-pixel drop-shadow.
@@ -521,12 +572,19 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 		return false, nil
 	}
 
-	fontSize := min(opts.MaxFontSize, max(opts.MinFontSize, availW))
+	minVerticalFont := opts.MinFontSize + overlayVerticalMinFontBoost
+	if minVerticalFont > opts.MaxFontSize {
+		minVerticalFont = opts.MaxFontSize
+	}
+	fontSize := min(opts.MaxFontSize, max(minVerticalFont, availW))
 	if fontSize <= 0 {
-		fontSize = opts.MinFontSize
+		fontSize = minVerticalFont
+	}
+	if fontSize < minVerticalFont {
+		fontSize = minVerticalFont
 	}
 
-	for fontSize >= opts.MinFontSize {
+	for fontSize >= minVerticalFont {
 		lineHeight := approximateLineHeight(fontSize)
 		topInset := approximateTopInset(fontSize)
 		if lineHeight <= 0 {
@@ -553,7 +611,7 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 
 		if textH <= box.Dy() && maxGlyphW <= availW {
 			if opts.EraseBBox {
-				patchFillBBox(dst, box)
+				patchFillBBoxWithOptions(dst, box, opts)
 			}
 			srcLum := avgRegionLuminance(dst, box)
 			inkColor := inkColorForBackground(srcLum)
@@ -695,6 +753,12 @@ type OverlayOptions struct {
 	// BboxShrinkPx shrinks OCR bboxes inward before drawing. Default: 2.
 	// Set to 0 to preserve original bbox coordinates.
 	BboxShrinkPx int
+	// PatchFeatherPx controls edge feathering width in pixels when erasing OCR boxes.
+	// Recommended range: 1-3. Default: 2.
+	PatchFeatherPx int
+	// PatchBlurRadius controls slight edge blur radius in pixels for erased OCR boxes.
+	// Default: 1.
+	PatchBlurRadius int
 	// EraseBBox controls whether OCR bboxes are erased before drawing translated
 	// text. The erase uses a gradient-preserving patch fill (median per 4×4 cell,
 	// bilinear-interpolated) to avoid flat color blocks and preserve texture.
@@ -705,13 +769,15 @@ type OverlayOptions struct {
 // DefaultOverlayOptions returns the default rendering options that DrawTextOnImage uses.
 func DefaultOverlayOptions() OverlayOptions {
 	return OverlayOptions{
-		BgAlpha:      overlayBgAlpha,
-		MaxFontSize:  overlayMaxFontSize,
-		MinFontSize:  overlayMinFontSize,
-		JPEGQuality:  90,
-		TextPadding:  overlayTextPadding,
-		BboxShrinkPx: overlayBboxShrinkPx,
-		EraseBBox:    true,
+		BgAlpha:         overlayBgAlpha,
+		MaxFontSize:     overlayMaxFontSize,
+		MinFontSize:     overlayMinFontSize,
+		JPEGQuality:     90,
+		TextPadding:     overlayTextPadding,
+		BboxShrinkPx:    overlayBboxShrinkPx,
+		PatchFeatherPx:  overlayPatchFeatherPx,
+		PatchBlurRadius: overlayPatchBlurRadius,
+		EraseBBox:       true,
 	}
 }
 
@@ -1157,17 +1223,104 @@ func medianRegionColor(img *image.RGBA, r image.Rectangle) color.RGBA {
 	return color.RGBA{R: rs[mid], G: gs[mid], B: bs[mid], A: 255}
 }
 
-// patchFillBBox fills box on dst using a gradient-preserving patch fill.
+// patchFillBBox fills box on dst using default erase settings.
+func patchFillBBox(dst *image.RGBA, box image.Rectangle) {
+	patchFillBBoxWithOptions(dst, box, DefaultOverlayOptions())
+}
+
+// boundaryContrast returns a [0,1] contrast score by comparing luminance of
+// pixels just outside the bbox edge versus pixels just inside it on dst.
+// It is called before the patch is written, so dst still holds the original image.
+func boundaryContrast(dst *image.RGBA, r image.Rectangle) float64 {
+	bounds := dst.Bounds()
+	lumPx := func(x, y int) float64 {
+		c := dst.RGBAAt(x, y)
+		// BT.601 luma
+		return 0.299*float64(c.R) + 0.587*float64(c.G) + 0.114*float64(c.B)
+	}
+	var sumSq float64
+	var count int
+	// top and bottom edges
+	for x := r.Min.X; x < r.Max.X; x++ {
+		if r.Min.Y-1 >= bounds.Min.Y {
+			d := lumPx(x, r.Min.Y-1) - lumPx(x, r.Min.Y)
+			sumSq += d * d
+			count++
+		}
+		if r.Max.Y < bounds.Max.Y {
+			d := lumPx(x, r.Max.Y) - lumPx(x, r.Max.Y-1)
+			sumSq += d * d
+			count++
+		}
+	}
+	// left and right edges
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		if r.Min.X-1 >= bounds.Min.X {
+			d := lumPx(r.Min.X-1, y) - lumPx(r.Min.X, y)
+			sumSq += d * d
+			count++
+		}
+		if r.Max.X < bounds.Max.X {
+			d := lumPx(r.Max.X, y) - lumPx(r.Max.X-1, y)
+			sumSq += d * d
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	rms := math.Sqrt(sumSq / float64(count))
+	return math.Min(rms/128.0, 1.0)
+}
+
+// patchFillBBoxWithOptions fills box on dst using a gradient-preserving patch fill.
 // The bbox is divided into a 4×4 coarse grid; each cell's representative color
 // is the per-channel median of its sampled pixels (robust to text-ink outliers).
 // Every destination pixel is then written as a bilinear interpolation of its
 // four surrounding cell medians, so gradients and shadows are reproduced rather
 // than collapsed into a flat block.
-func patchFillBBox(dst *image.RGBA, box image.Rectangle) {
+// Feather width and blur radius are scaled up automatically on high-contrast
+// boundaries so seams are better hidden on textured/high-contrast backgrounds.
+func patchFillBBoxWithOptions(dst *image.RGBA, box image.Rectangle, opts OverlayOptions) {
 	r := box.Intersect(dst.Bounds())
 	if r.Empty() {
 		return
 	}
+
+	featherPx := opts.PatchFeatherPx
+	if featherPx <= 0 {
+		featherPx = overlayPatchFeatherPx
+	}
+	if featherPx < 1 {
+		featherPx = 1
+	}
+	if featherPx > 3 {
+		featherPx = 3
+	}
+	blurRadius := opts.PatchBlurRadius
+	if blurRadius < 0 {
+		blurRadius = overlayPatchBlurRadius
+	}
+	if blurRadius > 2 {
+		blurRadius = 2
+	}
+
+	// Adapt feather and blur to local boundary contrast.
+	// contrast ∈ [0,1]; at 0 no scaling; at 1 feather scales ×2.5, blur ×2.
+	contrast := boundaryContrast(dst, r)
+	if contrast > 0.05 {
+		featherScale := 1.0 + 1.5*contrast
+		blurScale := 1.0 + 1.0*contrast
+		featherPx = int(math.Round(float64(featherPx) * featherScale))
+		blurRadius = int(math.Round(float64(blurRadius) * blurScale))
+		if featherPx > 6 {
+			featherPx = 6
+		}
+		if blurRadius > 4 {
+			blurRadius = 4
+		}
+	}
+
 	const gridN = 4
 	var cellColors [gridN][gridN]color.RGBA
 	for gy := 0; gy < gridN; gy++ {
@@ -1188,16 +1341,20 @@ func patchFillBBox(dst *image.RGBA, box image.Rectangle) {
 	if h < 2 {
 		h = 2
 	}
-	for y := r.Min.Y; y < r.Max.Y; y++ {
-		fy := float64(y-r.Min.Y) * float64(gridN-1) / float64(h-1)
+
+	patch := make([]color.RGBA, r.Dx()*r.Dy())
+	idxAt := func(px, py int) int { return py*r.Dx() + px }
+
+	for py := 0; py < r.Dy(); py++ {
+		fy := float64(py) * float64(gridN-1) / float64(h-1)
 		gy0 := int(fy)
 		if gy0 > gridN-2 {
 			gy0 = gridN - 2
 		}
 		gy1 := gy0 + 1
 		ty := fy - float64(gy0)
-		for x := r.Min.X; x < r.Max.X; x++ {
-			fx := float64(x-r.Min.X) * float64(gridN-1) / float64(w-1)
+		for px := 0; px < r.Dx(); px++ {
+			fx := float64(px) * float64(gridN-1) / float64(w-1)
 			gx0 := int(fx)
 			if gx0 > gridN-2 {
 				gx0 = gridN - 2
@@ -1214,13 +1371,108 @@ func patchFillBBox(dst *image.RGBA, box image.Rectangle) {
 			g1 := float64(c01.G)*(1-tx) + float64(c11.G)*tx
 			b0 := float64(c00.B)*(1-tx) + float64(c10.B)*tx
 			b1 := float64(c01.B)*(1-tx) + float64(c11.B)*tx
-			dst.SetRGBA(x, y, color.RGBA{
+			patch[idxAt(px, py)] = color.RGBA{
 				R: uint8(r0*(1-ty) + r1*ty),
 				G: uint8(g0*(1-ty) + g1*ty),
 				B: uint8(b0*(1-ty) + b1*ty),
 				A: 255,
-			})
+			}
 		}
+	}
+
+	// Blur only a narrow band near edges to soften transition to surrounding pixels.
+	if blurRadius > 0 {
+		band := featherPx + blurRadius
+		blurred := make([]color.RGBA, len(patch))
+		copy(blurred, patch)
+		for py := 0; py < r.Dy(); py++ {
+			for px := 0; px < r.Dx(); px++ {
+				d := edgeDistance(px, py, r.Dx(), r.Dy())
+				if d > band {
+					continue
+				}
+				var sr, sg, sb, count int
+				for oy := -blurRadius; oy <= blurRadius; oy++ {
+					ny := py + oy
+					if ny < 0 || ny >= r.Dy() {
+						continue
+					}
+					for ox := -blurRadius; ox <= blurRadius; ox++ {
+						nx := px + ox
+						if nx < 0 || nx >= r.Dx() {
+							continue
+						}
+						c := patch[idxAt(nx, ny)]
+						sr += int(c.R)
+						sg += int(c.G)
+						sb += int(c.B)
+						count++
+					}
+				}
+				if count == 0 {
+					continue
+				}
+				blurred[idxAt(px, py)] = color.RGBA{
+					R: uint8(sr / count),
+					G: uint8(sg / count),
+					B: uint8(sb / count),
+					A: 255,
+				}
+			}
+		}
+		patch = blurred
+	}
+
+	// Composite with feathered alpha at edges (1-3px) to hide patch seams.
+	for py := 0; py < r.Dy(); py++ {
+		for px := 0; px < r.Dx(); px++ {
+			x := r.Min.X + px
+			y := r.Min.Y + py
+			orig := dst.RGBAAt(x, y)
+			fill := patch[idxAt(px, py)]
+
+			alpha := 1.0
+			d := edgeDistance(px, py, r.Dx(), r.Dy())
+			if d < featherPx {
+				alpha = float64(d+1) / float64(featherPx+1)
+			}
+
+			dst.SetRGBA(x, y, blendRGBA(orig, fill, alpha))
+		}
+	}
+}
+
+func edgeDistance(x, y, w, h int) int {
+	left := x
+	right := w - 1 - x
+	top := y
+	bottom := h - 1 - y
+	d := left
+	if right < d {
+		d = right
+	}
+	if top < d {
+		d = top
+	}
+	if bottom < d {
+		d = bottom
+	}
+	return d
+}
+
+func blendRGBA(base, over color.RGBA, alpha float64) color.RGBA {
+	if alpha <= 0 {
+		return base
+	}
+	if alpha >= 1 {
+		return over
+	}
+	inv := 1.0 - alpha
+	return color.RGBA{
+		R: uint8(float64(base.R)*inv + float64(over.R)*alpha),
+		G: uint8(float64(base.G)*inv + float64(over.G)*alpha),
+		B: uint8(float64(base.B)*inv + float64(over.B)*alpha),
+		A: 255,
 	}
 }
 

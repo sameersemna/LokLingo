@@ -99,6 +99,9 @@ func applyLayoutModeBBoxOptions(opts *internalservices.OverlayOptions, requested
 	opts.EraseBBox = true
 	opts.BboxShrinkPx = 0
 	opts.TextPadding = 3
+	// Layout mode prefers gentler seam blending to preserve structure.
+	opts.PatchFeatherPx = 1
+	opts.PatchBlurRadius = 1
 	if requestedPadding >= 0 {
 		switch {
 		case requestedPadding < 2:

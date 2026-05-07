@@ -538,15 +538,25 @@ func TestBaselineScriptOffset_CJKIsNegative(t *testing.T) {
 	}
 }
 
-func TestBaselineScriptOffset_RTLIsPositive(t *testing.T) {
-	if off := baselineScriptOffset("مرحبا", 20); off <= 0 {
-		t.Fatalf("expected positive RTL offset, got %d", off)
+func TestBaselineScriptOffset_RTLHasLessUpwardShift(t *testing.T) {
+	rtl := baselineScriptOffset("مرحبا", 20)
+	ltr := baselineScriptOffset("Hello world", 20)
+	if rtl < ltr {
+		t.Fatalf("expected RTL offset (%d) to be >= LTR offset (%d)", rtl, ltr)
 	}
 }
 
-func TestBaselineScriptOffset_LTRIsZero(t *testing.T) {
-	if off := baselineScriptOffset("Hello world", 20); off != 0 {
-		t.Fatalf("expected zero LTR offset, got %d", off)
+func TestBaselineScriptOffset_LTRIsSlightlyUpward(t *testing.T) {
+	if off := baselineScriptOffset("Hello world", 20); off >= 0 {
+		t.Fatalf("expected slight upward LTR offset (negative), got %d", off)
+	}
+}
+
+func TestBaselineScriptOffset_DescenderHeavyCompensatesUpwardShift(t *testing.T) {
+	plain := baselineScriptOffset("minimum text", 20)
+	descHeavy := baselineScriptOffset("gypyqj", 20)
+	if descHeavy < plain {
+		t.Fatalf("expected descender-heavy offset (%d) to be >= plain offset (%d)", descHeavy, plain)
 	}
 }
 
@@ -1433,6 +1443,12 @@ func TestDefaultOverlayOptions_TextPadding(t *testing.T) {
 	opts := DefaultOverlayOptions()
 	if opts.TextPadding != overlayTextPadding {
 		t.Fatalf("TextPadding: want %d, got %d", overlayTextPadding, opts.TextPadding)
+	}
+	if opts.PatchFeatherPx != overlayPatchFeatherPx {
+		t.Fatalf("PatchFeatherPx: want %d, got %d", overlayPatchFeatherPx, opts.PatchFeatherPx)
+	}
+	if opts.PatchBlurRadius != overlayPatchBlurRadius {
+		t.Fatalf("PatchBlurRadius: want %d, got %d", overlayPatchBlurRadius, opts.PatchBlurRadius)
 	}
 }
 

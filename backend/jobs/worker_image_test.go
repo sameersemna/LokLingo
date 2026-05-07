@@ -211,6 +211,12 @@ func TestApplyLayoutModeBBoxOptions_DefaultAndGeometry(t *testing.T) {
 	if opts.TextPadding != 3 {
 		t.Fatalf("expected default TextPadding=3, got %d", opts.TextPadding)
 	}
+	if opts.PatchFeatherPx != 1 {
+		t.Fatalf("expected PatchFeatherPx=1, got %d", opts.PatchFeatherPx)
+	}
+	if opts.PatchBlurRadius != 1 {
+		t.Fatalf("expected PatchBlurRadius=1, got %d", opts.PatchBlurRadius)
+	}
 }
 
 func TestApplyLayoutModeBBoxOptions_ClampRequestedPadding(t *testing.T) {

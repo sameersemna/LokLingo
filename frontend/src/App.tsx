@@ -67,6 +67,12 @@ function App() {
   const [mode, setMode] = useState<string>("overlay")
   const [result, setResult] = useState("")
   const [resultImageUrl, setResultImageUrl] = useState<string | null>(null)
+  const [compareOriginalUrl, setCompareOriginalUrl] = useState<string | null>(null)
+  const [compareOverlayUrl, setCompareOverlayUrl] = useState<string | null>(null)
+  const [compareLayoutUrl, setCompareLayoutUrl] = useState<string | null>(null)
+  const [compareView, setCompareView] = useState<"side" | "slider">("side")
+  const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("overlay")
+  const [sliderPercent, setSliderPercent] = useState(50)
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -82,6 +88,12 @@ function App() {
   const histId = useRef(history.length)
   const fileRef = useRef<HTMLInputElement>(null)
   const chipRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    return () => {
+      if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
+    }
+  }, [compareOriginalUrl])
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme)
@@ -122,6 +134,12 @@ function App() {
     setLoading(true)
     setResult("")
     setResultImageUrl(null)
+    if (compareOriginalUrl) {
+      URL.revokeObjectURL(compareOriginalUrl)
+      setCompareOriginalUrl(null)
+    }
+    setCompareOverlayUrl(null)
+    setCompareLayoutUrl(null)
     setDetectedLang("")
     try {
       const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode })
@@ -172,6 +190,12 @@ function App() {
     setSourceText(result)
     setResult(sourceText)
     setResultImageUrl(null)
+    if (compareOriginalUrl) {
+      URL.revokeObjectURL(compareOriginalUrl)
+      setCompareOriginalUrl(null)
+    }
+    setCompareOverlayUrl(null)
+    setCompareLayoutUrl(null)
     setDetectedLang("")
   }
 
@@ -208,11 +232,34 @@ function App() {
     }
     setOcrLoading(true)
     try {
-      const res = await translateImage(file, sourceLang, targetLang, mode)
-      setResult(res.translated_text)
-      setResultImageUrl(res.image_url ?? null)
-      if (sourceLang === "auto" && res.source && res.source !== "auto") {
-        setDetectedLang(res.source)
+      const originalUrl = URL.createObjectURL(file)
+      if (compareOriginalUrl) {
+        URL.revokeObjectURL(compareOriginalUrl)
+      }
+      setCompareOriginalUrl(originalUrl)
+
+      const [overlayRes, layoutRes] = await Promise.all([
+        translateImage(file, sourceLang, targetLang, "overlay"),
+        translateImage(file, sourceLang, targetLang, "layout"),
+      ])
+
+      if (!overlayRes.image_url || !layoutRes.image_url) {
+        throw new Error("Image comparison requires both overlay and layout outputs")
+      }
+
+      const activeRes = mode === "layout" ? layoutRes : overlayRes
+      setResult(activeRes.translated_text)
+      setResultImageUrl(activeRes.image_url ?? null)
+      setCompareOverlayUrl(overlayRes.image_url)
+      setCompareLayoutUrl(layoutRes.image_url)
+
+      if (sourceLang === "auto") {
+        const resolved = overlayRes.source && overlayRes.source !== "auto"
+          ? overlayRes.source
+          : layoutRes.source && layoutRes.source !== "auto"
+          ? layoutRes.source
+          : ""
+        if (resolved) setDetectedLang(resolved)
       }
       pushToast("Image translated", "success")
     } catch (err) {
@@ -334,6 +381,12 @@ function App() {
                   setTargetLang(h.targetLang)
                   setResult(h.result)
                   setResultImageUrl(null)
+                  if (compareOriginalUrl) {
+                    URL.revokeObjectURL(compareOriginalUrl)
+                    setCompareOriginalUrl(null)
+                  }
+                  setCompareOverlayUrl(null)
+                  setCompareLayoutUrl(null)
                   setShowHistory(false)
                 }}>
                   <div className="history-langs">
@@ -436,7 +489,18 @@ function App() {
                   <button
                     className="icon-btn"
                     title="Clear"
-                    onClick={() => { setSourceText(""); setResult(""); setResultImageUrl(null); setDetectedLang("") }}
+                    onClick={() => {
+                      setSourceText("")
+                      setResult("")
+                      setResultImageUrl(null)
+                      if (compareOriginalUrl) {
+                        URL.revokeObjectURL(compareOriginalUrl)
+                        setCompareOriginalUrl(null)
+                      }
+                      setCompareOverlayUrl(null)
+                      setCompareLayoutUrl(null)
+                      setDetectedLang("")
+                    }}
                   >
                     ✕ Clear
                   </button>
@@ -456,6 +520,96 @@ function App() {
               ) : (
                 <>
                   <div className="result-text">{result}</div>
+                  {compareOriginalUrl && compareOverlayUrl && compareLayoutUrl && (
+                    <section className="comparison-wrap" aria-label="Image comparison">
+                      <div className="comparison-controls">
+                        <div className="comparison-segment" role="group" aria-label="Comparison layout">
+                          <button
+                            type="button"
+                            className={`icon-btn${compareView === "side" ? " is-active" : ""}`}
+                            onClick={() => setCompareView("side")}
+                          >
+                            Side-by-side
+                          </button>
+                          <button
+                            type="button"
+                            className={`icon-btn${compareView === "slider" ? " is-active" : ""}`}
+                            onClick={() => setCompareView("slider")}
+                          >
+                            Slider
+                          </button>
+                        </div>
+                        {compareView === "slider" && (
+                          <div className="comparison-segment" role="group" aria-label="Slider target">
+                            <button
+                              type="button"
+                              className={`icon-btn${sliderTarget === "overlay" ? " is-active" : ""}`}
+                              onClick={() => setSliderTarget("overlay")}
+                            >
+                              Compare Overlay
+                            </button>
+                            <button
+                              type="button"
+                              className={`icon-btn${sliderTarget === "layout" ? " is-active" : ""}`}
+                              onClick={() => setSliderTarget("layout")}
+                            >
+                              Compare Layout
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {compareView === "side" ? (
+                        <div className="comparison-grid">
+                          <figure className="compare-card">
+                            <figcaption>Original</figcaption>
+                            <img src={compareOriginalUrl} alt="Original image" loading="lazy" />
+                          </figure>
+                          <figure className="compare-card">
+                            <figcaption>Overlay result</figcaption>
+                            <img src={compareOverlayUrl} alt="Overlay translation result" loading="lazy" />
+                          </figure>
+                          <figure className="compare-card">
+                            <figcaption>Layout result</figcaption>
+                            <img src={compareLayoutUrl} alt="Layout translation result" loading="lazy" />
+                          </figure>
+                        </div>
+                      ) : (
+                        <div className="compare-slider-wrap">
+                          <div className="compare-slider-frame" aria-live="polite">
+                            <img
+                              className="compare-slider-base"
+                              src={compareOriginalUrl}
+                              alt="Original image"
+                              loading="lazy"
+                            />
+                            <div
+                              className="compare-slider-overlay"
+                              style={{ width: `${sliderPercent}%` }}
+                              aria-hidden="true"
+                            >
+                              <img
+                                src={sliderTarget === "overlay" ? compareOverlayUrl : compareLayoutUrl}
+                                alt=""
+                                loading="lazy"
+                              />
+                            </div>
+                            <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
+                          </div>
+                          <label className="compare-slider-label">
+                            Reveal {sliderTarget === "overlay" ? "overlay" : "layout"} result
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={sliderPercent}
+                              onChange={e => setSliderPercent(Number(e.target.value))}
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </section>
+                  )}
                   {resultImageUrl && (
                     <div className="result-image-wrap">
                       <img
