@@ -7,6 +7,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"image/png"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
+	"golang.org/x/text/unicode/bidi"
 )
 
 const (
@@ -33,6 +35,10 @@ const (
 	overlayNearbyBoxDist = 30
 	overlayBgAlpha       = uint8(220)
 	overlayLumThreshold  = 0.5
+	// A box is considered strongly vertical when height is at least this multiple of width.
+	overlayVerticalAspectThreshold = 2.2
+	// Require most runes to be CJK before applying vertical rendering.
+	overlayVerticalCJKMinRatio = 0.8
 )
 
 var overlayFontData = mustParseOverlayFont()
@@ -41,29 +47,72 @@ var overlayFontData = mustParseOverlayFont()
 // to avoid redundant OpenType face allocations during the fitting loop.
 var overlayFaceCache sync.Map
 
-// systemFaceCache stores font.Face values for the system fallback font.
-var systemFaceCache sync.Map
-
-// overlayAscentCache and systemAscentCache store the Ascent metric (pixels) for
-// each font size so Metrics() is called at most once per size per font family.
+// overlayAscentCache stores the Ascent metric for goregular at each font size.
+// fallbackAscentCache stores the Ascent metric for whichever fallback font was
+// chosen at each font size; accurate enough for background-height estimation.
 var overlayAscentCache sync.Map
-var systemAscentCache sync.Map
+var fallbackAscentCache sync.Map
 
-// systemFontPaths lists candidate paths for a broad-Unicode system font.
-// The first readable file is used as a fallback for non-Latin scripts.
-var systemFontPaths = []string{
-	"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-	"/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
-	"/usr/share/fonts/noto/NotoSans-Regular.ttf",
-	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-	"/System/Library/Fonts/Supplemental/Arial Unicode MS.ttf",
-	`C:\Windows\Fonts\arialuni.ttf`,
+// fallbackFontEntry is a lazily-loaded broad-Unicode font tried in order when
+// goregular cannot cover the text. Each entry is loaded at most once.
+type fallbackFontEntry struct {
+	name      string
+	paths     []string
+	once      sync.Once
+	data      *opentype.Font // nil if not found on this system
+	faceCache sync.Map
 }
 
-var (
-	systemFontOnce sync.Once
-	systemFontData *opentype.Font // nil if no suitable system font found
-)
+// fallbackFonts is the ordered list of fonts tried for non-Latin text.
+// Fonts are tried in order; the first one whose face covers all runes wins.
+var fallbackFonts = []*fallbackFontEntry{
+	{
+		name: "NotoSans",
+		paths: []string{
+			// Alpine (apk font-noto)
+			"/usr/share/fonts/noto/NotoSans-Regular.ttf",
+			// Debian/Ubuntu
+			"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+			"/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+			"/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+		},
+	},
+	{
+		name: "NotoSansCJK",
+		paths: []string{
+			// Alpine (apk font-noto-cjk)
+			"/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+			// Debian/Ubuntu opentype path
+			"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+		},
+	},
+	{
+		name: "NotoSansArabic",
+		paths: []string{
+			// Alpine (apk font-noto-arabic)
+			"/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
+			// Debian/Ubuntu
+			"/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+			"/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
+			"/usr/share/fonts/google-noto/NotoSansArabic-Regular.ttf",
+		},
+	},
+	{
+		name: "DejaVuSans",
+		paths: []string{
+			// Alpine (apk font-dejavu)
+			"/usr/share/fonts/dejavu/DejaVuSans.ttf",
+			// Debian/Ubuntu
+			"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+			"/System/Library/Fonts/Supplemental/Arial Unicode MS.ttf",
+			`C:\Windows\Fonts\arialuni.ttf`,
+		},
+	},
+}
 
 type overlayCandidate struct {
 	box  image.Rectangle
@@ -166,6 +215,24 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 			skipped++
 			continue
 		}
+		if shouldRenderVerticalText(candidate.text, box) {
+			drew, err := drawVerticalTextBlock(rgba, candidate, box, opts)
+			if err != nil {
+				slog.Error("vertical text render failed, skipping block",
+					"text", candidate.text,
+					"err", err,
+				)
+				skipped++
+				continue
+			}
+			if drew {
+				drawn = append(drawn, candidate)
+				drawnBoxes = append(drawnBoxes, box)
+				continue
+			}
+			// If the vertical path is not confident enough to draw, fall back to the
+			// existing horizontal renderer.
+		}
 
 		layout := fitTextLayout(
 			candidate.text,
@@ -182,15 +249,21 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 		// Load face for metrics (baseline computation). Rendering uses per-segment faces.
 		face, err := faceForText(candidate.text, layout.fontSize)
 		if err != nil {
-			return "", OverlayStats{}, fmt.Errorf("load overlay font: %w", err)
+			slog.Error("overlay font load failed, skipping block",
+				"text", candidate.text,
+				"font_size", layout.fontSize,
+				"err", err,
+			)
+			skipped++
+			continue
 		}
 
 		// Compute the minimum background height needed to contain the laid-out text.
 		// This shrink-wraps the white rectangle to the actual text extent instead of
 		// flooding the entire OCR bbox.
 		ascentCacheMap := &overlayAscentCache
-		if needsFallbackFont(candidate.text) && loadSystemFont() != nil {
-			ascentCacheMap = &systemAscentCache
+		if needsFallbackFont(candidate.text) {
+			ascentCacheMap = &fallbackAscentCache
 		}
 		ascent := cachedAscent(face, ascentCacheMap, layout.fontSize)
 		pad := opts.TextPadding
@@ -211,16 +284,17 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 			if baselineY > paintBox.Max.Y-pad {
 				break
 			}
+			renderLine := reorderBidiForRendering(line)
 			dotX := box.Min.X + pad
 			if rtl {
 				// Right-align each line for RTL scripts (Arabic, Hebrew).
-				lineWidth := measureLinePx(line, layout.fontSize)
+				lineWidth := measureLinePx(renderLine, layout.fontSize)
 				dotX = box.Max.X - pad - lineWidth
 				if dotX < box.Min.X+pad {
 					dotX = box.Min.X + pad
 				}
 			}
-			drawTextLine(rgba, layout.fontSize, line, dotX, baselineY, inkColor, paintBox)
+			drawTextLine(rgba, layout.fontSize, renderLine, dotX, baselineY, inkColor, paintBox)
 			baselineY += layout.lineHeight
 		}
 		drawn = append(drawn, candidate)
@@ -342,7 +416,7 @@ func drawTextLine(dst *image.RGBA, fontSize float64, line string, dotX, baseline
 	shadow := shadowColorFor(inkColor)
 	dot := fixed.P(dotX, baselineY)
 	for _, seg := range splitIntoScriptSegments(line) {
-		face, err := segFace(seg.useSystem, fontSize)
+		face, err := segFace(seg, fontSize)
 		if err != nil {
 			continue
 		}
@@ -364,6 +438,75 @@ func drawTextLine(dst *image.RGBA, fontSize float64, line string, dotX, baseline
 		d.DrawString(seg.text)
 		dot = d.Dot
 	}
+}
+
+// drawVerticalTextBlock renders confident CJK vertical text top-to-bottom.
+// It returns drew=false when the block cannot be confidently rendered and
+// callers should fall back to horizontal drawing.
+func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box image.Rectangle, opts OverlayOptions) (drew bool, err error) {
+	runes := verticalCJKRunes(candidate.text)
+	if len(runes) == 0 {
+		return false, nil
+	}
+
+	pad := opts.TextPadding
+	availW := box.Dx() - (pad * 2)
+	availH := box.Dy() - (pad * 2)
+	if availW <= 0 || availH <= 0 {
+		return false, nil
+	}
+
+	fontSize := min(opts.MaxFontSize, max(opts.MinFontSize, availW))
+	if fontSize <= 0 {
+		fontSize = opts.MinFontSize
+	}
+
+	for fontSize >= opts.MinFontSize {
+		lineHeight := approximateLineHeight(fontSize)
+		topInset := approximateTopInset(fontSize)
+		if lineHeight <= 0 {
+			break
+		}
+		f, ferr := faceForText(string(runes), float64(fontSize))
+		if ferr != nil {
+			return false, ferr
+		}
+		ascentCache := &overlayAscentCache
+		if needsFallbackFont(string(runes)) {
+			ascentCache = &fallbackAscentCache
+		}
+		ascent := cachedAscent(f, ascentCache, float64(fontSize))
+		textH := pad + ascent + topInset + (len(runes)-1)*lineHeight + pad
+
+		maxGlyphW := 0
+		for _, r := range runes {
+			w := measureLinePx(string(r), float64(fontSize))
+			if w > maxGlyphW {
+				maxGlyphW = w
+			}
+		}
+
+		if textH <= box.Dy() && maxGlyphW <= availW {
+			srcLum := avgRegionLuminance(dst, box)
+			paintBox := image.Rect(box.Min.X, box.Min.Y, box.Max.X, min(box.Min.Y+textH, box.Max.Y))
+			draw.Draw(dst, paintBox, &image.Uniform{C: color.RGBA{R: 255, G: 255, B: 255, A: opts.BgAlpha}}, image.Point{}, draw.Over)
+			inkColor := inkColorForBackground(srcLum)
+
+			dotX := box.Min.X + pad + max(0, (availW-maxGlyphW)/2)
+			baselineY := box.Min.Y + ascent + pad + topInset
+			for _, r := range runes {
+				if baselineY > paintBox.Max.Y-pad {
+					break
+				}
+				drawTextLine(dst, float64(fontSize), string(r), dotX, baselineY, inkColor, paintBox)
+				baselineY += lineHeight
+			}
+			return true, nil
+		}
+		fontSize--
+	}
+
+	return false, nil
 }
 
 // measureStringPx returns the pixel advance width of s rendered with face.
@@ -685,6 +828,106 @@ func isRTLText(text string) bool {
 	return total > 0 && rtl*2 >= total
 }
 
+// verticalCJKRunes extracts non-space CJK runes for candidate vertical rendering.
+func verticalCJKRunes(text string) []rune {
+	runes := make([]rune, 0, len(text))
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if !isCJKRune(r) {
+			continue
+		}
+		runes = append(runes, r)
+	}
+	return runes
+}
+
+// shouldRenderVerticalText returns true only when heuristics are confident:
+// strongly vertical bbox and mostly CJK characters.
+func shouldRenderVerticalText(text string, box image.Rectangle) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	w := box.Dx()
+	h := box.Dy()
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	if float64(h)/float64(w) < overlayVerticalAspectThreshold {
+		return false
+	}
+
+	total := 0
+	cjk := 0
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		total++
+		if isCJKRune(r) {
+			cjk++
+		}
+	}
+	if total == 0 || cjk < 2 {
+		return false
+	}
+	return float64(cjk)/float64(total) >= overlayVerticalCJKMinRatio
+}
+
+// hasMixedDirectionText reports whether text contains both LTR and RTL runs.
+func hasMixedDirectionText(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	hasLTR := false
+	hasRTL := false
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		props, _ := bidi.LookupRune(r)
+		switch props.Class() {
+		case bidi.L:
+			hasLTR = true
+		case bidi.R, bidi.AL:
+			hasRTL = true
+		}
+		if hasLTR && hasRTL {
+			return true
+		}
+	}
+	return false
+}
+
+// reorderBidiForRendering performs a basic bidi visual reordering pass for
+// mixed-direction text so the simple glyph renderer produces better output.
+// It keeps pure-LTR and pure-RTL text unchanged.
+func reorderBidiForRendering(text string) string {
+	if !hasMixedDirectionText(text) {
+		return text
+	}
+	var p bidi.Paragraph
+	if _, err := p.SetString(text); err != nil {
+		return text
+	}
+	ord, err := p.Order()
+	if err != nil {
+		return text
+	}
+	var out strings.Builder
+	out.Grow(len(text))
+	for i := 0; i < ord.NumRuns(); i++ {
+		run := ord.Run(i)
+		runText := run.String()
+		if run.Direction() == bidi.RightToLeft {
+			runText = bidi.ReverseString(runText)
+		}
+		out.WriteString(runText)
+	}
+	return out.String()
+}
+
 // avgRegionLuminance returns the average NTSC luminance [0,1] of the source
 // image pixels in region r, sampled at a stride to keep the operation fast.
 func avgRegionLuminance(img *image.RGBA, r image.Rectangle) float64 {
@@ -757,24 +1000,78 @@ func loadFaceFromFont(fontData *opentype.Font, cache *sync.Map, fontSize float64
 	return face, nil
 }
 
-// loadSystemFont returns a broad-Unicode system font, or nil when none is found.
-// The result is cached after the first call.
-func loadSystemFont() *opentype.Font {
-	systemFontOnce.Do(func() {
-		for _, p := range systemFontPaths {
+// parseFont parses raw font bytes. It handles both single-font files (.ttf/.otf)
+// and TrueType/OpenType collections (.ttc) by taking the first font in a collection.
+func parseFont(data []byte) (*opentype.Font, error) {
+	f, err := opentype.Parse(data)
+	if err == nil {
+		return f, nil
+	}
+	c, err2 := opentype.ParseCollection(data)
+	if err2 != nil {
+		return nil, err // return original single-parse error
+	}
+	return c.Font(0)
+}
+
+// load lazily loads the font for this entry, trying each candidate path in order.
+func (e *fallbackFontEntry) load() *opentype.Font {
+	e.once.Do(func() {
+		for _, p := range e.paths {
 			data, err := os.ReadFile(p)
 			if err != nil {
 				continue
 			}
-			parsed, err := opentype.Parse(data)
+			parsed, err := parseFont(data)
 			if err != nil {
 				continue
 			}
-			systemFontData = parsed
+			e.data = parsed
 			break
 		}
 	})
-	return systemFontData
+	return e.data
+}
+
+// face returns (or creates and caches) a font.Face at fontSize for this entry.
+func (e *fallbackFontEntry) face(fontSize float64) (font.Face, error) {
+	f := e.load()
+	if f == nil {
+		return nil, fmt.Errorf("fallback font %q not available on this system", e.name)
+	}
+	return loadFaceFromFont(f, &e.faceCache, fontSize)
+}
+
+// fontFaceCoversText returns true if face has glyphs for every non-whitespace
+// rune in text. It uses GlyphAdvance: a false ok signals a missing glyph.
+func fontFaceCoversText(face font.Face, text string) bool {
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		_, ok := face.GlyphAdvance(r)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// faceForFallback returns the first fallback font whose face covers all runes
+// in text, falling back to goregular when no entry matches.
+func faceForFallback(text string, fontSize float64) (font.Face, error) {
+	for _, entry := range fallbackFonts {
+		face, err := entry.face(fontSize)
+		if err != nil {
+			// Font not available on this system; try next.
+			continue
+		}
+		if fontFaceCoversText(face, text) {
+			return face, nil
+		}
+	}
+	// No fallback covers the text; use goregular (may produce tofu for some runes).
+	return loadOverlayFace(fontSize)
 }
 
 // isCJKRune reports whether r is a CJK ideograph or Hangul syllable — scripts
@@ -866,13 +1163,11 @@ func needsFallbackFont(text string) bool {
 }
 
 // faceForText selects the best available font.Face for text at fontSize.
-// When text contains non-Latin runes and a system fallback font is available,
-// the system font is preferred to avoid rendering tofu boxes.
+// For text with non-Latin runes the ordered fallback list is tried until a
+// font with full glyph coverage is found, reducing tofu (□) output.
 func faceForText(text string, fontSize float64) (font.Face, error) {
 	if needsFallbackFont(text) {
-		if sf := loadSystemFont(); sf != nil {
-			return loadFaceFromFont(sf, &systemFaceCache, fontSize)
-		}
+		return faceForFallback(text, fontSize)
 	}
 	return loadOverlayFace(fontSize)
 }
@@ -909,11 +1204,10 @@ func splitIntoScriptSegments(text string) []scriptSegment {
 }
 
 // segFace returns the appropriate font.Face for a script segment at fontSize.
-func segFace(useSystem bool, fontSize float64) (font.Face, error) {
-	if useSystem {
-		if sf := loadSystemFont(); sf != nil {
-			return loadFaceFromFont(sf, &systemFaceCache, fontSize)
-		}
+// For non-Latin segments the fallback chain is searched for glyph coverage.
+func segFace(seg scriptSegment, fontSize float64) (font.Face, error) {
+	if seg.useSystem {
+		return faceForFallback(seg.text, fontSize)
 	}
 	return loadOverlayFace(fontSize)
 }
@@ -923,7 +1217,7 @@ func segFace(useSystem bool, fontSize float64) (font.Face, error) {
 func measureLinePx(line string, fontSize float64) int {
 	total := 0
 	for _, seg := range splitIntoScriptSegments(line) {
-		face, err := segFace(seg.useSystem, fontSize)
+		face, err := segFace(seg, fontSize)
 		if err != nil {
 			continue
 		}

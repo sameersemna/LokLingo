@@ -9,6 +9,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o loklingo-backend .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates wget \
+    font-noto \
+    font-noto-cjk \
+    font-noto-arabic \
+    font-dejavu \
     && addgroup -S loklingo && adduser -S -G loklingo loklingo
 WORKDIR /app
 COPY --from=builder /app/loklingo-backend .

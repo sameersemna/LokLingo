@@ -501,6 +501,64 @@ func TestIsRTLText_MixedMajorityLTR(t *testing.T) {
 	}
 }
 
+func TestHasMixedDirectionText_MixedArabicLatin(t *testing.T) {
+	if !hasMixedDirectionText("iPhone استخدام") {
+		t.Fatal("expected mixed-direction text to be detected")
+	}
+}
+
+func TestHasMixedDirectionText_PureLTR(t *testing.T) {
+	if hasMixedDirectionText("Hello World") {
+		t.Fatal("expected pure LTR text to not be detected as mixed")
+	}
+}
+
+func TestReorderBidiForRendering_MixedArabicLatin(t *testing.T) {
+	got := reorderBidiForRendering("iPhone استخدام")
+	want := "iPhone مادختسا"
+	if got != want {
+		t.Fatalf("reorderBidiForRendering mixed text = %q, want %q", got, want)
+	}
+}
+
+func TestReorderBidiForRendering_PureRTLUnchanged(t *testing.T) {
+	in := "استخدام"
+	if got := reorderBidiForRendering(in); got != in {
+		t.Fatalf("expected pure RTL text unchanged, got %q", got)
+	}
+}
+
+func TestShouldRenderVerticalText_CJKTallBox(t *testing.T) {
+	text := "日本語縦書き"
+	box := image.Rect(0, 0, 30, 120)
+	if !shouldRenderVerticalText(text, box) {
+		t.Fatal("expected tall CJK block to be treated as vertical")
+	}
+}
+
+func TestShouldRenderVerticalText_WideBoxFallsBack(t *testing.T) {
+	text := "日本語"
+	box := image.Rect(0, 0, 120, 40)
+	if shouldRenderVerticalText(text, box) {
+		t.Fatal("expected wide box to not be treated as vertical")
+	}
+}
+
+func TestShouldRenderVerticalText_NonCJKFallsBack(t *testing.T) {
+	text := "Vertical Text"
+	box := image.Rect(0, 0, 30, 120)
+	if shouldRenderVerticalText(text, box) {
+		t.Fatal("expected non-CJK text to not be treated as vertical")
+	}
+}
+
+func TestVerticalCJKRunes_FiltersNonCJKAndSpaces(t *testing.T) {
+	runes := verticalCJKRunes("日 a 本")
+	if got, want := string(runes), "日本"; got != want {
+		t.Fatalf("verticalCJKRunes mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestAvgRegionLuminance_WhiteImageReturnsOne(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 40, 40))
 	for y := 0; y < 40; y++ {
