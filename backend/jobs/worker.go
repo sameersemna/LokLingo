@@ -865,7 +865,17 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		for i, b := range blocks {
 			renderBlocks[i] = internalservices.ImageTextBlock{Text: b.Text, Bbox: b.Bbox}
 		}
-		outPath, err := internalservices.DrawTextOnImage(job.FilePath, renderBlocks, translatedTexts)
+		renderOpts := internalservices.DefaultOverlayOptions()
+		if job.JPEGQuality > 0 {
+			renderOpts.JPEGQuality = job.JPEGQuality
+		}
+		if job.BgAlpha >= 0 {
+			renderOpts.BgAlpha = uint8(job.BgAlpha)
+		}
+		if job.TextPadding >= 0 {
+			renderOpts.TextPadding = job.TextPadding
+		}
+		outPath, renderStats, err := internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, renderOpts)
 		if err != nil {
 			job.Status = StatusFailed
 			job.ErrorMsg = fmt.Sprintf("image rendering failed: %v", err)
@@ -874,6 +884,15 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			return
 		}
+
+		slog.Info("image_overlay_rendered",
+			"job_id", job.ID,
+			"blocks_drawn", renderStats.BlocksDrawn,
+			"blocks_skipped", renderStats.BlocksSkipped,
+			"jpeg_quality", renderOpts.JPEGQuality,
+			"bg_alpha", renderOpts.BgAlpha,
+			"text_padding", renderOpts.TextPadding,
+		)
 
 		job.Text = strings.Join(fullSource, "\n")
 		job.TranslatedText = strings.Join(fullTarget, "\n")

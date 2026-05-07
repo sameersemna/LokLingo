@@ -110,11 +110,9 @@ class TestParseDpi(unittest.TestCase):
             ocr_app._parse_dpi(50)
         self.assertEqual(ctx.exception.status_code, 422)
 
-    def test_above_max_raises(self):
-        from fastapi import HTTPException
-        with self.assertRaises(HTTPException) as ctx:
-            ocr_app._parse_dpi(401)
-        self.assertEqual(ctx.exception.status_code, 422)
+    def test_above_max_clamps(self):
+        result = ocr_app._parse_dpi(401)
+        self.assertEqual(result, ocr_app.MAX_PDF_DPI)
 
     def test_non_numeric_raises(self):
         from fastapi import HTTPException

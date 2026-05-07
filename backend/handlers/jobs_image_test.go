@@ -249,3 +249,218 @@ func TestCreateImageJob_FileExtensionPreserved(t *testing.T) {
 		t.Fatalf("expected FilePath to end with .jpg, got %q", cs.job.FilePath)
 	}
 }
+
+// newMultipartImageRequestWithFields builds a multipart request including arbitrary
+// extra string fields (e.g. "jpeg_quality", "bg_alpha", "text_padding").
+func newMultipartImageRequestWithFields(t *testing.T, imageData []byte, filename, target string, extra map[string]string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	fw, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := fw.Write(imageData); err != nil {
+		t.Fatalf("write image data: %v", err)
+	}
+	if err := w.WriteField("target", target); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	for k, v := range extra {
+		if err := w.WriteField(k, v); err != nil {
+			t.Fatalf("write field %q: %v", k, err)
+		}
+	}
+	w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/image", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
+func TestCreateImageJob_WithJPEGQuality(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"jpeg_quality": "75",
+	})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", resp.StatusCode)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.JPEGQuality != 75 {
+		t.Fatalf("expected JPEGQuality=75, got %d", cs.job.JPEGQuality)
+	}
+}
+
+func TestCreateImageJob_InvalidJPEGQuality_Ignored(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"jpeg_quality": "999",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.JPEGQuality != 0 {
+		t.Fatalf("expected JPEGQuality=0 (ignored) for out-of-range value, got %d", cs.job.JPEGQuality)
+	}
+}
+
+func TestCreateImageJob_WithBgAlpha(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"bg_alpha": "180",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.BgAlpha != 180 {
+		t.Fatalf("expected BgAlpha=180, got %d", cs.job.BgAlpha)
+	}
+}
+
+func TestCreateImageJob_InvalidBgAlpha_Ignored(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"bg_alpha": "300",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	// Out-of-range value leaves sentinel -1 ("not set").
+	if cs.job.BgAlpha != -1 {
+		t.Fatalf("expected BgAlpha=-1 (not set) for out-of-range value, got %d", cs.job.BgAlpha)
+	}
+}
+
+func TestCreateImageJob_BgAlphaZero_AcceptedAsTransparent(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	// bg_alpha=0 is a valid value meaning "fully transparent background".
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"bg_alpha": "0",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.BgAlpha != 0 {
+		t.Fatalf("expected BgAlpha=0 (transparent), got %d", cs.job.BgAlpha)
+	}
+}
+
+func TestCreateImageJob_BgAlpha_NotProvided_UsesDefault(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	// No bg_alpha field at all — sentinel -1 signals worker to use default.
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.BgAlpha != -1 {
+		t.Fatalf("expected BgAlpha=-1 (default sentinel) when field not provided, got %d", cs.job.BgAlpha)
+	}
+}
+
+func TestCreateImageJob_WithTextPadding(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"text_padding": "10",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.TextPadding != 10 {
+		t.Fatalf("expected TextPadding=10, got %d", cs.job.TextPadding)
+	}
+}
+
+func TestCreateImageJob_TextPaddingAboveMax_Ignored(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"text_padding": "99",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	// Out-of-range value leaves sentinel -1 ("not set").
+	if cs.job.TextPadding != -1 {
+		t.Fatalf("expected TextPadding=-1 (not set) for value>40, got %d", cs.job.TextPadding)
+	}
+}
+
+func TestCreateImageJob_TextPaddingZero_AcceptedAsFlushToEdge(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	// text_padding=0 is a valid value meaning "no padding (flush to box edge)".
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{
+		"text_padding": "0",
+	})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.TextPadding != 0 {
+		t.Fatalf("expected TextPadding=0 (flush to edge), got %d", cs.job.TextPadding)
+	}
+}
+
+func TestCreateImageJob_TextPadding_NotProvided_UsesDefault(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	// No text_padding field — sentinel -1 signals worker to use default.
+	req := newMultipartImageRequestWithFields(t, []byte("\x89PNG"), "img.png", "de", map[string]string{})
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.TextPadding != -1 {
+		t.Fatalf("expected TextPadding=-1 (default sentinel) when field not provided, got %d", cs.job.TextPadding)
+	}
+}

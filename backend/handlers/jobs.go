@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -219,6 +220,27 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 		return errResponse(c, fiber.StatusBadRequest, `mode must be "overlay" or "layout"`)
 	}
 
+	jpegQuality := 0
+	if qStr := c.FormValue("jpeg_quality"); qStr != "" {
+		if q, err := strconv.Atoi(qStr); err == nil && q >= 1 && q <= 100 {
+			jpegQuality = q
+		}
+	}
+
+	bgAlpha := -1 // -1 means "not set" (use service default 220)
+	if aStr := c.FormValue("bg_alpha"); aStr != "" {
+		if a, err := strconv.Atoi(aStr); err == nil && a >= 0 && a <= 255 {
+			bgAlpha = a
+		}
+	}
+
+	textPadding := -1 // -1 means "not set" (use service default 6)
+	if pStr := c.FormValue("text_padding"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p >= 0 && p <= 40 {
+			textPadding = p
+		}
+	}
+
 	if err := os.MkdirAll(jobs.ImageUploadDir, 0o700); err != nil {
 		slog.Error("failed to create image upload dir", "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to prepare upload directory")
@@ -237,16 +259,19 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 
 	now := time.Now()
 	job := &jobs.Job{
-		ID:        uuid.NewString(),
-		Type:      jobs.TypeImage,
-		Status:    jobs.StatusPending,
-		Mode:      mode,
-		FilePath:  filePath,
-		Lang:      lang,
-		Source:    source,
-		Target:    target,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          uuid.NewString(),
+		Type:        jobs.TypeImage,
+		Status:      jobs.StatusPending,
+		Mode:        mode,
+		FilePath:    filePath,
+		Lang:        lang,
+		Source:      source,
+		Target:      target,
+		JPEGQuality: jpegQuality,
+		BgAlpha:     bgAlpha,
+		TextPadding: textPadding,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	if err := h.store.Enqueue(c.Context(), job); err != nil {
 		slog.Error("failed to enqueue image job", "request_id", c.Locals("requestID"), "err", err)

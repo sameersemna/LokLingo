@@ -53,4 +53,9 @@ type Job struct {
 	ProcessingMethod string `json:"processing_method,omitempty"` // "pdf_text" or "ocr"
 	TotalPages       int    `json:"total_pages,omitempty"`       // total translatable pages discovered by the worker
 	ProcessedPages   int    `json:"processed_pages,omitempty"`   // pages translated so far
+
+	// Image rendering options (translate_image jobs only).
+	JPEGQuality int `json:"jpeg_quality,omitempty"` // output JPEG quality [1,100]; 0 → default (90)
+	BgAlpha     int `json:"bg_alpha"`               // background opacity [0,255]; -1 → default (220)
+	TextPadding int `json:"text_padding"`           // padding between box edge and text (px); -1 → default (6), 0 → flush to edge
 }
