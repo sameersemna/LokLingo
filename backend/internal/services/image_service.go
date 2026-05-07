@@ -195,7 +195,7 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 		y1 := clampToBounds(int(math.Round(blk.Bbox[1])), bounds.Min.Y, bounds.Max.Y)
 		x2 := clampToBounds(int(math.Round(blk.Bbox[2])), bounds.Min.X, bounds.Max.X)
 		y2 := clampToBounds(int(math.Round(blk.Bbox[3])), bounds.Min.Y, bounds.Max.Y)
-		x1, y1, x2, y2, ok := prepareDrawableBox(x1, y1, x2, y2)
+		x1, y1, x2, y2, ok := prepareDrawableBoxWithShrink(x1, y1, x2, y2, opts.BboxShrinkPx)
 		if !ok {
 			continue
 		}
@@ -258,9 +258,16 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 			continue
 		}
 
+		if opts.EraseBBox {
+			// Erase original OCR text first by filling the whole bbox with the sampled
+			// average region color from the source image.
+			eraseColor := avgRegionColor(rgba, box)
+			draw.Draw(rgba, box, &image.Uniform{C: eraseColor}, image.Point{}, draw.Src)
+		}
+
 		// Compute the minimum background height needed to contain the laid-out text.
-		// This shrink-wraps the white rectangle to the actual text extent instead of
-		// flooding the entire OCR bbox.
+		// The fill above already clears the full bbox; this shrink-wrapped region is
+		// used only as the clip bounds for translated text rendering.
 		ascentCacheMap := &overlayAscentCache
 		if needsFallbackFont(candidate.text) {
 			ascentCacheMap = &fallbackAscentCache
@@ -271,12 +278,8 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 			(len(layout.lines)-1)*layout.lineHeight + pad
 		paintBox := image.Rect(box.Min.X, box.Min.Y, box.Max.X, min(box.Min.Y+textH, box.Max.Y))
 
-		// Sample luminance of the source region (before painting) for ink selection.
+		// Choose ink based on the erased background region luminance.
 		srcLum := avgRegionLuminance(rgba, box)
-
-		// Paint the shrink-wrapped background.
-		draw.Draw(rgba, paintBox, &image.Uniform{C: color.RGBA{R: 255, G: 255, B: 255, A: opts.BgAlpha}}, image.Point{}, draw.Over)
-
 		inkColor := inkColorForBackground(srcLum)
 		rtl := isRTLText(candidate.text)
 		baselineY := box.Min.Y + ascent + pad + layout.topInset
@@ -365,10 +368,17 @@ func clampToBounds(v, minV, maxV int) int {
 // prepareDrawableBox shrinks the OCR bbox slightly and skips boxes that are too
 // small to draw readable translated text without visual clutter.
 func prepareDrawableBox(x1, y1, x2, y2 int) (int, int, int, int, bool) {
-	x1 += overlayBboxShrinkPx
-	y1 += overlayBboxShrinkPx
-	x2 -= overlayBboxShrinkPx
-	y2 -= overlayBboxShrinkPx
+	return prepareDrawableBoxWithShrink(x1, y1, x2, y2, overlayBboxShrinkPx)
+}
+
+func prepareDrawableBoxWithShrink(x1, y1, x2, y2 int, shrinkPx int) (int, int, int, int, bool) {
+	if shrinkPx < 0 {
+		shrinkPx = 0
+	}
+	x1 += shrinkPx
+	y1 += shrinkPx
+	x2 -= shrinkPx
+	y2 -= shrinkPx
 
 	if x2 <= x1 || y2 <= y1 {
 		return 0, 0, 0, 0, false
@@ -487,9 +497,12 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 		}
 
 		if textH <= box.Dy() && maxGlyphW <= availW {
+			if opts.EraseBBox {
+				eraseColor := avgRegionColor(dst, box)
+				draw.Draw(dst, box, &image.Uniform{C: eraseColor}, image.Point{}, draw.Src)
+			}
 			srcLum := avgRegionLuminance(dst, box)
 			paintBox := image.Rect(box.Min.X, box.Min.Y, box.Max.X, min(box.Min.Y+textH, box.Max.Y))
-			draw.Draw(dst, paintBox, &image.Uniform{C: color.RGBA{R: 255, G: 255, B: 255, A: opts.BgAlpha}}, image.Point{}, draw.Over)
 			inkColor := inkColorForBackground(srcLum)
 
 			dotX := box.Min.X + pad + max(0, (availW-maxGlyphW)/2)
@@ -620,16 +633,24 @@ type OverlayOptions struct {
 	JPEGQuality int
 	// TextPadding is the pixel gap between the overlay box edge and the text. Default: 6.
 	TextPadding int
+	// BboxShrinkPx shrinks OCR bboxes inward before drawing. Default: 2.
+	// Set to 0 to preserve original bbox coordinates.
+	BboxShrinkPx int
+	// EraseBBox controls whether OCR bboxes are pre-filled with sampled average
+	// color before drawing translated text. Default: true.
+	EraseBBox bool
 }
 
 // DefaultOverlayOptions returns the default rendering options that DrawTextOnImage uses.
 func DefaultOverlayOptions() OverlayOptions {
 	return OverlayOptions{
-		BgAlpha:     overlayBgAlpha,
-		MaxFontSize: overlayMaxFontSize,
-		MinFontSize: overlayMinFontSize,
-		JPEGQuality: 90,
-		TextPadding: overlayTextPadding,
+		BgAlpha:      overlayBgAlpha,
+		MaxFontSize:  overlayMaxFontSize,
+		MinFontSize:  overlayMinFontSize,
+		JPEGQuality:  90,
+		TextPadding:  overlayTextPadding,
+		BboxShrinkPx: overlayBboxShrinkPx,
+		EraseBBox:    true,
 	}
 }
 
@@ -928,8 +949,8 @@ func reorderBidiForRendering(text string) string {
 	return out.String()
 }
 
-// avgRegionLuminance returns the average NTSC luminance [0,1] of the source
-// image pixels in region r, sampled at a stride to keep the operation fast.
+// avgRegionLuminance returns the average NTSC luminance [0,1] of image pixels
+// in region r, sampled at a stride to keep the operation fast.
 func avgRegionLuminance(img *image.RGBA, r image.Rectangle) float64 {
 	r = r.Intersect(img.Bounds())
 	if r.Empty() {
@@ -951,12 +972,40 @@ func avgRegionLuminance(img *image.RGBA, r image.Rectangle) float64 {
 	return sumLum / float64(samples)
 }
 
-// inkColorForBackground chooses black or white ink based on the luminance of
-// the source region after compositing with the white overlay background.
+// avgRegionColor returns the average RGB color of image pixels in region r,
+// sampled at a stride to keep the operation fast.
+func avgRegionColor(img *image.RGBA, r image.Rectangle) color.RGBA {
+	r = r.Intersect(img.Bounds())
+	if r.Empty() {
+		return color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	}
+	step := max(1, min(r.Dx(), r.Dy())/8)
+	var sumR, sumG, sumB uint64
+	samples := 0
+	for y := r.Min.Y; y < r.Max.Y; y += step {
+		for x := r.Min.X; x < r.Max.X; x += step {
+			c := img.RGBAAt(x, y)
+			sumR += uint64(c.R)
+			sumG += uint64(c.G)
+			sumB += uint64(c.B)
+			samples++
+		}
+	}
+	if samples == 0 {
+		return color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	}
+	return color.RGBA{
+		R: uint8(sumR / uint64(samples)),
+		G: uint8(sumG / uint64(samples)),
+		B: uint8(sumB / uint64(samples)),
+		A: 255,
+	}
+}
+
+// inkColorForBackground chooses black or white ink based on background
+// luminance, so translated text remains legible on the erased fill color.
 func inkColorForBackground(srcLum float64) color.Color {
-	bgA := float64(overlayBgAlpha) / 255
-	compositedLum := srcLum*(1-bgA) + bgA
-	if compositedLum >= overlayLumThreshold {
+	if srcLum >= overlayLumThreshold {
 		return color.Black
 	}
 	return color.White

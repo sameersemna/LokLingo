@@ -724,8 +724,10 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	)
 	switch effectiveJobMode {
 	case ModeLayout:
-		w.processLayoutMode(ctx, job)
-		return
+		if job.Type != TypeImage {
+			w.processLayoutMode(ctx, job)
+			return
+		}
 	default: // ModeOverlay — continue with the overlay translation pipeline below.
 	}
 
@@ -866,6 +868,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			renderBlocks[i] = internalservices.ImageTextBlock{Text: b.Text, Bbox: b.Bbox}
 		}
 		renderOpts := internalservices.DefaultOverlayOptions()
+		if effectiveJobMode == ModeLayout {
+			// Layout mode uses erase+redraw while keeping original OCR geometry.
+			renderOpts.EraseBBox = true
+			renderOpts.BboxShrinkPx = 0
+		}
 		if job.JPEGQuality > 0 {
 			renderOpts.JPEGQuality = job.JPEGQuality
 		}
@@ -876,6 +883,25 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			renderOpts.TextPadding = job.TextPadding
 		}
 		outPath, renderStats, err := internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, renderOpts)
+		if err != nil && effectiveJobMode == ModeLayout {
+			// If layout rendering fails, fall back to the regular overlay render path.
+			slog.Warn("layout_render_failed_falling_back_to_overlay",
+				"job_id", job.ID,
+				"err", err,
+			)
+			overlayOpts := internalservices.DefaultOverlayOptions()
+			if job.JPEGQuality > 0 {
+				overlayOpts.JPEGQuality = job.JPEGQuality
+			}
+			if job.BgAlpha >= 0 {
+				overlayOpts.BgAlpha = uint8(job.BgAlpha)
+			}
+			if job.TextPadding >= 0 {
+				overlayOpts.TextPadding = job.TextPadding
+			}
+			outPath, renderStats, err = internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, overlayOpts)
+			renderOpts = overlayOpts
+		}
 		if err != nil {
 			job.Status = StatusFailed
 			job.ErrorMsg = fmt.Sprintf("image rendering failed: %v", err)
@@ -885,13 +911,19 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			return
 		}
 
-		slog.Info("image_overlay_rendered",
+		renderEvent := "image_overlay_rendered"
+		if effectiveJobMode == ModeLayout {
+			renderEvent = "image_layout_rendered"
+		}
+		slog.Info(renderEvent,
 			"job_id", job.ID,
 			"blocks_drawn", renderStats.BlocksDrawn,
 			"blocks_skipped", renderStats.BlocksSkipped,
 			"jpeg_quality", renderOpts.JPEGQuality,
 			"bg_alpha", renderOpts.BgAlpha,
 			"text_padding", renderOpts.TextPadding,
+			"bbox_shrink_px", renderOpts.BboxShrinkPx,
+			"erase_bbox", renderOpts.EraseBBox,
 		)
 
 		job.Text = strings.Join(fullSource, "\n")
@@ -1171,9 +1203,8 @@ func effectiveMode(m Mode) Mode {
 	return m
 }
 
-// processLayoutMode is the entry point for the layout-preserving translation
-// pipeline. Full implementation is pending; this stub marks the job failed
-// until the layout pipeline is built out.
+// processLayoutMode handles job types that do not yet support layout mode.
+// Image jobs are handled in the main process path using layout render options.
 func (w *Worker) processLayoutMode(ctx context.Context, job *Job) {
 	slog.Info("layout_pipeline_invoked",
 		"job_id", job.ID,
@@ -1183,7 +1214,7 @@ func (w *Worker) processLayoutMode(ctx context.Context, job *Job) {
 		"target", job.Target,
 	)
 	job.Status = StatusFailed
-	job.ErrorMsg = "layout mode is not yet implemented"
+	job.ErrorMsg = "layout mode is currently supported for image jobs only"
 	if err := w.store.Update(ctx, job); err != nil {
 		slog.Error("update job result (layout stub)", "job_id", job.ID, "err", err)
 	}

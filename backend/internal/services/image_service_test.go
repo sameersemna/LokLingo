@@ -304,6 +304,16 @@ func TestPrepareDrawableBox_SkipsWidthBelowThresholdAfterShrink(t *testing.T) {
 	}
 }
 
+func TestPrepareDrawableBoxWithShrink_ZeroPreservesCoordinates(t *testing.T) {
+	x1, y1, x2, y2, ok := prepareDrawableBoxWithShrink(10, 20, 60, 70, 0)
+	if !ok {
+		t.Fatal("expected box to remain drawable with zero shrink")
+	}
+	if x1 != 10 || y1 != 20 || x2 != 60 || y2 != 70 {
+		t.Fatalf("unexpected coordinates with zero shrink: got (%d,%d)-(%d,%d)", x1, y1, x2, y2)
+	}
+}
+
 func TestShouldSkipForOverlap_HighOverlap(t *testing.T) {
 	candidate := image.Rect(0, 0, 100, 100)
 	existing := []image.Rectangle{image.Rect(30, 0, 100, 100)}
@@ -590,7 +600,7 @@ func TestAvgRegionLuminance_EmptyRegionReturnsOne(t *testing.T) {
 }
 
 func TestInkColorForBackground_LightSourceUsesBlack(t *testing.T) {
-	// Source luminance 1.0 (white) → composited always light → black ink.
+	// Light backgrounds should use black ink.
 	c := inkColorForBackground(1.0)
 	r, g, b, _ := c.RGBA()
 	if r != 0 || g != 0 || b != 0 {
@@ -598,20 +608,26 @@ func TestInkColorForBackground_LightSourceUsesBlack(t *testing.T) {
 	}
 }
 
-func TestInkColorForBackground_DarkSourceWithLowAlphaUsesWhite(t *testing.T) {
-	// This tests the luminance maths: with a very dark source and low composited
-	// result the function should return white ink.
-	// We temporarily monkey-patch by computing what srcLum would cause white ink.
-	// compositedLum = srcLum*(1-bgA) + bgA < overlayLumThreshold
-	// → srcLum < (overlayLumThreshold - bgA) / (1 - bgA)
-	// With overlayBgAlpha=220 (bgA≈0.863) and threshold=0.5:
-	// → srcLum < (0.5 - 0.863)/(1-0.863) = -0.363/0.137 ≈ -2.65 — impossible.
-	// So with our current alpha (220), inkColorForBackground always returns black.
-	// Verify that directly.
-	c := inkColorForBackground(0.0) // darkest possible source
+func TestInkColorForBackground_DarkBackgroundUsesWhite(t *testing.T) {
+	// Dark backgrounds should use white ink.
+	c := inkColorForBackground(0.0)
 	r, g, b, _ := c.RGBA()
-	if r != 0 || g != 0 || b != 0 {
-		t.Fatalf("expected black ink even for dark source (alpha 220 makes bg light), got %v", c)
+	if r != 0xffff || g != 0xffff || b != 0xffff {
+		t.Fatalf("expected white ink for dark background, got %v", c)
+	}
+}
+
+func TestAvgRegionColor_AveragesPixels(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 100, G: 120, B: 140, A: 255})
+	img.Set(1, 0, color.RGBA{R: 100, G: 120, B: 140, A: 255})
+	img.Set(0, 1, color.RGBA{R: 200, G: 220, B: 240, A: 255})
+	img.Set(1, 1, color.RGBA{R: 200, G: 220, B: 240, A: 255})
+
+	c := avgRegionColor(img, img.Bounds())
+	r, g, b, _ := c.RGBA()
+	if r>>8 != 150 || g>>8 != 170 || b>>8 != 190 {
+		t.Fatalf("expected average rgb(150,170,190), got rgb(%d,%d,%d)", r>>8, g>>8, b>>8)
 	}
 }
 
@@ -809,6 +825,12 @@ func TestDefaultOverlayOptions_Values(t *testing.T) {
 	}
 	if opts.JPEGQuality != 90 {
 		t.Errorf("JPEGQuality: want 90, got %d", opts.JPEGQuality)
+	}
+	if opts.BboxShrinkPx != overlayBboxShrinkPx {
+		t.Errorf("BboxShrinkPx: want %d, got %d", overlayBboxShrinkPx, opts.BboxShrinkPx)
+	}
+	if !opts.EraseBBox {
+		t.Error("EraseBBox: want true by default")
 	}
 }
 

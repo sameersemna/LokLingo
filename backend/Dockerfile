@@ -12,6 +12,10 @@ RUN apk add --no-cache ca-certificates wget \
     font-noto \
     font-noto-cjk \
     font-noto-arabic \
+    font-noto-devanagari \
+    font-noto-bengali \
+    font-noto-tamil \
+    font-noto-thai \
     font-dejavu \
     && addgroup -S loklingo && adduser -S -G loklingo loklingo
 WORKDIR /app

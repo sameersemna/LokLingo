@@ -147,3 +147,53 @@ func TestWorker_ImageJob_OverlayMapsTranslatedSegmentsToBlocks(t *testing.T) {
 		t.Fatal("expected output_file_path to be set")
 	}
 }
+
+func TestWorker_ImageJob_LayoutMode_RendersOutputImage(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "input.png")
+
+	img := image.NewRGBA(image.Rect(0, 0, 120, 80))
+	for y := 0; y < 80; y++ {
+		for x := 0; x < 120; x++ {
+			img.Set(x, y, color.RGBA{R: 210, G: 220, B: 230, A: 255})
+		}
+	}
+	f, err := os.Create(inPath)
+	if err != nil {
+		t.Fatalf("create input image: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode input image: %v", err)
+	}
+	_ = f.Close()
+
+	store := &mockWorkerStore{}
+	trans := &mockTranslSvc{result: "Hallo"}
+	ocr := &mockOCRSvc{blocks: []internalservices.OCRTextBlock{{Text: "Hello", Bbox: []float64{10, 10, 90, 40}}}}
+	w := NewWorker(store, trans, &mockPDFSvc{}, ocr, 0)
+
+	job := &Job{
+		ID:       "img-layout-1",
+		Type:     TypeImage,
+		Mode:     ModeLayout,
+		FilePath: inPath,
+		Source:   "en",
+		Target:   "de",
+	}
+
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s, err=%s", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.OutputFilePath == "" {
+		t.Fatal("expected output_file_path to be set")
+	}
+	if _, err := os.Stat(store.lastJob.OutputFilePath); err != nil {
+		t.Fatalf("expected rendered output image to exist: %v", err)
+	}
+}
