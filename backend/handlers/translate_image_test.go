@@ -59,7 +59,7 @@ func (s *translateImageTestStore) Get(_ context.Context, id string) (*jobs.Job, 
 	}, nil
 }
 
-func (s *translateImageTestStore) Update(_ context.Context, _ *jobs.Job) error { return nil }
+func (s *translateImageTestStore) Update(_ context.Context, _ *jobs.Job) error  { return nil }
 func (s *translateImageTestStore) Dequeue(_ context.Context) (*jobs.Job, error) { return nil, nil }
 func (s *translateImageTestStore) GetCached(_ context.Context, _, _, _ string) (string, error) {
 	return "", jobs.ErrNotFound
