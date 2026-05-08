@@ -17,6 +17,8 @@ import (
 	"unicode"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
@@ -25,20 +27,27 @@ import (
 )
 
 const (
-	overlayTextPadding     = 6
-	overlayLineSpacing     = 2
-	overlayMinFontSize     = 8
-	overlayMaxFontSize     = 32
-	overlayBboxShrinkPx    = 2
-	overlayMinDrawWidth    = 24
-	overlayMinDrawHeight   = 24
-	overlayMaxOverlapPct   = 0.45
-	overlayNearbyBoxDist   = 30
-	overlayBgAlpha         = uint8(220)
-	overlayShadowAlpha     = uint8(96)
-	overlayLumThreshold    = 0.5
-	overlayPatchFeatherPx  = 2
-	overlayPatchBlurRadius = 1
+	overlayTextPadding   = 6
+	overlayLineSpacing   = 2
+	overlayMinFontSize   = 8
+	overlayMaxFontSize   = 32
+	overlayBboxShrinkPx  = 2
+	overlayMinDrawWidth  = 24
+	overlayMinDrawHeight = 24
+	overlayMaxOverlapPct = 0.45
+	overlayNearbyBoxDist = 30
+	overlayBgAlpha       = uint8(220)
+	overlayShadowAlpha   = uint8(96)
+	overlayLumThreshold  = 0.5
+	// overlayDetectedShadowMinDarkness is the minimum luminance drop of the
+	// exterior fringe relative to background required to accept a detected
+	// shadow direction.  0.08 ≈ 20/255 — subtle but consistent.
+	overlayDetectedShadowMinDarkness = 0.08
+	// overlayDetectedShadowMaxAlpha caps detected-shadow opacity so it never
+	// overwhelms ink on low-contrast backgrounds.
+	overlayDetectedShadowMaxAlpha = uint8(180)
+	overlayPatchFeatherPx         = 2
+	overlayPatchBlurRadius        = 1
 	// overlayFitOverflowPct is the fractional height tolerance allowed during
 	// font-size fitting.  A layout whose block height exceeds maxHeight by no
 	// more than this fraction is still accepted, preventing the fitter from
@@ -69,6 +78,17 @@ const (
 )
 
 var overlayFontData = mustParseOverlayFont()
+
+// embeddedGoBoldFont / embeddedGoMonoFont are always-available embedded fonts
+// used as fallbacks when the system Noto Bold / Mono files are absent (e.g.
+// local dev without system fonts installed).  They guarantee that bold text
+// uses a genuinely heavier typeface rather than falling back to goregular.
+var (
+	embeddedGoBoldFont      = mustParseEmbeddedFont(gobold.TTF, "go bold")
+	embeddedGoBoldFaceCache sync.Map
+	embeddedGoMonoFont      = mustParseEmbeddedFont(gomono.TTF, "go mono")
+	embeddedGoMonoFaceCache sync.Map
+)
 
 // overlayFaceCache stores pre-loaded font.Face values keyed on integer font size
 // to avoid redundant OpenType face allocations during the fitting loop.
@@ -302,8 +322,9 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 
 		blockStyle := BlockFontStyle{}
 		if !opts.DisableFontStyleDetection {
-			// Detect font style on original pixels before erasing.
+			// Detect font style and shadow geometry on original pixels before erasing.
 			blockStyle = detectBlockFontStyle(rgba, box, candidate.originalText)
+			blockStyle.Shadow = detectShadowOffset(rgba, box)
 		}
 		inkColor := color.Color(inkColorForBackground(avgRegionLuminance(rgba, box)))
 		if !opts.DisableColorSampling {
@@ -466,6 +487,48 @@ func shouldSkipForOverlap(candidate image.Rectangle, existing []image.Rectangle)
 	return false
 }
 
+// detectShadowOffset probes the pixel fringe around box in 8 directions on
+// the original (un-erased) image and returns the direction whose 2-pixel-wide
+// exterior strip is darkest relative to the estimated background inside box.
+//
+// The darkness of that strip is mapped to a shadow alpha proportional to the
+// detected depth.  If no consistent shadow is found the hint is the zero
+// value, which callers interpret as "use the default (1,1) offset".
+func detectShadowOffset(img *image.RGBA, box image.Rectangle) shadowHint {
+	bounds := img.Bounds()
+	bg := medianRegionColor(img, box)
+	bgLum := colorLuminance(bg)
+
+	candidates := [][2]int{{1, 1}, {1, 0}, {0, 1}, {-1, 1}, {1, -1}, {-1, -1}, {0, -1}, {-1, 0}}
+
+	bestDx, bestDy := 1, 1
+	bestDarkness := 0.0
+	for _, d := range candidates {
+		dx, dy := d[0], d[1]
+		// Shift the full box 1 px in the candidate direction to get the exterior
+		// fringe strip (overlapping with the image border clamps naturally).
+		fringe := box.Add(image.Point{X: dx, Y: dy}).Intersect(bounds)
+		if fringe.Empty() {
+			continue
+		}
+		fringeLum := avgRegionLuminance(img, fringe)
+		darkness := bgLum - fringeLum
+		if darkness > bestDarkness {
+			bestDarkness = darkness
+			bestDx, bestDy = dx, dy
+		}
+	}
+
+	if bestDarkness < overlayDetectedShadowMinDarkness {
+		return shadowHint{} // no clear shadow — caller uses default
+	}
+	// Scale alpha: darkness at threshold → ~60, at 0.15 → overlayShadowAlpha,
+	// above 0.30 → cap at overlayDetectedShadowMaxAlpha.
+	scaled := float64(overlayShadowAlpha) * bestDarkness / 0.15
+	alpha := uint8(math.Min(float64(overlayDetectedShadowMaxAlpha), math.Max(60, scaled)))
+	return shadowHint{dx: bestDx, dy: bestDy, alpha: alpha}
+}
+
 // shadowColorFor returns a softened contrasting colour used as a text drop-shadow.
 func shadowColorFor(ink color.Color) color.Color {
 	r, g, b, _ := ink.RGBA()
@@ -596,6 +659,21 @@ func drawTextLineStyled(dst *image.RGBA, fontSize float64, line string, dotX, ba
 func drawTextLineStyledWithFont(dst *image.RGBA, fontSize float64, line string, dotX, baselineY int, inkColor color.Color, clipRect image.Rectangle, strokes []strokeOffset, style BlockFontStyle, letterSpacing fixed.Int26_6) {
 	clipped := dst.SubImage(clipRect).(*image.RGBA)
 	shadow := shadowColorFor(inkColor)
+	// Apply detected shadow geometry; fall back to the default (1,1) offset.
+	shDx, shDy := style.Shadow.dx, style.Shadow.dy
+	if shDx == 0 && shDy == 0 {
+		shDx, shDy = 1, 1
+	}
+	if style.Shadow.alpha != 0 {
+		// Override alpha with the proportionally scaled detected value.
+		sr, sg, sb, _ := shadow.RGBA()
+		shadow = color.RGBA{
+			R: uint8(sr >> 8),
+			G: uint8(sg >> 8),
+			B: uint8(sb >> 8),
+			A: style.Shadow.alpha,
+		}
+	}
 	dot := fixed.P(dotX, baselineY)
 	shadowSrc := image.NewUniform(shadow)
 	inkSrc := image.NewUniform(inkColor)
@@ -613,7 +691,7 @@ func drawTextLineStyledWithFont(dst *image.RGBA, fontSize float64, line string, 
 		}
 		if letterSpacing == 0 {
 			// Fast path: draw whole segment at once.
-			(&font.Drawer{Dst: clipped, Src: shadowSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+1, baselineY+1)}).DrawString(seg.text)
+			(&font.Drawer{Dst: clipped, Src: shadowSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+shDx, baselineY+shDy)}).DrawString(seg.text)
 			d := &font.Drawer{Dst: clipped, Src: inkSrc, Face: face, Dot: dot}
 			d.DrawString(seg.text)
 			for _, so := range strokes {
@@ -627,7 +705,7 @@ func drawTextLineStyledWithFont(dst *image.RGBA, fontSize float64, line string, 
 			for _, r := range []rune(seg.text) {
 				runesDone++
 				rs := string(r)
-				(&font.Drawer{Dst: clipped, Src: shadowSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+1, baselineY+1)}).DrawString(rs)
+				(&font.Drawer{Dst: clipped, Src: shadowSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+shDx, baselineY+shDy)}).DrawString(rs)
 				d := &font.Drawer{Dst: clipped, Src: inkSrc, Face: face, Dot: dot}
 				d.DrawString(rs)
 				for _, so := range strokes {
@@ -1653,6 +1731,113 @@ func colorLuminance(c color.RGBA) float64 {
 	return 0.299*float64(c.R)/255 + 0.587*float64(c.G)/255 + 0.114*float64(c.B)/255
 }
 
+// Color-boost parameters for sampled text-ink colours.
+const (
+	// boostSaturationDelta is added to the HSL saturation of sampled text
+	// colours so results are vivid and clearly distinct.  22 % provides
+	// obvious colour impact while remaining true to the original hue intent.
+	boostSaturationDelta = 0.22
+	// boostMinContrast is the minimum required luminance difference between
+	// the sampled ink colour and the estimated background.  0.42 ensures text
+	// is always clearly readable against its local background.
+	boostMinContrast = 0.42
+)
+
+// boostSampledColor increases the visual impact of a sampled text-ink colour
+// by raising its HSL saturation and enforcing minimum contrast against the
+// given background luminance.  This prevents washed-out or low-impact colours
+// from appearing in the translated overlay.
+func boostSampledColor(c color.RGBA, bgLum float64) color.RGBA {
+	h, s, l := rgbToHSL(c)
+	// 1. Boost saturation.
+	s = math.Min(1.0, s+boostSaturationDelta)
+	// 2. Enforce minimum luminance contrast against background.
+	inkLum := colorLuminance(c)
+	if bgLum >= overlayLumThreshold {
+		// Light background — push ink darker if needed.
+		if diff := bgLum - inkLum; diff < boostMinContrast {
+			l = math.Max(0.0, l-(boostMinContrast-diff))
+		}
+	} else {
+		// Dark background — push ink lighter if needed.
+		if diff := inkLum - bgLum; diff < boostMinContrast {
+			l = math.Min(1.0, l+(boostMinContrast-diff))
+		}
+	}
+	r, g, b := hslToRGB(h, s, l)
+	return color.RGBA{R: r, G: g, B: b, A: 255}
+}
+
+// rgbToHSL converts an sRGB colour to hue [0, 360), saturation [0, 1], lightness [0, 1].
+func rgbToHSL(c color.RGBA) (h, s, l float64) {
+	r := float64(c.R) / 255
+	g := float64(c.G) / 255
+	b := float64(c.B) / 255
+	cmax := math.Max(r, math.Max(g, b))
+	cmin := math.Min(r, math.Min(g, b))
+	delta := cmax - cmin
+	l = (cmax + cmin) / 2
+	if delta == 0 {
+		return 0, 0, l
+	}
+	if l < 0.5 {
+		s = delta / (cmax + cmin)
+	} else {
+		s = delta / (2 - cmax - cmin)
+	}
+	switch cmax {
+	case r:
+		h = math.Mod((g-b)/delta, 6)
+	case g:
+		h = (b-r)/delta + 2
+	default:
+		h = (r-g)/delta + 4
+	}
+	h *= 60
+	if h < 0 {
+		h += 360
+	}
+	return h, s, l
+}
+
+// hslToRGB converts HSL back to sRGB byte values.
+func hslToRGB(h, s, l float64) (uint8, uint8, uint8) {
+	if s == 0 {
+		v := uint8(math.Round(l * 255))
+		return v, v, v
+	}
+	var q float64
+	if l < 0.5 {
+		q = l * (1 + s)
+	} else {
+		q = l + s - l*s
+	}
+	p := 2*l - q
+	rv := hueToRGB(p, q, h/360+1.0/3)
+	gv := hueToRGB(p, q, h/360)
+	bv := hueToRGB(p, q, h/360-1.0/3)
+	return uint8(math.Round(rv * 255)), uint8(math.Round(gv * 255)), uint8(math.Round(bv * 255))
+}
+
+// hueToRGB is the standard HSL hue-to-channel helper.
+func hueToRGB(p, q, t float64) float64 {
+	if t < 0 {
+		t++
+	}
+	if t > 1 {
+		t--
+	}
+	switch {
+	case t < 1.0/6:
+		return p + (q-p)*6*t
+	case t < 1.0/2:
+		return q
+	case t < 2.0/3:
+		return p + (q-p)*(2.0/3-t)*6
+	}
+	return p
+}
+
 // sampleDominantTextColor samples pixel colours inside box on img (which must
 // still hold the original, un-erased pixels) and returns the estimated
 // dominant text-ink colour.
@@ -1690,12 +1875,13 @@ func sampleDominantTextColor(img *image.RGBA, box image.Rectangle) color.Color {
 	if textPx < max(1, totalPx/10) {
 		return inkColorForBackground(bgLum)
 	}
-	return color.RGBA{
+	sampled := color.RGBA{
 		R: uint8(sumR / uint64(textPx)),
 		G: uint8(sumG / uint64(textPx)),
 		B: uint8(sumB / uint64(textPx)),
 		A: 255,
 	}
+	return boostSampledColor(sampled, bgLum)
 }
 
 // cachedAscent returns face.Metrics().Ascent.Ceil() for fontSize, caching the
@@ -2110,24 +2296,29 @@ type strokeOffset struct{ dx, dy int }
 // Strategy (first matching rule applies):
 //
 //   - Monospace: no extra passes — character shape precision is paramount.
-//   - Any style, fontSize > 24: no extra passes — large glyphs already look heavy
-//     and extra passes visibly blur them.
-//   - Bold: cross-thickening with two passes (+1,0) and (0,+1).  This broadens
-//     already-heavy strokes without requiring a third axis.
-//   - Serif: no extra passes — serif contrast (thick/thin strokes) is intentional;
-//     uniform thickening would destroy the rhythm.
+//   - Bold: full 4-direction cross (+1,0),(-1,0),(0,+1),(0,-1) at all sizes up
+//     to 32px.  Four passes produce strokes that are clearly heavier than
+//     normal text, giving a strong visual hierarchy.  Above 32px glyphs are
+//     already large enough that the bold font file weight reads clearly.
+//   - Serif: no extra passes — serif contrast (thick/thin strokes) is
+//     intentional; uniform thickening would destroy the rhythm.
 //   - Normal sans at fontSize ≤ 16: one subtle horizontal pass (+1,0).  Small
-//     sans glyphs can appear thin at low DPI; a single pixel broadens them just
-//     enough to read clearly without looking blurry.
+//     sans glyphs can appear thin at low DPI; a single pixel broadens them
+//     just enough to read clearly.  This also preserves the clear gap between
+//     normal (1 pass) and bold (4 passes) at all small sizes.
 func computeStrokeOffsets(style BlockFontStyle, fontSize float64) []strokeOffset {
 	if style.Class == monoFontClass {
 		return nil
 	}
-	if fontSize > 24 {
-		return nil
-	}
 	if style.Bold {
-		return []strokeOffset{{1, 0}, {0, 1}}
+		// Large glyphs are already visually heavy from the bold font file.
+		if fontSize > 32 {
+			return nil
+		}
+		// 5-pass thickening: 4-direction cross + one diagonal.
+		// The diagonal pass adds weight in the natural shadow direction,
+		// making bold text unmistakably heavier than normal.
+		return []strokeOffset{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}}
 	}
 	if style.Class == serifFontClass {
 		return nil
@@ -2143,6 +2334,14 @@ func mustParseOverlayFont() *opentype.Font {
 	parsed, err := opentype.Parse(goregular.TTF)
 	if err != nil {
 		panic(fmt.Sprintf("parse overlay font: %v", err))
+	}
+	return parsed
+}
+
+func mustParseEmbeddedFont(data []byte, name string) *opentype.Font {
+	parsed, err := opentype.Parse(data)
+	if err != nil {
+		panic(fmt.Sprintf("parse embedded font %s: %v", name, err))
 	}
 	return parsed
 }

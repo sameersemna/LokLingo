@@ -33,10 +33,19 @@ const (
 	monoFontClass                   // monospace (e.g. Courier-like)
 )
 
+// shadowHint holds the detected drop-shadow geometry for a rendered text block.
+// dx and dy are the pixel offsets of the shadow from the text origin.
+// alpha is the opacity of the shadow [0, 255]; 0 means "use default".
+type shadowHint struct {
+	dx, dy int
+	alpha  uint8
+}
+
 // BlockFontStyle holds the inferred typographic style for one OCR block.
 type BlockFontStyle struct {
-	Bold  bool
-	Class fontClass
+	Bold   bool
+	Class  fontClass
+	Shadow shadowHint
 }
 
 // -- Detection thresholds (tuned conservatively to avoid over-triggering) --
@@ -44,7 +53,9 @@ const (
 	// inkDensityBoldThreshold: fraction of sampled pixels identified as ink
 	// above which the block is classified as bold.  Bold strokes are thicker
 	// and occupy more of the bounding box than regular-weight strokes.
-	inkDensityBoldThreshold = 0.20
+	// Lowered from 0.20 to 0.15 so that moderately heavy text (e.g. semi-bold
+	// headings) is classified as bold and rendered with the heavier stroke pass.
+	inkDensityBoldThreshold = 0.15
 
 	// serifEdgeRatioThreshold: minimum ratio of Sobel horizontal-edge density
 	// to vertical-edge density required to classify a block as serif.
@@ -324,10 +335,11 @@ func detectBlockFontStyle(img *image.RGBA, box image.Rectangle, originalText str
 // unchanged – those fonts do not have serif/mono variants in the system
 // fallback list and the visual difference is minimal for those scripts.
 //
-// For Latin/common scripts the styled Noto variants are tried in order:
-//   - mono   → NotoSansMono → goregular fallback
-//   - serif  → NotoSerif-(Bold) → goregular fallback
-//   - sans   → NotoSans-Bold (if bold) → goregular
+// For Latin/common scripts the styled Noto variants are tried first, then the
+// always-available embedded Go fonts (gobold / gomono), and finally goregular:
+//   - mono   → NotoSansMono → Go Mono (embedded)
+//   - serif  → NotoSerif-(Bold) → Go Bold (bold) / goregular (regular)
+//   - sans   → NotoSans-Bold (if bold) → Go Bold (embedded bold)
 func faceForStyle(text string, fontSize float64, style BlockFontStyle) (font.Face, error) {
 	// Non-Latin: use the existing script-coverage fallback chain.
 	if needsFallbackFont(text) {
@@ -339,7 +351,8 @@ func faceForStyle(text string, fontSize float64, style BlockFontStyle) (font.Fac
 		if f, err := styledNotoSansMono.face(fontSize); err == nil {
 			return f, nil
 		}
-		// Fall through to goregular.
+		// Embedded Go Mono: always available, preserves monospace character.
+		return loadFaceFromFont(embeddedGoMonoFont, &embeddedGoMonoFaceCache, fontSize)
 
 	case serifFontClass:
 		entry := styledNotoSerif
@@ -349,18 +362,23 @@ func faceForStyle(text string, fontSize float64, style BlockFontStyle) (font.Fac
 		if f, err := entry.face(fontSize); err == nil {
 			return f, nil
 		}
-		// Fall through to goregular.
+		// Serif bold → embedded Go Bold for clear weight; regular → goregular.
+		if style.Bold {
+			return loadFaceFromFont(embeddedGoBoldFont, &embeddedGoBoldFaceCache, fontSize)
+		}
+		return loadOverlayFace(fontSize)
 
 	default: // sansFontClass
 		if style.Bold {
 			if f, err := styledNotoSansBold.face(fontSize); err == nil {
 				return f, nil
 			}
+			// Embedded Go Bold: always available, genuinely heavier typeface.
+			return loadFaceFromFont(embeddedGoBoldFont, &embeddedGoBoldFaceCache, fontSize)
 		}
-		// Regular sans → goregular (current default).
+		// Regular sans → goregular.
+		return loadOverlayFace(fontSize)
 	}
-
-	return loadOverlayFace(fontSize)
 }
 
 // segFaceStyled is like segFace but uses the detected BlockFontStyle to

@@ -1438,10 +1438,9 @@ func TestComputeStrokeOffsets_MonoNoStrokes(t *testing.T) {
 }
 
 func TestComputeStrokeOffsets_LargeFontNoStrokes(t *testing.T) {
-	// Any style at fontSize > 24 should get no extra passes.
+	// Non-bold styles at any size, and bold above 32px, should get no extra passes.
 	for _, style := range []BlockFontStyle{
 		{},
-		{Bold: true},
 		{Class: sansFontClass},
 	} {
 		got := computeStrokeOffsets(style, 25)
@@ -1449,24 +1448,32 @@ func TestComputeStrokeOffsets_LargeFontNoStrokes(t *testing.T) {
 			t.Errorf("fontSize=25 style=%+v: expected no strokes, got %v", style, got)
 		}
 	}
+	// Bold above the 32px cutoff should also get no extra passes.
+	got := computeStrokeOffsets(BlockFontStyle{Bold: true}, 33)
+	if len(got) != 0 {
+		t.Errorf("bold fontSize=33: expected no strokes, got %v", got)
+	}
 }
 
 func TestComputeStrokeOffsets_BoldCrossThickening(t *testing.T) {
-	// Bold at a small font should return exactly the two cross passes.
+	// Bold at a small font should return the 5-pass set (cross + diagonal).
 	got := computeStrokeOffsets(BlockFontStyle{Bold: true}, 14)
-	if len(got) != 2 {
-		t.Fatalf("bold fontSize=14: expected 2 strokes, got %v", got)
+	if len(got) != 5 {
+		t.Fatalf("bold fontSize=14: expected 5 strokes, got %v", got)
 	}
-	if got[0] != (strokeOffset{1, 0}) || got[1] != (strokeOffset{0, 1}) {
-		t.Errorf("bold fontSize=14: unexpected offsets %v", got)
+	want := []strokeOffset{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("bold fontSize=14: pass %d: got %v, want %v", i, got[i], w)
+		}
 	}
 }
 
 func TestComputeStrokeOffsets_BoldAtBoundary(t *testing.T) {
-	// fontSize=24 (at limit, not over) must still get bold strokes.
-	got := computeStrokeOffsets(BlockFontStyle{Bold: true}, 24)
-	if len(got) != 2 {
-		t.Errorf("bold fontSize=24: expected 2 strokes, got %v", got)
+	// fontSize=32 (at limit, not over) must still get bold strokes.
+	got := computeStrokeOffsets(BlockFontStyle{Bold: true}, 32)
+	if len(got) != 5 {
+		t.Errorf("bold fontSize=32: expected 5 strokes, got %v", got)
 	}
 }
 
