@@ -88,6 +88,23 @@ const (
 // image_service.go.  They share the fallbackFontEntry type (same package).
 
 var (
+	// NotoSans Regular – for regular sans blocks
+	styledNotoSans = &fallbackFontEntry{
+		name: "NotoSans",
+		paths: []string{
+			// Alpine (apk font-noto)
+			"/usr/share/fonts/noto/NotoSans-Regular.ttf",
+			// Debian/Ubuntu truetype
+			"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+			// Debian/Ubuntu opentype
+			"/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+			"/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+			// Some distros ship the variant without "Regular" in the name
+			"/usr/share/fonts/noto/NotoSans.ttf",
+			"/usr/share/fonts/truetype/noto/NotoSans.ttf",
+		},
+	}
+
 	// NotoSans Bold – for bold sans blocks
 	styledNotoSansBold = &fallbackFontEntry{
 		name: "NotoSans-Bold",
@@ -326,6 +343,25 @@ func detectBlockFontStyle(img *image.RGBA, box image.Rectangle, originalText str
 	return style
 }
 
+// preferredLatinNotoEntry returns the preferred Noto family entry for a Latin
+// segment based on detected style.
+func preferredLatinNotoEntry(style BlockFontStyle) *fallbackFontEntry {
+	switch style.Class {
+	case monoFontClass:
+		return styledNotoSansMono
+	case serifFontClass:
+		if style.Bold {
+			return styledNotoSerifBold
+		}
+		return styledNotoSerif
+	default: // sansFontClass
+		if style.Bold {
+			return styledNotoSansBold
+		}
+		return styledNotoSans
+	}
+}
+
 // -- Font face selection for styled blocks --
 
 // faceForStyle returns the best available font.Face for the given text and
@@ -339,29 +375,25 @@ func detectBlockFontStyle(img *image.RGBA, box image.Rectangle, originalText str
 // always-available embedded Go fonts (gobold / gomono), and finally goregular:
 //   - mono   → NotoSansMono → Go Mono (embedded)
 //   - serif  → NotoSerif-(Bold) → Go Bold (bold) / goregular (regular)
-//   - sans   → NotoSans-Bold (if bold) → Go Bold (embedded bold)
+//   - sans   → NotoSans-(Regular|Bold) → Go Bold (bold) / goregular (regular)
 func faceForStyle(text string, fontSize float64, style BlockFontStyle) (font.Face, error) {
 	// Non-Latin: use the existing script-coverage fallback chain.
 	if needsFallbackFont(text) {
 		return faceForFallback(text, fontSize)
 	}
 
-	switch style.Class {
-	case monoFontClass:
-		if f, err := styledNotoSansMono.face(fontSize); err == nil {
+	if entry := preferredLatinNotoEntry(style); entry != nil {
+		if f, err := entry.face(fontSize); err == nil {
 			return f, nil
 		}
+	}
+
+	switch style.Class {
+	case monoFontClass:
 		// Embedded Go Mono: always available, preserves monospace character.
 		return loadFaceFromFont(embeddedGoMonoFont, &embeddedGoMonoFaceCache, fontSize)
 
 	case serifFontClass:
-		entry := styledNotoSerif
-		if style.Bold {
-			entry = styledNotoSerifBold
-		}
-		if f, err := entry.face(fontSize); err == nil {
-			return f, nil
-		}
 		// Serif bold → embedded Go Bold for clear weight; regular → goregular.
 		if style.Bold {
 			return loadFaceFromFont(embeddedGoBoldFont, &embeddedGoBoldFaceCache, fontSize)
@@ -370,13 +402,10 @@ func faceForStyle(text string, fontSize float64, style BlockFontStyle) (font.Fac
 
 	default: // sansFontClass
 		if style.Bold {
-			if f, err := styledNotoSansBold.face(fontSize); err == nil {
-				return f, nil
-			}
 			// Embedded Go Bold: always available, genuinely heavier typeface.
 			return loadFaceFromFont(embeddedGoBoldFont, &embeddedGoBoldFaceCache, fontSize)
 		}
-		// Regular sans → goregular.
+		// Regular sans → goregular (existing behavior when NotoSans is missing).
 		return loadOverlayFace(fontSize)
 	}
 }

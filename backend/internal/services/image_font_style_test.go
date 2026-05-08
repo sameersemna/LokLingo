@@ -6,6 +6,43 @@ import (
 	"testing"
 )
 
+// -- preferredLatinNotoEntry tests --
+
+func TestPreferredLatinNotoEntry_SansRegular(t *testing.T) {
+	entry := preferredLatinNotoEntry(BlockFontStyle{Class: sansFontClass, Bold: false})
+	if entry != styledNotoSans {
+		t.Fatalf("expected styledNotoSans for sans regular, got %v", entry)
+	}
+}
+
+func TestPreferredLatinNotoEntry_SansBold(t *testing.T) {
+	entry := preferredLatinNotoEntry(BlockFontStyle{Class: sansFontClass, Bold: true})
+	if entry != styledNotoSansBold {
+		t.Fatalf("expected styledNotoSansBold for sans bold, got %v", entry)
+	}
+}
+
+func TestPreferredLatinNotoEntry_SerifRegular(t *testing.T) {
+	entry := preferredLatinNotoEntry(BlockFontStyle{Class: serifFontClass, Bold: false})
+	if entry != styledNotoSerif {
+		t.Fatalf("expected styledNotoSerif for serif regular, got %v", entry)
+	}
+}
+
+func TestPreferredLatinNotoEntry_SerifBold(t *testing.T) {
+	entry := preferredLatinNotoEntry(BlockFontStyle{Class: serifFontClass, Bold: true})
+	if entry != styledNotoSerifBold {
+		t.Fatalf("expected styledNotoSerifBold for serif bold, got %v", entry)
+	}
+}
+
+func TestPreferredLatinNotoEntry_Mono(t *testing.T) {
+	entry := preferredLatinNotoEntry(BlockFontStyle{Class: monoFontClass})
+	if entry != styledNotoSansMono {
+		t.Fatalf("expected styledNotoSansMono for mono, got %v", entry)
+	}
+}
+
 // -- helpers --
 
 // newGrayImage creates a w×h RGBA image filled with the given gray value.

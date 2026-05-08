@@ -1733,10 +1733,17 @@ func colorLuminance(c color.RGBA) float64 {
 
 // Color-boost parameters for sampled text-ink colours.
 const (
-	// boostSaturationDelta is added to the HSL saturation of sampled text
-	// colours so results are vivid and clearly distinct.  22 % provides
-	// obvious colour impact while remaining true to the original hue intent.
-	boostSaturationDelta = 0.22
+	// boostSaturationMax is the maximum saturation boost added to a
+	// completely desaturated (s=0) colour.  Strong colours (s≈1) receive no
+	// boost at all; the actual delta scales with (1−s)^boostSaturationCurve
+	// so the amplification is strongest where the colour is weakest.
+	boostSaturationMax = 0.55
+	// boostSaturationCurve is the exponent applied to (1−s) when computing
+	// the adaptive saturation delta.  Values above 1 make the curve concave,
+	// so mid-saturation colours are treated more conservatively than a linear
+	// ramp would suggest.  1.5 provides a good balance between boosting muted
+	// colours and preserving already-vivid ones.
+	boostSaturationCurve = 1.5
 	// boostMinContrast is the minimum required luminance difference between
 	// the sampled ink colour and the estimated background.  0.42 ensures text
 	// is always clearly readable against its local background.
@@ -1744,13 +1751,23 @@ const (
 )
 
 // boostSampledColor increases the visual impact of a sampled text-ink colour
-// by raising its HSL saturation and enforcing minimum contrast against the
-// given background luminance.  This prevents washed-out or low-impact colours
-// from appearing in the translated overlay.
+// using adaptive saturation amplification: low-saturation colours receive a
+// large boost while already-vivid colours are left mostly unchanged.  This
+// produces consistent visual impact across diverse inputs without
+// oversaturating strong colours.
+//
+// The saturation delta is computed as:
+//
+//	delta = boostSaturationMax × (1 − s)^boostSaturationCurve
+//
+// At s=0 (grayscale) the full boostSaturationMax boost is applied; at s=1
+// (fully saturated) the delta is zero.  Minimum contrast against the
+// background is enforced after the saturation step.
 func boostSampledColor(c color.RGBA, bgLum float64) color.RGBA {
 	h, s, l := rgbToHSL(c)
-	// 1. Boost saturation.
-	s = math.Min(1.0, s+boostSaturationDelta)
+	// 1. Adaptive saturation boost: scale inversely with existing saturation.
+	adaptiveDelta := boostSaturationMax * math.Pow(1.0-s, boostSaturationCurve)
+	s = math.Min(1.0, s+adaptiveDelta)
 	// 2. Enforce minimum luminance contrast against background.
 	inkLum := colorLuminance(c)
 	if bgLum >= overlayLumThreshold {

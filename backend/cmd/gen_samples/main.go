@@ -267,19 +267,21 @@ func main() {
 	// ── 5. before/after: bold text style detection ──────────────────────────────
 	{
 		blocks := []services.ImageTextBlock{
-			{Text: "BOLD HEADING", Bbox: []float64{60, 70, 420, 130}},
-			{Text: "regular line", Bbox: []float64{60, 165, 420, 225}},
+			{Text: "BOLD HEADING", Bbox: []float64{50, 40, 900, 150}},
+			{Text: "regular line", Bbox: []float64{50, 180, 640, 250}},
+			{Text: "secondary regular", Bbox: []float64{50, 265, 640, 335}},
 		}
 		canvas := writeCanvasWithText(
-			"loklingo_before_after_bold.png", 920, 300,
+			"loklingo_before_after_bold.png", 980, 370,
 			blocks,
-			[]string{"BOLD HEADING", "regular line"},
-			[]color.RGBA{{20, 20, 20, 255}, {25, 25, 25, 255}},
-			[]bool{true, false},
+			[]string{"BOLD HEADING", "regular line", "secondary regular"},
+			[]color.RGBA{{18, 18, 18, 255}, {32, 32, 32, 255}, {40, 40, 40, 255}},
+			[]bool{true, false, false},
 		)
 		translated := []string{
 			"BOLD HEADING",
 			"regular line",
+			"secondary regular",
 		}
 		render(canvas, blocks, translated, before, "before_bold_style")
 		render(canvas, blocks, translated, after, "after_bold_style")
@@ -297,7 +299,8 @@ func main() {
 			"loklingo_before_after_colored.png", 920, 320,
 			blocks,
 			[]string{"Status: WARNING", "Status: OK", "Status: ERROR"},
-			[]color.RGBA{{235, 140, 20, 255}, {30, 160, 70, 255}, {210, 35, 40, 255}},
+			// Deliberately muted tones so adaptive amplification is visible in "after".
+			[]color.RGBA{{168, 142, 110, 255}, {108, 146, 126, 255}, {156, 112, 118, 255}},
 			[]bool{false, false, true},
 		)
 		translated := []string{
@@ -313,18 +316,20 @@ func main() {
 	// ── 7. before/after: mixed styles (bold + colored + scripts) ──────────────
 	{
 		blocks := []services.ImageTextBlock{
-			{Text: "FEATURE ANNOUNCEMENT", Bbox: []float64{60, 65, 900, 145}},
-			{Text: "Localized status chip", Bbox: []float64{70, 185, 450, 260}},
-			{Text: "Mixed script subtitle", Bbox: []float64{490, 185, 900, 260}},
-			{Text: "日本語縦書きテキスト", Bbox: []float64{860, 300, 890, 565}},
-			{Text: "Arabic section title", Bbox: []float64{70, 320, 780, 395}},
-			{Text: "Body copy with normal style", Bbox: []float64{70, 425, 820, 560}},
+			{Text: "FEATURE ANNOUNCEMENT", Bbox: []float64{60, 45, 930, 145}},
+			{Text: "CODE: SELECT * FROM users WHERE id = 42;", Bbox: []float64{70, 175, 940, 255}},
+			{Text: "Localized status chip", Bbox: []float64{70, 280, 450, 355}},
+			{Text: "Mixed script subtitle", Bbox: []float64{490, 280, 930, 355}},
+			{Text: "日本語縦書きテキスト", Bbox: []float64{860, 385, 900, 615}},
+			{Text: "Arabic section title", Bbox: []float64{70, 405, 800, 485}},
+			{Text: "Body copy with normal style", Bbox: []float64{70, 515, 860, 640}},
 		}
 		canvas := writeCanvasWithText(
-			"loklingo_before_after_mixed.png", 980, 620,
+			"loklingo_before_after_mixed.png", 1020, 680,
 			blocks,
 			[]string{
 				"FEATURE ANNOUNCEMENT",
+				"CODE: SELECT * FROM users WHERE id = 42;",
 				"Localized status chip",
 				"नमस्ते / Hello / مرحبا",
 				"日本語縦書きテキスト",
@@ -332,17 +337,19 @@ func main() {
 				"Body copy with normal style",
 			},
 			[]color.RGBA{
-				{32, 32, 32, 255},
-				{34, 128, 210, 255},
-				{176, 52, 114, 255},
+				{18, 18, 18, 255},
+				{26, 26, 26, 255},
+				{92, 132, 174, 255},
+				{170, 124, 164, 255},
 				{40, 40, 40, 255},
-				{20, 120, 120, 255},
+				{98, 140, 136, 255},
 				{45, 45, 45, 255},
 			},
-			[]bool{true, false, false, false, true, false},
+			[]bool{true, false, false, false, false, true, false},
 		)
 		translated := []string{
 			"FEATURE ANNOUNCEMENT",
+			"CODE: SELECT * FROM users WHERE id = 42;",
 			"Localized status chip",
 			"नमस्ते / Hello / مرحبا",
 			"日本語縦書きテキスト",

@@ -2095,3 +2095,109 @@ func TestDefaultOverlayOptions_NegativeTextPaddingFallsBackToConstant(t *testing
 		t.Fatalf("unexpected error with TextPadding=-1: %v", err)
 	}
 }
+
+// ---- boostSampledColor (adaptive saturation amplification) ----
+
+// TestBoostSampledColor_GrayscaleReceivesMaxBoost verifies that a near-gray
+// colour (s≈0) receives close to the full boostSaturationMax delta.
+func TestBoostSampledColor_GrayscaleReceivesMaxBoost(t *testing.T) {
+	// Mid-gray on a white background.
+	gray := color.RGBA{R: 128, G: 128, B: 128, A: 255}
+	_, sBefore, _ := rgbToHSL(gray)
+	result := boostSampledColor(gray, 1.0)
+	_, sAfter, _ := rgbToHSL(result)
+	// The boost applied should be close to boostSaturationMax because s≈0.
+	applied := sAfter - sBefore
+	if applied < boostSaturationMax*0.85 {
+		t.Errorf("expected close-to-max boost for gray, got applied=%.4f (max=%.4f)", applied, boostSaturationMax)
+	}
+}
+
+// TestBoostSampledColor_VividColorUnchangedSaturation verifies that a fully
+// saturated colour (s=1) receives essentially no saturation boost.
+func TestBoostSampledColor_VividColorUnchangedSaturation(t *testing.T) {
+	// Pure red is fully saturated in HSL.
+	red := color.RGBA{R: 255, G: 0, B: 0, A: 255}
+	_, sBefore, _ := rgbToHSL(red)
+	result := boostSampledColor(red, 1.0)
+	_, sAfter, _ := rgbToHSL(result)
+	applied := sAfter - sBefore
+	if math.Abs(applied) > 0.02 {
+		t.Errorf("expected ~0 boost for fully-saturated red, got applied=%.4f (s_before=%.4f, s_after=%.4f)",
+			applied, sBefore, sAfter)
+	}
+}
+
+// TestBoostSampledColor_LowSatGetsMoreBoostThanHighSat verifies that a muted
+// colour receives a larger saturation boost than an already-vivid one.
+func TestBoostSampledColor_LowSatGetsMoreBoostThanHighSat(t *testing.T) {
+	bgLum := 1.0 // light background, kept constant for isolation
+
+	// Muted teal: RGB(100, 130, 130) — low saturation.
+	muted := color.RGBA{R: 100, G: 130, B: 130, A: 255}
+	// Vivid teal: RGB(0, 200, 200) — high saturation.
+	vivid := color.RGBA{R: 0, G: 200, B: 200, A: 255}
+
+	_, sMutedBefore, _ := rgbToHSL(muted)
+	resultMuted := boostSampledColor(muted, bgLum)
+	_, sMutedAfter, _ := rgbToHSL(resultMuted)
+	appliedMuted := sMutedAfter - sMutedBefore
+
+	_, sVividBefore, _ := rgbToHSL(vivid)
+	resultVivid := boostSampledColor(vivid, bgLum)
+	_, sVividAfter, _ := rgbToHSL(resultVivid)
+	appliedVivid := sVividAfter - sVividBefore
+
+	if appliedMuted <= appliedVivid {
+		t.Errorf("expected muted colour to receive larger boost than vivid: "+
+			"muted applied=%.4f, vivid applied=%.4f "+
+			"(s_muted_before=%.4f, s_vivid_before=%.4f)",
+			appliedMuted, appliedVivid, sMutedBefore, sVividBefore)
+	}
+}
+
+// TestBoostSampledColor_AdaptiveDeltaFormula directly verifies the delta
+// formula for a mid-saturation colour.
+func TestBoostSampledColor_AdaptiveDeltaFormula(t *testing.T) {
+	// Build a colour whose HSL saturation we can predict.
+	// RGB(255, 128, 0) is orange with s≈1 in HSL — use a pastier shade instead.
+	// Pastel pink RGB(230, 180, 180): s should be around 0.35.
+	pink := color.RGBA{R: 230, G: 180, B: 180, A: 255}
+	_, s, _ := rgbToHSL(pink)
+	expectedDelta := boostSaturationMax * math.Pow(1.0-s, boostSaturationCurve)
+
+	_, sBefore, _ := rgbToHSL(pink)
+	result := boostSampledColor(pink, 1.0)
+	_, sAfter, _ := rgbToHSL(result)
+	appliedDelta := sAfter - sBefore
+
+	// Allow a small tolerance for floating-point rounding and clamping.
+	tolerance := 0.04
+	diff := math.Abs(appliedDelta - expectedDelta)
+	if diff > tolerance {
+		t.Errorf("adaptive delta mismatch: s=%.4f expected_delta=%.4f applied=%.4f (diff=%.4f)",
+			sBefore, expectedDelta, appliedDelta, diff)
+	}
+}
+
+// TestBoostSampledColor_ContrastEnforced verifies that a low-contrast ink
+// colour on a light background is pushed darker so the luminance gap improves.
+// The function adjusts HSL lightness (not linear luminance), so we verify
+// meaningful improvement rather than an exact threshold.
+func TestBoostSampledColor_ContrastEnforced(t *testing.T) {
+	// Medium gray on white — luminance diff before boost is clearly below boostMinContrast.
+	gray := color.RGBA{R: 180, G: 180, B: 180, A: 255}
+	bgLum := 1.0 // white background
+	inkLumBefore := colorLuminance(gray)
+	diffBefore := bgLum - inkLumBefore
+
+	result := boostSampledColor(gray, bgLum)
+	inkLumAfter := colorLuminance(result)
+	diffAfter := bgLum - inkLumAfter
+
+	// Contrast must have improved (ink is darker after the boost).
+	if diffAfter <= diffBefore {
+		t.Errorf("expected contrast to improve: diffBefore=%.3f diffAfter=%.3f (inkBefore=%.3f inkAfter=%.3f)",
+			diffBefore, diffAfter, inkLumBefore, inkLumAfter)
+	}
+}
