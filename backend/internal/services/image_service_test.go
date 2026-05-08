@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/math/fixed"
 )
 
 // testFace loads a goregular face at the given size for use in tests.
@@ -230,10 +232,13 @@ func TestFitTextLayout_ReducesFontSizeToFitHeight(t *testing.T) {
 		t.Fatalf("expected reduced font size, got %v", layout.fontSize)
 	}
 	// Validate against the actual renderer formula: topInset + ascent + (N-1)*lineHeight.
+	// Allow the configured 3 % overflow tolerance.
 	n := len(layout.lines)
-	blockH := layout.topInset + int(layout.lineHeight) + (n-1)*layout.lineHeight
-	if blockH > 24 {
-		t.Fatalf("layout block height %d exceeds box height 24 (lines=%d fontSize=%v)", blockH, n, layout.fontSize)
+	fs := int(layout.fontSize)
+	blkH := blockHeight(layout.topInset, approximateAscent(fs), layout.lineHeight, n)
+	tolerated := int(math.Round(float64(24) * (1.0 + overlayFitOverflowPct)))
+	if blkH > tolerated {
+		t.Fatalf("layout block height %d exceeds tolerated %d (lines=%d fontSize=%v)", blkH, tolerated, n, layout.fontSize)
 	}
 }
 
@@ -279,7 +284,7 @@ func TestApproximateAscent_IsPositiveAndScales(t *testing.T) {
 
 // TestFitTextLayout_HeightGuarantee verifies that the layout's block height
 // (using the actual renderer formula: topInset + ascent + (N-1)*lineHeight)
-// never exceeds the given maxHeight.
+// never exceeds maxHeight by more than the configured overflow tolerance (3 %).
 func TestFitTextLayout_HeightGuarantee(t *testing.T) {
 	cases := []struct {
 		text       string
@@ -297,10 +302,11 @@ func TestFitTextLayout_HeightGuarantee(t *testing.T) {
 		}
 		n := len(layout.lines)
 		fs := int(layout.fontSize)
-		blockH := layout.topInset + approximateAscent(fs) + max(0, n-1)*layout.lineHeight
-		if blockH > tc.maxH {
-			t.Errorf("text=%q maxW=%d maxH=%d: blockH=%d > maxH (fontSize=%v lines=%d)",
-				tc.text, tc.maxW, tc.maxH, blockH, layout.fontSize, n)
+		blkH := blockHeight(layout.topInset, approximateAscent(fs), layout.lineHeight, n)
+		tolerated := int(math.Round(float64(tc.maxH) * (1.0 + overlayFitOverflowPct)))
+		if blkH > tolerated {
+			t.Errorf("text=%q maxW=%d maxH=%d: blockH=%d > tolerated=%d (fontSize=%v lines=%d)",
+				tc.text, tc.maxW, tc.maxH, blkH, tolerated, layout.fontSize, n)
 		}
 	}
 }
@@ -310,13 +316,11 @@ func TestFitTextLayout_HeightGuarantee(t *testing.T) {
 // least one of several representative boxes. This detects regression back to
 // the overestimate.
 func TestFitTextLayout_CorrectFormulaPrefersLargerFont(t *testing.T) {
-	// A box just tall enough that the new formula allows one more pt of font.
-	// At fontSize F: ascent≈0.82F, lineHeight≈1.24F, topInset≈0.15F.
-	// 1-line new formula: 0.15F + 0.82F = 0.97F <= maxH.
-	// 1-line old formula: 0.15F + 1.24F = 1.39F <= maxH.
-	// So for maxH between 0.97F and 1.39F the new formula admits F but old does not.
-	// At F=20: new admits maxH>=20, old requires maxH>=28.
-	// Use "Single" (1 word, won't wrap) with maxH=22 and expect fontSize>=20.
+	// At fontSize F the 1-line block height ≈ topInset + ascent
+	// = 0.10F + 0.82F = 0.92F (new formula).
+	// With 3 % overflow tolerance the threshold becomes 0.92F ≤ 1.03×maxH,
+	// i.e. F ≤ maxH×1.03/0.92 ≈ maxH×1.12.
+	// For maxH=22 the largest F that fits ≈ 24; expect at least fontSize≥20.
 	layout := fitTextLayout("Single", 200, 22, overlayMinFontSize, overlayMaxFontSize)
 	if int(layout.fontSize) < 20 {
 		t.Fatalf("expected fontSize >= 20 for 1-line text in 22px box, got %.0f", layout.fontSize)
@@ -895,11 +899,15 @@ func TestVerticalCenteringOffset_MultiLine_NoExpand(t *testing.T) {
 }
 
 func TestApproximateLineHeight_BasedOnFontSize(t *testing.T) {
-	if got := approximateLineHeight(12); got != 15 {
-		t.Fatalf("expected line height 15 for font 12, got %d", got)
+	// Values reflect the 1.18× multiplier introduced to reduce conservative shrink:
+	//   12 → round(12×1.18)=14; min=14 → 14
+	//   16 → round(16×1.18)=19; min=18 → 19
+	//    8 → round(8×1.18)=9;   min=10 → 10 (clamped to min)
+	if got := approximateLineHeight(12); got != 14 {
+		t.Fatalf("expected line height 14 for font 12, got %d", got)
 	}
-	if got := approximateLineHeight(16); got != 20 {
-		t.Fatalf("expected line height 20 for font 16, got %d", got)
+	if got := approximateLineHeight(16); got != 19 {
+		t.Fatalf("expected line height 19 for font 16, got %d", got)
 	}
 	if got := approximateLineHeight(8); got != 10 {
 		t.Fatalf("expected line height 10 for font 8, got %d", got)
@@ -923,7 +931,7 @@ func TestApproximateLineHeight_RespectsReadabilityBounds(t *testing.T) {
 		if lh < fs+overlayLineSpacing {
 			t.Fatalf("font %d: line height %d too tight", fs, lh)
 		}
-		if lh > fs+8 {
+		if lh > fs+9 {
 			t.Fatalf("font %d: line height %d too loose", fs, lh)
 		}
 	}
@@ -1356,6 +1364,247 @@ func TestMeasureLinePx_AllLatin(t *testing.T) {
 	got := measureLinePx("Hello", 14)
 	if got != want {
 		t.Fatalf("measureLinePx(%q, 14) = %d, want %d", "Hello", got, want)
+	}
+}
+
+// ---- computeLetterSpacing ----
+
+func TestComputeLetterSpacing_NeutralWhenNearFull(t *testing.T) {
+	// textWidth ≈ 97 % of availWidth → raw surplus ≈ 0.16 px/gap → after 30 % dampen ≈ 0.05 px → below threshold → 0
+	ls := computeLetterSpacing(97, 100, 10, BlockFontStyle{})
+	if ls != 0 {
+		t.Errorf("expected 0 for near-full line, got %v", ls)
+	}
+}
+
+func TestComputeLetterSpacing_PositiveForWideBox(t *testing.T) {
+	// textWidth=50 in availWidth=100, 11 runes → 10 gaps
+	// rawPx = 50/10 = 5.0; dampened = 1.5; clamped = 1.5 (< 2) → positive
+	ls := computeLetterSpacing(50, 100, 11, BlockFontStyle{})
+	if ls <= 0 {
+		t.Errorf("expected positive spacing for wide box, got %v", ls)
+	}
+}
+
+func TestComputeLetterSpacing_NegativeForTightBox(t *testing.T) {
+	// textWidth=102 in availWidth=100, 11 runes → 10 gaps
+	// rawPx = -2/10 = -0.2; dampened = -0.06 → below 0.25 threshold → 0
+	// Use a larger deficit to get past threshold: textWidth=110 → rawPx=-1, dampen=-0.3 → -0.3 < -0.25 → negative
+	ls := computeLetterSpacing(110, 100, 11, BlockFontStyle{})
+	if ls >= 0 {
+		t.Errorf("expected negative spacing for tight box, got %v", ls)
+	}
+}
+
+func TestComputeLetterSpacing_ZeroForSingleRune(t *testing.T) {
+	ls := computeLetterSpacing(10, 100, 1, BlockFontStyle{})
+	if ls != 0 {
+		t.Errorf("expected 0 for single rune, got %v", ls)
+	}
+}
+
+func TestComputeLetterSpacing_ZeroForMono(t *testing.T) {
+	// Monospace blocks must never have spacing adjusted.
+	ls := computeLetterSpacing(50, 100, 11, BlockFontStyle{Class: monoFontClass})
+	if ls != 0 {
+		t.Errorf("expected 0 for monospace block, got %v", ls)
+	}
+}
+
+func TestComputeLetterSpacing_CappedAt2px(t *testing.T) {
+	// Very wide box: textWidth=10 in 1000px → massive raw surplus → must clamp to +2px.
+	ls := computeLetterSpacing(10, 1000, 5, BlockFontStyle{})
+	maxFixed := fixed.Int26_6(math.Round(2.0 * 64))
+	if ls > maxFixed {
+		t.Errorf("expected spacing <= +2px (fixed %v), got %v", maxFixed, ls)
+	}
+}
+
+func TestComputeLetterSpacing_ZeroForZeroAvail(t *testing.T) {
+	ls := computeLetterSpacing(50, 0, 5, BlockFontStyle{})
+	if ls != 0 {
+		t.Errorf("expected 0 for zero availWidth, got %v", ls)
+	}
+}
+
+// ---- computeStrokeOffsets ----
+
+func TestComputeStrokeOffsets_MonoNoStrokes(t *testing.T) {
+	// Mono blocks must never get extra passes.
+	got := computeStrokeOffsets(BlockFontStyle{Class: monoFontClass}, 12)
+	if len(got) != 0 {
+		t.Errorf("expected no strokes for mono, got %v", got)
+	}
+}
+
+func TestComputeStrokeOffsets_LargeFontNoStrokes(t *testing.T) {
+	// Any style at fontSize > 24 should get no extra passes.
+	for _, style := range []BlockFontStyle{
+		{},
+		{Bold: true},
+		{Class: sansFontClass},
+	} {
+		got := computeStrokeOffsets(style, 25)
+		if len(got) != 0 {
+			t.Errorf("fontSize=25 style=%+v: expected no strokes, got %v", style, got)
+		}
+	}
+}
+
+func TestComputeStrokeOffsets_BoldCrossThickening(t *testing.T) {
+	// Bold at a small font should return exactly the two cross passes.
+	got := computeStrokeOffsets(BlockFontStyle{Bold: true}, 14)
+	if len(got) != 2 {
+		t.Fatalf("bold fontSize=14: expected 2 strokes, got %v", got)
+	}
+	if got[0] != (strokeOffset{1, 0}) || got[1] != (strokeOffset{0, 1}) {
+		t.Errorf("bold fontSize=14: unexpected offsets %v", got)
+	}
+}
+
+func TestComputeStrokeOffsets_BoldAtBoundary(t *testing.T) {
+	// fontSize=24 (at limit, not over) must still get bold strokes.
+	got := computeStrokeOffsets(BlockFontStyle{Bold: true}, 24)
+	if len(got) != 2 {
+		t.Errorf("bold fontSize=24: expected 2 strokes, got %v", got)
+	}
+}
+
+func TestComputeStrokeOffsets_SerifNoStrokes(t *testing.T) {
+	// Serif (non-bold) must not get extra passes regardless of size.
+	for _, fs := range []float64{8, 12, 16, 24} {
+		got := computeStrokeOffsets(BlockFontStyle{Class: serifFontClass}, fs)
+		if len(got) != 0 {
+			t.Errorf("serif fontSize=%.0f: expected no strokes, got %v", fs, got)
+		}
+	}
+}
+
+func TestComputeStrokeOffsets_NormalSansSmallOnePass(t *testing.T) {
+	// Normal sans at fontSize ≤ 16 should get exactly one horizontal pass.
+	for _, fs := range []float64{8, 12, 16} {
+		got := computeStrokeOffsets(BlockFontStyle{}, fs)
+		if len(got) != 1 {
+			t.Errorf("sans fontSize=%.0f: expected 1 stroke, got %v", fs, got)
+			continue
+		}
+		if got[0] != (strokeOffset{1, 0}) {
+			t.Errorf("sans fontSize=%.0f: expected (+1,0) stroke, got %v", fs, got[0])
+		}
+	}
+}
+
+func TestComputeStrokeOffsets_NormalSansMediumNoStroke(t *testing.T) {
+	// Normal sans at 17–24 should get no extra passes.
+	for _, fs := range []float64{17, 20, 24} {
+		got := computeStrokeOffsets(BlockFontStyle{}, fs)
+		if len(got) != 0 {
+			t.Errorf("sans fontSize=%.0f: expected no strokes, got %v", fs, got)
+		}
+	}
+}
+
+// ---- colorLuminance ----
+
+func TestColorLuminance_Black(t *testing.T) {
+	l := colorLuminance(color.RGBA{R: 0, G: 0, B: 0, A: 255})
+	if l != 0.0 {
+		t.Errorf("expected 0 for black, got %v", l)
+	}
+}
+
+func TestColorLuminance_White(t *testing.T) {
+	l := colorLuminance(color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	if math.Abs(l-1.0) > 0.01 {
+		t.Errorf("expected ~1.0 for white, got %v", l)
+	}
+}
+
+func TestColorLuminance_NTSCCoefficients(t *testing.T) {
+	// Pure red: expected lum = 0.299.
+	l := colorLuminance(color.RGBA{R: 255, G: 0, B: 0, A: 255})
+	if math.Abs(l-0.299) > 0.005 {
+		t.Errorf("expected ~0.299 for pure red, got %.4f", l)
+	}
+}
+
+// ---- sampleDominantTextColor helpers ----
+
+// fillRectRGBA paints every pixel in r with c on img.
+func fillRectRGBA(img *image.RGBA, r image.Rectangle, c color.RGBA) {
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			img.SetRGBA(x, y, c)
+		}
+	}
+}
+
+// ---- sampleDominantTextColor ----
+
+func TestSampleDominantTextColor_FallbackForUniformWhite(t *testing.T) {
+	// A completely white image has no contrasting pixels → should fall back to
+	// inkColorForBackground(1.0) = Black so text is still legible.
+	img := image.NewRGBA(image.Rect(0, 0, 40, 20))
+	fillRectRGBA(img, img.Bounds(), color.RGBA{255, 255, 255, 255})
+	got := sampleDominantTextColor(img, img.Bounds())
+	if got != color.Black {
+		t.Errorf("expected Black fallback for uniform white image, got %v", got)
+	}
+}
+
+func TestSampleDominantTextColor_BlackTextOnWhite(t *testing.T) {
+	// White background (720 px) + black text region (80 px = 10 %).
+	// sampleDominantTextColor should return a very dark colour (not fall back).
+	img := image.NewRGBA(image.Rect(0, 0, 40, 20))
+	fillRectRGBA(img, img.Bounds(), color.RGBA{255, 255, 255, 255})
+	fillRectRGBA(img, image.Rect(5, 5, 15, 13), color.RGBA{0, 0, 0, 255}) // 10×8 = 80 px
+	got := sampleDominantTextColor(img, img.Bounds())
+	c, ok := got.(color.RGBA)
+	if !ok {
+		t.Fatalf("expected color.RGBA type, got %T (%v)", got, got)
+	}
+	lum := colorLuminance(c)
+	if lum > 0.10 {
+		t.Errorf("expected very dark ink for black-on-white, luminance %.3f (%v)", lum, c)
+	}
+}
+
+func TestSampleDominantTextColor_RedTextOnWhite(t *testing.T) {
+	// White background with a clearly-red text region (≥15 % of pixels).
+	// The sampled colour should be reddish, not black/white.
+	img := image.NewRGBA(image.Rect(0, 0, 40, 20))
+	fillRectRGBA(img, img.Bounds(), color.RGBA{255, 255, 255, 255})
+	// 16×10 = 160 px red, total 800 px → 20 % — well above the 10 % threshold.
+	fillRectRGBA(img, image.Rect(4, 4, 20, 14), color.RGBA{220, 30, 30, 255})
+	got := sampleDominantTextColor(img, img.Bounds())
+	c, ok := got.(color.RGBA)
+	if !ok {
+		t.Fatalf("expected color.RGBA type, got %T (%v)", got, got)
+	}
+	if c.R < 180 || c.G > 80 || c.B > 80 {
+		t.Errorf("expected reddish ink for red-on-white, got %v", c)
+	}
+}
+
+func TestSampleDominantTextColor_EmptyBox(t *testing.T) {
+	// Empty rectangle must not panic and must return a non-nil fallback.
+	img := image.NewRGBA(image.Rect(0, 0, 40, 20))
+	fillRectRGBA(img, img.Bounds(), color.RGBA{255, 255, 255, 255})
+	got := sampleDominantTextColor(img, image.Rectangle{})
+	if got == nil {
+		t.Error("expected non-nil fallback for empty box")
+	}
+}
+
+func TestSampleDominantTextColor_FallbackWhenTooFewTextPixels(t *testing.T) {
+	// Only 1 contrasting pixel in a large white image — below 10 % threshold.
+	// Must fall back to inkColorForBackground (Black on white background).
+	img := image.NewRGBA(image.Rect(0, 0, 40, 20))
+	fillRectRGBA(img, img.Bounds(), color.RGBA{255, 255, 255, 255})
+	img.SetRGBA(20, 10, color.RGBA{0, 0, 0, 255}) // single black pixel
+	got := sampleDominantTextColor(img, img.Bounds())
+	if got != color.Black {
+		t.Errorf("expected Black fallback when too few text pixels, got %v", got)
 	}
 }
 

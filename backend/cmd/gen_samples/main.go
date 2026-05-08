@@ -1,15 +1,16 @@
 package main
+
 // gen_samples renders reference PNG images to guide/render_samples/ using the
 // live image overlay pipeline with all current fixes applied.
 //
 // Run from the repo root:
 //
 //	go run ./backend/cmd/gen_samples
-package main
 
 import (
 	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
 	"log"
 	"math/rand"
@@ -18,6 +19,10 @@ import (
 	"runtime"
 
 	"loklingo/backend/internal/services"
+
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 )
 
 func main() {
@@ -64,6 +69,99 @@ func main() {
 		os.Remove(src)
 	}
 
+	bboxToRect := func(bbox []float64, bounds image.Rectangle) image.Rectangle {
+		if len(bbox) < 4 {
+			return image.Rectangle{}
+		}
+		x0 := int(bbox[0])
+		y0 := int(bbox[1])
+		x1 := int(bbox[2])
+		y1 := int(bbox[3])
+		if x0 > x1 {
+			x0, x1 = x1, x0
+		}
+		if y0 > y1 {
+			y0, y1 = y1, y0
+		}
+		return image.Rect(x0, y0, x1, y1).Intersect(bounds)
+	}
+
+	// writeCanvasWithText creates a canvas and paints synthetic source text
+	// directly into the OCR boxes so style/color sampling has realistic pixels.
+	writeCanvasWithText := func(name string, w, h int, blocks []services.ImageTextBlock, texts []string, colors []color.RGBA, bold []bool) string {
+		img := image.NewRGBA(image.Rect(0, 0, w, h))
+		rng := rand.New(rand.NewSource(42))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				r := uint8(120 + x*60/w + rng.Intn(6))
+				g := uint8(180 - y*40/h + rng.Intn(6))
+				b := uint8(200 - x*30/w + y*30/h + rng.Intn(6))
+				img.SetRGBA(x, y, color.RGBA{r, g, b, 255})
+			}
+		}
+
+		n := len(blocks)
+		if len(texts) < n {
+			n = len(texts)
+		}
+		for i := 0; i < n; i++ {
+			box := bboxToRect(blocks[i].Bbox, img.Bounds())
+			if box.Empty() {
+				continue
+			}
+			ink := color.RGBA{R: 24, G: 24, B: 24, A: 255}
+			if i < len(colors) {
+				ink = colors[i]
+			}
+			isBold := i < len(bold) && bold[i]
+
+			padX := 6
+			if box.Dx() < 24 {
+				padX = 2
+			}
+			padY := 8
+			if box.Dy() < 20 {
+				padY = 2
+			}
+			dot := fixed.P(box.Min.X+padX, box.Min.Y+padY+basicfont.Face7x13.Metrics().Ascent.Ceil())
+			d := &font.Drawer{Dst: img, Src: image.NewUniform(ink), Face: basicfont.Face7x13, Dot: dot}
+			d.DrawString(texts[i])
+			if isBold {
+				// Simulate heavier weight by overpainting one-pixel offset pass.
+				d2 := &font.Drawer{Dst: img, Src: image.NewUniform(ink), Face: basicfont.Face7x13, Dot: fixed.P(dot.X.Ceil()+1, dot.Y.Ceil())}
+				d2.DrawString(texts[i])
+			}
+
+			// Add tiny decorative bar in text color to strengthen color sampling.
+			barW := min(14, max(6, box.Dx()/8))
+			barH := min(6, max(3, box.Dy()/12))
+			bar := image.Rect(box.Min.X+padX, box.Min.Y+2, box.Min.X+padX+barW, box.Min.Y+2+barH).Intersect(img.Bounds())
+			draw.Draw(img, bar, image.NewUniform(ink), image.Point{}, draw.Src)
+
+			// Add short "ink-stroke" bands so sampled text-colored pixels are >10%
+			// of the box while still keeping background as majority.
+			strokeW := max(10, box.Dx()/3)
+			strokeH := max(2, box.Dy()/14)
+			for s := 0; s < 3; s++ {
+				sy := box.Min.Y + padY + s*(strokeH+2)
+				sx := box.Min.X + padX + s*4
+				st := image.Rect(sx, sy, sx+strokeW, sy+strokeH).Intersect(img.Bounds())
+				draw.Draw(img, st, image.NewUniform(ink), image.Point{}, draw.Src)
+			}
+		}
+
+		p := filepath.Join(os.TempDir(), name)
+		f, err := os.Create(p)
+		if err != nil {
+			log.Fatalf("create canvas %s: %v", name, err)
+		}
+		defer f.Close()
+		if err := png.Encode(f, img); err != nil {
+			log.Fatalf("encode canvas %s: %v", name, err)
+		}
+		return p
+	}
+
 	render := func(canvasPath string, blocks []services.ImageTextBlock, translated []string, opts services.OverlayOptions, destName string) {
 		outPath, stats, err := services.DrawTextOnImageWithOptions(canvasPath, blocks, translated, opts)
 		if err != nil {
@@ -81,6 +179,10 @@ func main() {
 	}
 
 	opts := services.DefaultOverlayOptions()
+	before := services.DefaultOverlayOptions()
+	before.DisableFontStyleDetection = true
+	before.DisableColorSampling = true
+	after := services.DefaultOverlayOptions()
 
 	// ── 1. Arabic ─────────────────────────────────────────────────────────────
 	{
@@ -159,6 +261,96 @@ func main() {
 		layoutOpts.BgAlpha = 0
 		layoutOpts.EraseBBox = false
 		render(canvas, blocks, translated, layoutOpts, "layout_result")
+		os.Remove(canvas)
+	}
+
+	// ── 5. before/after: bold text style detection ──────────────────────────────
+	{
+		blocks := []services.ImageTextBlock{
+			{Text: "BOLD HEADING", Bbox: []float64{60, 70, 420, 130}},
+			{Text: "regular line", Bbox: []float64{60, 165, 420, 225}},
+		}
+		canvas := writeCanvasWithText(
+			"loklingo_before_after_bold.png", 920, 300,
+			blocks,
+			[]string{"BOLD HEADING", "regular line"},
+			[]color.RGBA{{20, 20, 20, 255}, {25, 25, 25, 255}},
+			[]bool{true, false},
+		)
+		translated := []string{
+			"BOLD HEADING",
+			"regular line",
+		}
+		render(canvas, blocks, translated, before, "before_bold_style")
+		render(canvas, blocks, translated, after, "after_bold_style")
+		os.Remove(canvas)
+	}
+
+	// ── 6. before/after: colored text preservation ──────────────────────────────
+	{
+		blocks := []services.ImageTextBlock{
+			{Text: "Status: WARNING", Bbox: []float64{60, 60, 860, 135}},
+			{Text: "Status: OK", Bbox: []float64{60, 150, 860, 225}},
+			{Text: "Status: ERROR", Bbox: []float64{60, 240, 860, 305}},
+		}
+		canvas := writeCanvasWithText(
+			"loklingo_before_after_colored.png", 920, 320,
+			blocks,
+			[]string{"Status: WARNING", "Status: OK", "Status: ERROR"},
+			[]color.RGBA{{235, 140, 20, 255}, {30, 160, 70, 255}, {210, 35, 40, 255}},
+			[]bool{false, false, true},
+		)
+		translated := []string{
+			"Status: WARNING",
+			"Status: OK",
+			"Status: ERROR",
+		}
+		render(canvas, blocks, translated, before, "before_colored_text")
+		render(canvas, blocks, translated, after, "after_colored_text")
+		os.Remove(canvas)
+	}
+
+	// ── 7. before/after: mixed styles (bold + colored + scripts) ──────────────
+	{
+		blocks := []services.ImageTextBlock{
+			{Text: "FEATURE ANNOUNCEMENT", Bbox: []float64{60, 65, 900, 145}},
+			{Text: "Localized status chip", Bbox: []float64{70, 185, 450, 260}},
+			{Text: "Mixed script subtitle", Bbox: []float64{490, 185, 900, 260}},
+			{Text: "日本語縦書きテキスト", Bbox: []float64{860, 300, 890, 565}},
+			{Text: "Arabic section title", Bbox: []float64{70, 320, 780, 395}},
+			{Text: "Body copy with normal style", Bbox: []float64{70, 425, 820, 560}},
+		}
+		canvas := writeCanvasWithText(
+			"loklingo_before_after_mixed.png", 980, 620,
+			blocks,
+			[]string{
+				"FEATURE ANNOUNCEMENT",
+				"Localized status chip",
+				"नमस्ते / Hello / مرحبا",
+				"日本語縦書きテキスト",
+				"عنوان عربي للاختبار",
+				"Body copy with normal style",
+			},
+			[]color.RGBA{
+				{32, 32, 32, 255},
+				{34, 128, 210, 255},
+				{176, 52, 114, 255},
+				{40, 40, 40, 255},
+				{20, 120, 120, 255},
+				{45, 45, 45, 255},
+			},
+			[]bool{true, false, false, false, true, false},
+		)
+		translated := []string{
+			"FEATURE ANNOUNCEMENT",
+			"Localized status chip",
+			"नमस्ते / Hello / مرحبا",
+			"日本語縦書きテキスト",
+			"عنوان عربي للاختبار",
+			"Body copy with normal style for mixed-style validation.",
+		}
+		render(canvas, blocks, translated, before, "before_mixed_styles")
+		render(canvas, blocks, translated, after, "after_mixed_styles")
 		os.Remove(canvas)
 	}
 }

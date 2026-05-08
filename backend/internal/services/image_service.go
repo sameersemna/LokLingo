@@ -39,6 +39,14 @@ const (
 	overlayLumThreshold    = 0.5
 	overlayPatchFeatherPx  = 2
 	overlayPatchBlurRadius = 1
+	// overlayFitOverflowPct is the fractional height tolerance allowed during
+	// font-size fitting.  A layout whose block height exceeds maxHeight by no
+	// more than this fraction is still accepted, preventing the fitter from
+	// dropping to the next smaller size solely due to sub-pixel rounding.
+	// 0.03 = 3 % – tight enough to avoid visible clipping, loose enough to
+	// prevent unnecessarily small text.
+	overlayFitOverflowPct = 0.03
+
 	// A box is considered strongly vertical when height is at least this multiple of width.
 	overlayVerticalAspectThreshold = 2.2
 	// Require most runes to be CJK before applying vertical rendering.
@@ -52,6 +60,12 @@ const (
 	overlayVerticalMinPadding = 2
 	// Draw a second ink pass offset by 1px to slightly thicken vertical glyphs.
 	overlayVerticalExtraStrokePx = 1
+	// overlayTextContrastThreshold is the minimum luminance difference between a
+	// sampled pixel and the estimated background required to classify that pixel
+	// as text ink during dominant-colour sampling.  0.20 (= 20 % luminance gap)
+	// is tight enough to skip near-background noise while still catching most
+	// coloured and monochrome text.
+	overlayTextContrastThreshold = 0.20
 )
 
 var overlayFontData = mustParseOverlayFont()
@@ -140,8 +154,9 @@ var fallbackFonts = []*fallbackFontEntry{
 }
 
 type overlayCandidate struct {
-	box  image.Rectangle
-	text string
+	box          image.Rectangle
+	text         string
+	originalText string // OCR source text; used for font-style detection
 }
 
 // ImageTextBlock represents one OCR block with an axis-aligned bbox [x1, y1, x2, y2].
@@ -225,7 +240,7 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 		if !ok {
 			continue
 		}
-		candidates = append(candidates, overlayCandidate{box: image.Rect(x1, y1, x2, y2), text: translated})
+		candidates = append(candidates, overlayCandidate{box: image.Rect(x1, y1, x2, y2), text: translated, originalText: blk.Text})
 	}
 	sortOverlayCandidates(candidates)
 	drawn := make([]overlayCandidate, 0, count)
@@ -285,6 +300,17 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 			continue
 		}
 
+		blockStyle := BlockFontStyle{}
+		if !opts.DisableFontStyleDetection {
+			// Detect font style on original pixels before erasing.
+			blockStyle = detectBlockFontStyle(rgba, box, candidate.originalText)
+		}
+		inkColor := color.Color(inkColorForBackground(avgRegionLuminance(rgba, box)))
+		if !opts.DisableColorSampling {
+			// Sample dominant text colour before erasing — preserves original ink style.
+			inkColor = sampleDominantTextColor(rgba, box)
+		}
+
 		if opts.EraseBBox {
 			// Erase original OCR text using a gradient-preserving patch fill so that
 			// gradients and shadows are reproduced instead of a flat color block.
@@ -313,25 +339,24 @@ func DrawTextOnImageWithOptions(imagePath string, blocks []ImageTextBlock, trans
 		baselineY := box.Min.Y + pad + vertOffset + layout.topInset + ascent
 		baselineY += baselineScriptOffset(candidate.text, layout.fontSize)
 
-		// Choose ink based on the erased background region luminance.
-		srcLum := avgRegionLuminance(rgba, box)
-		inkColor := inkColorForBackground(srcLum)
 		rtl := isRTLText(candidate.text)
 		for _, line := range layout.lines {
 			if baselineY > box.Max.Y-pad {
 				break
 			}
 			renderLine := reorderBidiForRendering(line)
+			lineWidth := measureLinePx(renderLine, layout.fontSize)
+			nRunes := len([]rune(renderLine))
+			ls := computeLetterSpacing(lineWidth, box.Dx()-2*pad, nRunes, blockStyle)
 			dotX := box.Min.X + pad
 			if rtl {
-				// Right-align each line for RTL scripts (Arabic, Hebrew).
-				lineWidth := measureLinePx(renderLine, layout.fontSize)
+				// Right-align each RTL line.
 				dotX = box.Max.X - pad - lineWidth
 				if dotX < box.Min.X+pad {
 					dotX = box.Min.X + pad
 				}
 			}
-			drawTextLine(rgba, layout.fontSize, renderLine, dotX, baselineY, inkColor, box)
+			drawTextLineWithStyle(rgba, layout.fontSize, renderLine, dotX, baselineY, inkColor, box, blockStyle, ls)
 			baselineY += layout.lineHeight
 		}
 		drawn = append(drawn, candidate)
@@ -539,43 +564,81 @@ func drawTextLine(dst *image.RGBA, fontSize float64, line string, dotX, baseline
 	drawTextLineStyled(dst, fontSize, line, dotX, baselineY, inkColor, clipRect, 0)
 }
 
+// drawTextLineWithStyle is like drawTextLine but selects a font face that
+// matches the detected BlockFontStyle (bold, serif, mono) for Latin segments.
+// It also computes adaptive stroke passes via computeStrokeOffsets.
+func drawTextLineWithStyle(dst *image.RGBA, fontSize float64, line string, dotX, baselineY int, inkColor color.Color, clipRect image.Rectangle, style BlockFontStyle, letterSpacing fixed.Int26_6) {
+	strokes := computeStrokeOffsets(style, fontSize)
+	drawTextLineStyledWithFont(dst, fontSize, line, dotX, baselineY, inkColor, clipRect, strokes, style, letterSpacing)
+}
+
 // drawTextLineStyled renders text like drawTextLine and optionally adds a small
 // extra ink pass offset horizontally to slightly thicken glyphs.
 func drawTextLineStyled(dst *image.RGBA, fontSize float64, line string, dotX, baselineY int, inkColor color.Color, clipRect image.Rectangle, extraInkX int) {
+	var strokes []strokeOffset
+	if extraInkX > 0 {
+		strokes = []strokeOffset{{extraInkX, 0}}
+	}
+	drawTextLineStyledWithFont(dst, fontSize, line, dotX, baselineY, inkColor, clipRect, strokes, BlockFontStyle{}, 0)
+}
+
+// drawTextLineStyledWithFont is the core text-drawing primitive.  It renders
+// line at (dotX, baselineY) with a drop-shadow, splitting the text into
+// script segments so each segment uses the appropriate font family.  When
+// style is non-zero, Latin segments are drawn with the matching Noto variant
+// (bold, serif, or mono); non-Latin segments always use the script-coverage
+// fallback chain.
+// strokes lists extra ink passes (dx,dy offsets) applied after the primary draw
+// to simulate stroke weight; see computeStrokeOffsets for the selection logic.
+// letterSpacing is a fixed.Int26_6 offset added to the dot after each glyph
+// (except the last), providing adaptive per-line letter-spacing adjustment.
+// Pass nil/0 for the defaults.
+func drawTextLineStyledWithFont(dst *image.RGBA, fontSize float64, line string, dotX, baselineY int, inkColor color.Color, clipRect image.Rectangle, strokes []strokeOffset, style BlockFontStyle, letterSpacing fixed.Int26_6) {
 	clipped := dst.SubImage(clipRect).(*image.RGBA)
 	shadow := shadowColorFor(inkColor)
 	dot := fixed.P(dotX, baselineY)
-	for _, seg := range splitIntoScriptSegments(line) {
-		face, err := segFace(seg, fontSize)
+	shadowSrc := image.NewUniform(shadow)
+	inkSrc := image.NewUniform(inkColor)
+	segs := splitIntoScriptSegments(line)
+	// Pre-count total runes so we know when to omit the trailing gap.
+	totalRunes := 0
+	for _, seg := range segs {
+		totalRunes += len([]rune(seg.text))
+	}
+	runesDone := 0
+	for _, seg := range segs {
+		face, err := segFaceStyled(seg, fontSize, style)
 		if err != nil {
 			continue
 		}
-		// Shadow: offset +1,+1 from current ink position.
-		sd := &font.Drawer{
-			Dst:  clipped,
-			Src:  image.NewUniform(shadow),
-			Face: face,
-			Dot:  fixed.P(dot.X.Ceil()+1, baselineY+1),
-		}
-		sd.DrawString(seg.text)
-		// Ink: draw at current dot, advance dot for next segment.
-		d := &font.Drawer{
-			Dst:  clipped,
-			Src:  image.NewUniform(inkColor),
-			Face: face,
-			Dot:  dot,
-		}
-		d.DrawString(seg.text)
-		if extraInkX > 0 {
-			bd := &font.Drawer{
-				Dst:  clipped,
-				Src:  image.NewUniform(inkColor),
-				Face: face,
-				Dot:  fixed.P(dot.X.Ceil()+extraInkX, baselineY),
+		if letterSpacing == 0 {
+			// Fast path: draw whole segment at once.
+			(&font.Drawer{Dst: clipped, Src: shadowSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+1, baselineY+1)}).DrawString(seg.text)
+			d := &font.Drawer{Dst: clipped, Src: inkSrc, Face: face, Dot: dot}
+			d.DrawString(seg.text)
+			for _, so := range strokes {
+				(&font.Drawer{Dst: clipped, Src: inkSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+so.dx, baselineY+so.dy)}).DrawString(seg.text)
 			}
-			bd.DrawString(seg.text)
+			runesDone += len([]rune(seg.text))
+			dot = d.Dot
+		} else {
+			// Spacing path: draw rune-by-rune, inserting letterSpacing between each
+			// adjacent pair of glyphs (gap count = totalRunes-1 across all segments).
+			for _, r := range []rune(seg.text) {
+				runesDone++
+				rs := string(r)
+				(&font.Drawer{Dst: clipped, Src: shadowSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+1, baselineY+1)}).DrawString(rs)
+				d := &font.Drawer{Dst: clipped, Src: inkSrc, Face: face, Dot: dot}
+				d.DrawString(rs)
+				for _, so := range strokes {
+					(&font.Drawer{Dst: clipped, Src: inkSrc, Face: face, Dot: fixed.P(dot.X.Ceil()+so.dx, baselineY+so.dy)}).DrawString(rs)
+				}
+				dot = d.Dot
+				if runesDone < totalRunes {
+					dot.X += letterSpacing
+				}
+			}
 		}
-		dot = d.Dot
 	}
 }
 
@@ -655,11 +718,13 @@ func drawVerticalTextBlock(dst *image.RGBA, candidate overlayCandidate, box imag
 		maxGlyphW += extraStrokeW
 
 		if textH <= box.Dy() && maxGlyphW <= availW {
+			inkColor := color.Color(inkColorForBackground(avgRegionLuminance(dst, box)))
+			if !opts.DisableColorSampling {
+				inkColor = sampleDominantTextColor(dst, box)
+			}
 			if opts.EraseBBox {
 				patchFillBBoxWithOptions(dst, box, opts)
 			}
-			srcLum := avgRegionLuminance(dst, box)
-			inkColor := inkColorForBackground(srcLum)
 
 			nGlyphs := len(runes)
 			availContentH := box.Dy() - 2*pad
@@ -809,21 +874,36 @@ type OverlayOptions struct {
 	// bilinear-interpolated) to avoid flat color blocks and preserve texture.
 	// Default: true.
 	EraseBBox bool
+	// DisableFontStyleDetection bypasses OCR-source style detection and renders
+	// all Latin text with the default sans regular face. Default: false.
+	DisableFontStyleDetection bool
+	// DisableColorSampling bypasses dominant text-colour sampling from original
+	// pixels and falls back to black/white ink via background luminance.
+	// Default: false.
+	DisableColorSampling bool
 }
 
 // DefaultOverlayOptions returns the default rendering options that DrawTextOnImage uses.
 func DefaultOverlayOptions() OverlayOptions {
 	return OverlayOptions{
-		BgAlpha:         overlayBgAlpha,
-		MaxFontSize:     overlayMaxFontSize,
-		MinFontSize:     overlayMinFontSize,
-		JPEGQuality:     90,
-		TextPadding:     overlayTextPadding,
-		BboxShrinkPx:    overlayBboxShrinkPx,
-		PatchFeatherPx:  overlayPatchFeatherPx,
-		PatchBlurRadius: overlayPatchBlurRadius,
-		EraseBBox:       true,
+		BgAlpha:                   overlayBgAlpha,
+		MaxFontSize:               overlayMaxFontSize,
+		MinFontSize:               overlayMinFontSize,
+		JPEGQuality:               90,
+		TextPadding:               overlayTextPadding,
+		BboxShrinkPx:              overlayBboxShrinkPx,
+		PatchFeatherPx:            overlayPatchFeatherPx,
+		PatchBlurRadius:           overlayPatchBlurRadius,
+		EraseBBox:                 true,
+		DisableFontStyleDetection: false,
+		DisableColorSampling:      false,
 	}
+}
+
+// blockHeight returns the pixel height consumed by a text block with the
+// given parameters, matching the actual render formula used in the draw loop.
+func blockHeight(topInset, ascent, lineHeight, nLines int) int {
+	return topInset + ascent + (nLines-1)*lineHeight
 }
 
 func fitTextLayout(text string, maxWidth, maxHeight, minFontSize, maxFontSize int) textLayout {
@@ -831,8 +911,13 @@ func fitTextLayout(text string, maxWidth, maxHeight, minFontSize, maxFontSize in
 		return textLayout{}
 	}
 
-	startSize := min(maxFontSize, max(minFontSize, maxHeight))
-	for fontSize := startSize; fontSize >= minFontSize; fontSize-- {
+	// toleratedHeight is the maximum block height accepted during the fit loop.
+	// Allowing a small overflow (overlayFitOverflowPct = 3 %) prevents the
+	// fitter from downgrading to the next smaller font purely due to rounding,
+	// producing text that feels naturally sized rather than overly conservative.
+	toleratedHeight := int(math.Round(float64(maxHeight) * (1.0 + overlayFitOverflowPct)))
+
+	wrapAndMeasure := func(fontSize int) (lines []string, lineHeight, topInset, ascent int) {
 		measureFn := func(s string) int { return measureLinePx(s, float64(fontSize)) }
 		splitFn := func(word string, maxW int) (string, string) {
 			f, err := faceForText(word, float64(fontSize))
@@ -841,16 +926,36 @@ func fitTextLayout(text string, maxWidth, maxHeight, minFontSize, maxFontSize in
 			}
 			return fitWordToWidth(word, maxW, f)
 		}
-		lines := wrapLines(text, maxWidth, measureFn, splitFn)
+		return wrapLines(text, maxWidth, measureFn, splitFn),
+			approximateLineHeight(fontSize),
+			approximateTopInset(fontSize),
+			approximateAscent(fontSize)
+	}
+
+	startSize := min(maxFontSize, max(minFontSize, maxHeight))
+	for fontSize := startSize; fontSize >= minFontSize; fontSize-- {
+		lines, lineHeight, topInset, ascent := wrapAndMeasure(fontSize)
 		if len(lines) == 0 {
 			continue
 		}
-		lineHeight := approximateLineHeight(fontSize)
-		topInset := approximateTopInset(fontSize)
-		ascent := approximateAscent(fontSize)
-		// Match the actual render formula: topInset + ascent + (N-1)*lineHeight
-		// rather than the over-estimate topInset + N*lineHeight.
-		if topInset+ascent+(len(lines)-1)*lineHeight <= maxHeight {
+		// Accept if the block fits within the tolerated (slightly enlarged) height.
+		if blockHeight(topInset, ascent, lineHeight, len(lines)) <= toleratedHeight {
+			// Bias toward the next larger size when that size also fits within
+			// the tolerated height and produces no extra lines.  This avoids
+			// the conservative one-step-too-small result that occurs at size
+			// boundaries where the difference is sub-pixel rounding.
+			if fontSize < maxFontSize {
+				largerLines, largerLH, largerTI, largerAscent := wrapAndMeasure(fontSize + 1)
+				if len(largerLines) == len(lines) &&
+					blockHeight(largerTI, largerAscent, largerLH, len(largerLines)) <= toleratedHeight {
+					return textLayout{
+						fontSize:   float64(fontSize + 1),
+						lineHeight: largerLH,
+						topInset:   largerTI,
+						lines:      largerLines,
+					}
+				}
+			}
 			return textLayout{
 				fontSize:   float64(fontSize),
 				lineHeight: lineHeight,
@@ -860,22 +965,13 @@ func fitTextLayout(text string, maxWidth, maxHeight, minFontSize, maxFontSize in
 		}
 	}
 
+	// No size fit within the tolerated height – fall back to minFontSize and
+	// truncate lines that cannot be accommodated.
 	fontSize := minFontSize
-	lineHeight := approximateLineHeight(fontSize)
-	topInset := approximateTopInset(fontSize)
+	lines, lineHeight, topInset, ascent := wrapAndMeasure(fontSize)
 	measureFn := func(s string) int { return measureLinePx(s, float64(fontSize)) }
-	splitFn := func(word string, maxW int) (string, string) {
-		f, err := faceForText(word, float64(fontSize))
-		if err != nil {
-			return word, ""
-		}
-		return fitWordToWidth(word, maxW, f)
-	}
-	lines := wrapLines(text, maxWidth, measureFn, splitFn)
-	// How many lines fit: topInset + ascent + (N-1)*lineHeight <= maxHeight
-	// => N <= (maxHeight - topInset - ascent) / lineHeight + 1
-	ascent := approximateAscent(fontSize)
-	maxLines := max(1, (maxHeight-topInset-ascent)/lineHeight+1)
+	// How many lines fit: topInset + ascent + (N-1)*lineHeight <= toleratedHeight
+	maxLines := max(1, (toleratedHeight-topInset-ascent)/lineHeight+1)
 	if len(lines) > maxLines {
 		lines = truncateWithEllipsisFn(lines, maxLines, maxWidth, measureFn)
 	}
@@ -1012,11 +1108,14 @@ func approximateLineHeight(fontSize int) int {
 	if fontSize <= 0 {
 		return 1
 	}
-	// Readability target: around 1.24x of font size, with hard bounds to avoid
-	// cramped (too tight) or overly airy (too loose) line spacing.
-	target := int(math.Round(float64(fontSize) * 1.24))
+	// Readability target: 1.18× font size.  Tighter than the previous 1.24×
+	// so the fitter can fit the same text at a slightly larger font without
+	// the line spacing alone causing a size downgrade.
+	// Hard bounds: minimum = fontSize + overlayLineSpacing (no cramping),
+	// maximum = fontSize + 9 (not overly airy).
+	target := int(math.Round(float64(fontSize) * 1.18))
 	minH := fontSize + overlayLineSpacing
-	maxH := fontSize + 8
+	maxH := fontSize + 9
 	if target < minH {
 		return minH
 	}
@@ -1027,8 +1126,9 @@ func approximateLineHeight(fontSize int) int {
 }
 
 func approximateTopInset(fontSize int) int {
-	// Add a small font-size-based inset so larger fonts do not feel glued to the top edge.
-	return max(1, int(math.Round(float64(fontSize)*0.15)))
+	// Reduced from 0.15 to 0.10 so the top inset does not consume vertical
+	// space that could otherwise allow a slightly larger font to fit.
+	return max(1, int(math.Round(float64(fontSize)*0.10)))
 }
 
 // approximateAscent returns a conservative pixel estimate of the font ascent
@@ -1548,6 +1648,56 @@ func inkColorForBackground(srcLum float64) color.Color {
 	return color.White
 }
 
+// colorLuminance returns the NTSC perceptual luminance [0,1] of c.
+func colorLuminance(c color.RGBA) float64 {
+	return 0.299*float64(c.R)/255 + 0.587*float64(c.G)/255 + 0.114*float64(c.B)/255
+}
+
+// sampleDominantTextColor samples pixel colours inside box on img (which must
+// still hold the original, un-erased pixels) and returns the estimated
+// dominant text-ink colour.
+//
+// Strategy:
+//  1. Compute the per-channel median of sampled pixels as the background colour
+//     estimate (median is robust to ink outliers while background is the majority).
+//  2. Collect sampled pixels whose luminance deviates from the background by at
+//     least overlayTextContrastThreshold — these are the text-ink candidates.
+//  3. Average the ink-candidate pixels and return that colour.
+//  4. If fewer than 10 % of sampled pixels qualify (very low-contrast box, or
+//     already-erased region), fall back to inkColorForBackground for legibility.
+func sampleDominantTextColor(img *image.RGBA, box image.Rectangle) color.Color {
+	r := box.Intersect(img.Bounds())
+	if r.Empty() {
+		return inkColorForBackground(1.0)
+	}
+	bg := medianRegionColor(img, r)
+	bgLum := colorLuminance(bg)
+	step := max(1, min(r.Dx(), r.Dy())/16)
+	var sumR, sumG, sumB uint64
+	textPx, totalPx := 0, 0
+	for y := r.Min.Y; y < r.Max.Y; y += step {
+		for x := r.Min.X; x < r.Max.X; x += step {
+			totalPx++
+			c := img.RGBAAt(x, y)
+			if math.Abs(colorLuminance(c)-bgLum) >= overlayTextContrastThreshold {
+				sumR += uint64(c.R)
+				sumG += uint64(c.G)
+				sumB += uint64(c.B)
+				textPx++
+			}
+		}
+	}
+	if textPx < max(1, totalPx/10) {
+		return inkColorForBackground(bgLum)
+	}
+	return color.RGBA{
+		R: uint8(sumR / uint64(textPx)),
+		G: uint8(sumG / uint64(textPx)),
+		B: uint8(sumB / uint64(textPx)),
+		A: 255,
+	}
+}
+
 // cachedAscent returns face.Metrics().Ascent.Ceil() for fontSize, caching the
 // result in cache so the Metrics() walk is amortised across the draw loop.
 func cachedAscent(face font.Face, cache *sync.Map, fontSize float64) int {
@@ -1918,6 +2068,75 @@ func measureLinePx(line string, fontSize float64) int {
 		total += measureStringPx(face, seg.text)
 	}
 	return total
+}
+
+// computeLetterSpacing returns a fixed.Int26_6 per-inter-glyph spacing delta for
+// one rendered line.  The approach:
+//
+//  1. Compute raw surplus/deficit per gap:
+//     rawPx = (availWidth - textWidth) / (nRunes - 1)
+//  2. Dampen to 30 % so the adjustment stays subtle.
+//  3. Clamp to [-2, +2] px.
+//  4. Ignore micro-adjustments below ±0.25 px.
+//
+// Monospace blocks are exempt (their spacing is already uniform).
+// Returns 0 when the line has ≤ 1 rune or either dimension is zero.
+func computeLetterSpacing(textWidth, availWidth, nRunes int, style BlockFontStyle) fixed.Int26_6 {
+	if style.Class == monoFontClass || nRunes <= 1 || availWidth <= 0 || textWidth <= 0 {
+		return 0
+	}
+	gaps := nRunes - 1
+	rawPx := float64(availWidth-textWidth) / float64(gaps)
+	spacingPx := rawPx * 0.30
+	const maxSpacingPx = 2.0
+	if spacingPx > maxSpacingPx {
+		spacingPx = maxSpacingPx
+	} else if spacingPx < -maxSpacingPx {
+		spacingPx = -maxSpacingPx
+	}
+	// Skip sub-quarter-pixel adjustments to avoid invisible micro-jitter.
+	if spacingPx > -0.25 && spacingPx < 0.25 {
+		return 0
+	}
+	return fixed.Int26_6(math.Round(spacingPx * 64))
+}
+
+// strokeOffset is a pixel (dx, dy) pair for an additional ink draw pass.
+type strokeOffset struct{ dx, dy int }
+
+// computeStrokeOffsets returns the set of extra ink passes needed to give text
+// consistent visual weight across scripts and font styles.
+//
+// Strategy (first matching rule applies):
+//
+//   - Monospace: no extra passes — character shape precision is paramount.
+//   - Any style, fontSize > 24: no extra passes — large glyphs already look heavy
+//     and extra passes visibly blur them.
+//   - Bold: cross-thickening with two passes (+1,0) and (0,+1).  This broadens
+//     already-heavy strokes without requiring a third axis.
+//   - Serif: no extra passes — serif contrast (thick/thin strokes) is intentional;
+//     uniform thickening would destroy the rhythm.
+//   - Normal sans at fontSize ≤ 16: one subtle horizontal pass (+1,0).  Small
+//     sans glyphs can appear thin at low DPI; a single pixel broadens them just
+//     enough to read clearly without looking blurry.
+func computeStrokeOffsets(style BlockFontStyle, fontSize float64) []strokeOffset {
+	if style.Class == monoFontClass {
+		return nil
+	}
+	if fontSize > 24 {
+		return nil
+	}
+	if style.Bold {
+		return []strokeOffset{{1, 0}, {0, 1}}
+	}
+	if style.Class == serifFontClass {
+		return nil
+	}
+	// Normal/sans at small sizes — single subtle horizontal pass.
+	if fontSize <= 16 {
+		return []strokeOffset{{1, 0}}
+	}
+	return nil
 }
 
 func mustParseOverlayFont() *opentype.Font {
