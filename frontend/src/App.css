@@ -1,3 +1,41 @@
+/* ── Bundled script fonts ──────────────────────────────────────────────────
+   These @font-face declarations reference font files copied into /public/fonts
+   at build time, guaranteeing Arabic, Devanagari, and Bengali rendering in
+   every environment without relying on system fonts being installed.
+   ──────────────────────────────────────────────────────────────────────── */
+
+@font-face {
+  font-family: 'NotoSansArabic';
+  src: url('/fonts/NotoSansArabic-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'NotoNaskhArabic';
+  src: url('/fonts/NotoNaskhArabic-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'NotoSansDevanagari';
+  src: url('/fonts/NotoSansDevanagari-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'NotoSansBengali';
+  src: url('/fonts/NotoSansBengali-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 *,
 *::before,
 *::after {
@@ -31,7 +69,9 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: system-ui, -apple-system, sans-serif,
+    'NotoSansArabic', 'NotoNaskhArabic',
+    'NotoSansDevanagari', 'NotoSansBengali';
   min-height: 100vh;
   transition: background 0.2s, color 0.2s;
   -webkit-font-smoothing: antialiased;

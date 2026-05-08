@@ -105,6 +105,7 @@ var fallbackAscentCache sync.Map
 type fallbackFontEntry struct {
 	name      string
 	paths     []string
+	embedData []byte // compiled-in bytes used when all system paths fail
 	once      sync.Once
 	data      *opentype.Font // nil if not found on this system
 	faceCache sync.Map
@@ -150,15 +151,48 @@ var fallbackFonts = []*fallbackFontEntry{
 		paths: []string{
 			// Alpine (apk font-noto-arabic)
 			"/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
-			"/usr/share/fonts/noto/NotoNaskhArabic-Regular.ttf",
 			// Debian/Ubuntu
 			"/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-			"/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
 			"/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
-			"/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
 			"/usr/share/fonts/google-noto/NotoSansArabic-Regular.ttf",
+		},
+		embedData: embeddedNotoSansArabic,
+	},
+	{
+		name: "NotoNaskhArabic",
+		paths: []string{
+			// Alpine (apk font-noto-arabic)
+			"/usr/share/fonts/noto/NotoNaskhArabic-Regular.ttf",
+			// Debian/Ubuntu
+			"/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+			"/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
 			"/usr/share/fonts/google-noto/NotoNaskhArabic-Regular.ttf",
 		},
+		embedData: embeddedNotoNaskhArabic,
+	},
+	{
+		name: "NotoSansDevanagari",
+		paths: []string{
+			// Alpine (apk font-noto-devanagari)
+			"/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf",
+			// Debian/Ubuntu
+			"/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+			"/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
+			"/usr/share/fonts/google-noto/NotoSansDevanagari-Regular.ttf",
+		},
+		embedData: embeddedNotoSansDevanagari,
+	},
+	{
+		name: "NotoSansBengali",
+		paths: []string{
+			// Alpine (apk font-noto-bengali)
+			"/usr/share/fonts/noto/NotoSansBengali-Regular.ttf",
+			// Debian/Ubuntu
+			"/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+			"/usr/share/fonts/opentype/noto/NotoSansBengali-Regular.ttf",
+			"/usr/share/fonts/google-noto/NotoSansBengali-Regular.ttf",
+		},
+		embedData: embeddedNotoSansBengali,
 	},
 	{
 		name: "DejaVuSans",
@@ -1953,7 +1987,9 @@ func parseFont(data []byte) (*opentype.Font, error) {
 	return c.Font(0)
 }
 
-// load lazily loads the font for this entry, trying each candidate path in order.
+// load lazily loads the font for this entry, trying each candidate path in
+// order. If all system paths fail and embedData is set, the compiled-in bytes
+// are used as a guaranteed last resort.
 func (e *fallbackFontEntry) load() *opentype.Font {
 	e.once.Do(func() {
 		for _, p := range e.paths {
@@ -1966,7 +2002,13 @@ func (e *fallbackFontEntry) load() *opentype.Font {
 				continue
 			}
 			e.data = parsed
-			break
+			return
+		}
+		// All system paths failed — use embedded fallback bytes if available.
+		if len(e.embedData) > 0 {
+			if parsed, err := parseFont(e.embedData); err == nil {
+				e.data = parsed
+			}
 		}
 	})
 	return e.data
@@ -2031,25 +2073,53 @@ func fontCoverageWarning(text string) string {
 	if !needsFallbackFont(text) {
 		return ""
 	}
-	// Try each fallback; if any covers the text, we're fine.
+	// Build the set of loaded fonts once.
+	var loaded []*opentype.Font
 	for _, entry := range fallbackFonts {
-		f := entry.load()
-		if f == nil {
-			continue
-		}
-		if fontCoversText(f, text) {
-			return ""
+		if f := entry.load(); f != nil {
+			loaded = append(loaded, f)
 		}
 	}
-	// Identify which scripts are present in the text for a useful hint.
-	scripts := detectMissingScripts(text)
+	// Check every visible rune: as long as at least one font in the chain
+	// covers it, that rune will render correctly (faceForText segments per-rune).
+	// Only warn when a rune is uncovered by every font.
+	var missingScripts []string
+	seenScript := make(map[string]bool)
+	var buf sfnt.Buffer
+	for _, r := range text {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if !isFallbackRune(r) {
+			continue // Latin / basic covered by overlay font
+		}
+		covered := false
+		for _, f := range loaded {
+			if idx, err := f.GlyphIndex(&buf, r); err == nil && idx != 0 {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			scripts := detectMissingScripts(string(r))
+			for _, s := range scripts {
+				if !seenScript[s] {
+					seenScript[s] = true
+					missingScripts = append(missingScripts, s)
+				}
+			}
+		}
+	}
+	if len(missingScripts) == 0 {
+		return ""
+	}
 	snippet := text
 	if len([]rune(snippet)) > 20 {
 		snippet = string([]rune(snippet)[:20]) + "…"
 	}
 	return fmt.Sprintf(
 		"no system font covers %q (scripts: %s); install Noto fonts to fix tofu boxes",
-		snippet, strings.Join(scripts, ", "),
+		snippet, strings.Join(missingScripts, ", "),
 	)
 }
 
