@@ -98,6 +98,7 @@ func main() {
 
 	api := app.Group("/api/v1")
 	api.Post("/translate", translateHandler.Translate)
+	api.Post("/translate/image", translateHandler.TranslateImage)
 	api.Post("/jobs", jobsHandler.CreateJob)
 	api.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
 	api.Post("/jobs/image", jobsHandler.CreateImageJob)

@@ -27,6 +27,13 @@ const MAX_CHARS = 2000
 const HISTORY_KEY = "loklingo-history"
 const MAX_HISTORY = 10
 
+const DEMO_PRESETS = [
+  { id: "cjk",   label: "CJK text",    emoji: "🈳", src: "/samples/cjk_vertical.png",       source: "auto", target: "en" },
+  { id: "bold",  label: "Styled sign",  emoji: "🖋", src: "/samples/before_bold_style.png",  source: "en",   target: "de" },
+  { id: "mixed", label: "Mixed styles", emoji: "🎨", src: "/samples/before_mixed_styles.png", source: "en",   target: "fr" },
+  { id: "real",  label: "Real-world",   emoji: "📸", src: "/samples/realworld_overlay.jpg",   source: "auto", target: "en" },
+] as const
+
 interface Toast { id: number; msg: string; type: "success" | "error" }
 interface HistoryEntry {
   id: number
@@ -71,7 +78,7 @@ function App() {
   const [compareOverlayUrl, setCompareOverlayUrl] = useState<string | null>(null)
   const [compareLayoutUrl, setCompareLayoutUrl] = useState<string | null>(null)
   const [compareView, setCompareView] = useState<"side" | "slider">("side")
-  const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("overlay")
+  const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("layout")
   const [sliderPercent, setSliderPercent] = useState(50)
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
@@ -183,6 +190,28 @@ function App() {
     }
   }
 
+  const handleDownload = useCallback(async (url: string, basename: string) => {
+    try {
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      const ext = blob.type === "image/jpeg" ? "jpg"
+        : blob.type === "image/webp" ? "webp"
+        : blob.type === "image/gif"  ? "gif"
+        : "png"
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = blobUrl
+      a.download = `${basename}.${ext}`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Download failed", "error")
+    }
+  }, [pushToast])
+
   const handleSwap = () => {
     if (sourceLang === "auto") return
     setSourceLang(targetLang)
@@ -197,6 +226,69 @@ function App() {
     setCompareOverlayUrl(null)
     setCompareLayoutUrl(null)
     setDetectedLang("")
+  }
+
+  const runImageFile = async (file: File, src: string, tgt: string) => {
+    setOcrLoading(true)
+    try {
+      const originalUrl = URL.createObjectURL(file)
+      if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
+      setCompareOriginalUrl(originalUrl)
+
+      const [overlayRes, layoutRes] = await Promise.all([
+        translateImage(file, src, tgt, "overlay"),
+        translateImage(file, src, tgt, "layout"),
+      ])
+
+      if (!overlayRes.image_url || !layoutRes.image_url) {
+        throw new Error("Image comparison requires both overlay and layout outputs")
+      }
+
+      const activeRes = mode === "layout" ? layoutRes : overlayRes
+      setResult(activeRes.translated_text)
+      setResultImageUrl(activeRes.image_url ?? null)
+      setCompareOverlayUrl(overlayRes.image_url)
+      setCompareLayoutUrl(layoutRes.image_url)
+
+      if (src === "auto") {
+        const resolved = overlayRes.source && overlayRes.source !== "auto"
+          ? overlayRes.source
+          : layoutRes.source && layoutRes.source !== "auto"
+          ? layoutRes.source
+          : ""
+        if (resolved) setDetectedLang(resolved)
+      }
+      pushToast("Image translated", "success")
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Image translation failed", "error")
+    } finally {
+      setOcrLoading(false)
+      if (fileRef.current) fileRef.current.value = ""
+    }
+  }
+
+  const handleDemoPreset = async (preset: typeof DEMO_PRESETS[number]) => {
+    if (ocrLoading) return
+    setSourceLang(preset.source)
+    setTargetLang(preset.target)
+    setDetectedLang("")
+    setResult("")
+    setResultImageUrl(null)
+    setCompareOverlayUrl(null)
+    setCompareLayoutUrl(null)
+    if (compareOriginalUrl) {
+      URL.revokeObjectURL(compareOriginalUrl)
+      setCompareOriginalUrl(null)
+    }
+    try {
+      const res = await fetch(preset.src)
+      const blob = await res.blob()
+      const ext = preset.src.split(".").pop() ?? "png"
+      const file = new File([blob], `demo-${preset.id}.${ext}`, { type: blob.type || `image/${ext}` })
+      await runImageFile(file, preset.source, preset.target)
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Demo preset failed", "error")
+    }
   }
 
   const handleOCRFile = async (file: File) => {
@@ -230,44 +322,7 @@ function App() {
       pushToast("Please upload an image or PDF file", "error")
       return
     }
-    setOcrLoading(true)
-    try {
-      const originalUrl = URL.createObjectURL(file)
-      if (compareOriginalUrl) {
-        URL.revokeObjectURL(compareOriginalUrl)
-      }
-      setCompareOriginalUrl(originalUrl)
-
-      const [overlayRes, layoutRes] = await Promise.all([
-        translateImage(file, sourceLang, targetLang, "overlay"),
-        translateImage(file, sourceLang, targetLang, "layout"),
-      ])
-
-      if (!overlayRes.image_url || !layoutRes.image_url) {
-        throw new Error("Image comparison requires both overlay and layout outputs")
-      }
-
-      const activeRes = mode === "layout" ? layoutRes : overlayRes
-      setResult(activeRes.translated_text)
-      setResultImageUrl(activeRes.image_url ?? null)
-      setCompareOverlayUrl(overlayRes.image_url)
-      setCompareLayoutUrl(layoutRes.image_url)
-
-      if (sourceLang === "auto") {
-        const resolved = overlayRes.source && overlayRes.source !== "auto"
-          ? overlayRes.source
-          : layoutRes.source && layoutRes.source !== "auto"
-          ? layoutRes.source
-          : ""
-        if (resolved) setDetectedLang(resolved)
-      }
-      pushToast("Image translated", "success")
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Image translation failed", "error")
-    } finally {
-      setOcrLoading(false)
-      if (fileRef.current) fileRef.current.value = ""
-    }
+    await runImageFile(file, sourceLang, targetLang)
   }
 
   const langLabel = (code: string) =>
@@ -401,6 +456,38 @@ function App() {
       )}
 
       <main className="translator">
+        {/* Demo presets */}
+        <div className="demo-presets" role="group" aria-label="Demo presets">
+          <span className="demo-presets-label">Try a sample:</span>
+          {DEMO_PRESETS.map(preset => (
+            <button
+              key={preset.id}
+              type="button"
+              className="demo-preset-btn"
+              disabled={ocrLoading}
+              onClick={() => handleDemoPreset(preset)}
+              title={`${preset.label} — ${preset.source === "auto" ? "auto" : preset.source} → ${preset.target}`}
+            >
+              <span className="demo-preset-thumb-wrap">
+                <img
+                  className="demo-preset-thumb"
+                  src={preset.src}
+                  alt=""
+                  loading="lazy"
+                  aria-hidden="true"
+                />
+              </span>
+              <span className="demo-preset-info">
+                <span className="demo-preset-emoji">{preset.emoji}</span>
+                <span className="demo-preset-name">{preset.label}</span>
+                <span className="demo-preset-langs">
+                  {preset.source === "auto" ? "auto" : preset.source.toUpperCase()} → {preset.target.toUpperCase()}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+
         <div className="lang-selectors">
           <div className="lang-select-wrap">
             <select
@@ -520,97 +607,7 @@ function App() {
               ) : (
                 <>
                   <div className="result-text">{result}</div>
-                  {compareOriginalUrl && compareOverlayUrl && compareLayoutUrl && (
-                    <section className="comparison-wrap" aria-label="Image comparison">
-                      <div className="comparison-controls">
-                        <div className="comparison-segment" role="group" aria-label="Comparison layout">
-                          <button
-                            type="button"
-                            className={`icon-btn${compareView === "side" ? " is-active" : ""}`}
-                            onClick={() => setCompareView("side")}
-                          >
-                            Side-by-side
-                          </button>
-                          <button
-                            type="button"
-                            className={`icon-btn${compareView === "slider" ? " is-active" : ""}`}
-                            onClick={() => setCompareView("slider")}
-                          >
-                            Slider
-                          </button>
-                        </div>
-                        {compareView === "slider" && (
-                          <div className="comparison-segment" role="group" aria-label="Slider target">
-                            <button
-                              type="button"
-                              className={`icon-btn${sliderTarget === "overlay" ? " is-active" : ""}`}
-                              onClick={() => setSliderTarget("overlay")}
-                            >
-                              Compare Overlay
-                            </button>
-                            <button
-                              type="button"
-                              className={`icon-btn${sliderTarget === "layout" ? " is-active" : ""}`}
-                              onClick={() => setSliderTarget("layout")}
-                            >
-                              Compare Layout
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      {compareView === "side" ? (
-                        <div className="comparison-grid">
-                          <figure className="compare-card">
-                            <figcaption>Original</figcaption>
-                            <img src={compareOriginalUrl} alt="Original image" loading="lazy" />
-                          </figure>
-                          <figure className="compare-card">
-                            <figcaption>Overlay result</figcaption>
-                            <img src={compareOverlayUrl} alt="Overlay translation result" loading="lazy" />
-                          </figure>
-                          <figure className="compare-card">
-                            <figcaption>Layout result</figcaption>
-                            <img src={compareLayoutUrl} alt="Layout translation result" loading="lazy" />
-                          </figure>
-                        </div>
-                      ) : (
-                        <div className="compare-slider-wrap">
-                          <div className="compare-slider-frame" aria-live="polite">
-                            <img
-                              className="compare-slider-base"
-                              src={compareOriginalUrl}
-                              alt="Original image"
-                              loading="lazy"
-                            />
-                            <div
-                              className="compare-slider-overlay"
-                              style={{ width: `${sliderPercent}%` }}
-                              aria-hidden="true"
-                            >
-                              <img
-                                src={sliderTarget === "overlay" ? compareOverlayUrl : compareLayoutUrl}
-                                alt=""
-                                loading="lazy"
-                              />
-                            </div>
-                            <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
-                          </div>
-                          <label className="compare-slider-label">
-                            Reveal {sliderTarget === "overlay" ? "overlay" : "layout"} result
-                            <input
-                              type="range"
-                              min={0}
-                              max={100}
-                              value={sliderPercent}
-                              onChange={e => setSliderPercent(Number(e.target.value))}
-                            />
-                          </label>
-                        </div>
-                      )}
-                    </section>
-                  )}
-                  {resultImageUrl && (
+                  {resultImageUrl && !(compareOverlayUrl && compareLayoutUrl) && (
                     <div className="result-image-wrap">
                       <img
                         className="result-image"
@@ -633,6 +630,142 @@ function App() {
             )}
           </div>
         </div>
+
+        {/* Loading indicator while both translation modes process */}
+        {ocrLoading && compareOriginalUrl && (
+          <div className="comparison-loading">
+            <span className="spinner" aria-hidden="true" />
+            Processing overlay &amp; layout — hang tight…
+          </div>
+        )}
+
+        {/* Full-width three-panel image comparison */}
+        {!ocrLoading && compareOriginalUrl && compareOverlayUrl && compareLayoutUrl && (
+          <section className="comparison-wrap comparison-wrap--full" aria-label="Image comparison">
+            <div className="comparison-controls">
+              <div className="comparison-segment" role="group" aria-label="Comparison layout">
+                <button
+                  type="button"
+                  className={`icon-btn${compareView === "side" ? " is-active" : ""}`}
+                  onClick={() => setCompareView("side")}
+                >
+                  Side-by-side
+                </button>
+                <button
+                  type="button"
+                  className={`icon-btn${compareView === "slider" ? " is-active" : ""}`}
+                  onClick={() => setCompareView("slider")}
+                >
+                  Slider
+                </button>
+              </div>
+              {compareView === "slider" && (
+                <div className="comparison-segment" role="group" aria-label="Slider target">
+                  <button
+                    type="button"
+                    className={`icon-btn${sliderTarget === "overlay" ? " is-active" : ""}`}
+                    onClick={() => setSliderTarget("overlay")}
+                  >
+                    vs Overlay
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${sliderTarget === "layout" ? " is-active" : ""}`}
+                    onClick={() => setSliderTarget("layout")}
+                  >
+                    vs Layout
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {compareView === "side" ? (
+              <div className="comparison-grid">
+                <figure className="compare-card">
+                  <figcaption>Original</figcaption>
+                  <img src={compareOriginalUrl} alt="Original image" loading="lazy" />
+                </figure>
+                <figure className="compare-card">
+                  <div className="compare-card-header">
+                    <figcaption>Overlay result</figcaption>
+                    <button
+                      type="button"
+                      className="icon-btn compare-dl-btn"
+                      title="Download overlay result"
+                      onClick={() => handleDownload(compareOverlayUrl, "overlay-translation")}
+                    >
+                      ⬇ Download
+                    </button>
+                  </div>
+                  <img src={compareOverlayUrl} alt="Overlay translation result" loading="lazy" />
+                </figure>
+                <figure className="compare-card">
+                  <div className="compare-card-header">
+                    <figcaption>Layout result</figcaption>
+                    <button
+                      type="button"
+                      className="icon-btn compare-dl-btn"
+                      title="Download layout result"
+                      onClick={() => handleDownload(compareLayoutUrl, "layout-translation")}
+                    >
+                      ⬇ Download
+                    </button>
+                  </div>
+                  <img src={compareLayoutUrl} alt="Layout translation result" loading="lazy" />
+                </figure>
+              </div>
+            ) : (
+              <div className="compare-slider-wrap">
+                <div className="compare-slider-frame" aria-live="polite">
+                  <img
+                    className="compare-slider-base"
+                    src={compareOriginalUrl}
+                    alt="Original image"
+                    loading="lazy"
+                  />
+                  <div
+                    className="compare-slider-overlay"
+                    style={{ width: `${sliderPercent}%` }}
+                    aria-hidden="true"
+                  >
+                    <img
+                      src={sliderTarget === "overlay" ? compareOverlayUrl : compareLayoutUrl}
+                      alt=""
+                      loading="lazy"
+                    />
+                  </div>
+                  <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
+                </div>
+                <label className="compare-slider-label">
+                  Original vs {sliderTarget === "overlay" ? "overlay" : "layout"} — drag to reveal
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={sliderPercent}
+                    onChange={e => setSliderPercent(Number(e.target.value))}
+                  />
+                </label>
+                <div className="compare-dl-row">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => handleDownload(compareOverlayUrl, "overlay-translation")}
+                  >
+                    ⬇ Download Overlay
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => handleDownload(compareLayoutUrl, "layout-translation")}
+                  >
+                    ⬇ Download Layout
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
 
         <div className="actions">
           <span className="hint">Ctrl+Enter to translate</span>
