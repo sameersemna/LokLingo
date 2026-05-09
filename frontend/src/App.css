@@ -1575,6 +1575,10 @@ body {
   background: var(--surface);
 }
 
+.compare-clickable {
+  cursor: zoom-in;
+}
+
 .comparison-wrap--full .compare-card img {
   height: 260px;
 }
@@ -1659,6 +1663,43 @@ body {
 
 .compare-slider-label input[type="range"] {
   width: 100%;
+}
+
+.image-preview-modal {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, #000 78%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 1200;
+}
+
+.image-preview-modal-card {
+  width: min(1200px, 96vw);
+  max-height: 92vh;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.image-preview-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.image-preview-modal-img {
+  width: 100%;
+  max-height: calc(92vh - 56px);
+  object-fit: contain;
+  background: var(--surface);
 }
 
 .result-image {

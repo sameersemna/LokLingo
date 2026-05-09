@@ -94,6 +94,7 @@ function App() {
   const [compareView, setCompareView] = useState<"side" | "slider">("side")
   const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("layout")
   const [sliderPercent, setSliderPercent] = useState(50)
+  const [previewModal, setPreviewModal] = useState<{ src: string; title: string } | null>(null)
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -284,11 +285,15 @@ function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && previewModal) {
+        setPreviewModal(null)
+        return
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") handleTranslate()
     }
     window.addEventListener("keydown", handler)
     return () => window.removeEventListener("keydown", handler)
-  }, [handleTranslate])
+  }, [handleTranslate, previewModal])
 
   const handleCopy = async () => {
     if (!result) return
@@ -1009,7 +1014,13 @@ function App() {
               <div className="comparison-grid">
                 <figure className="compare-card">
                   <figcaption>Original</figcaption>
-                  <img src={compareOriginalUrl} alt="Original image" loading="lazy" />
+                  <img
+                    src={compareOriginalUrl}
+                    alt="Original image"
+                    loading="lazy"
+                    className="compare-clickable"
+                    onClick={() => setPreviewModal({ src: compareOriginalUrl, title: "Original" })}
+                  />
                 </figure>
                 <figure className="compare-card">
                   <div className="compare-card-header">
@@ -1023,7 +1034,13 @@ function App() {
                       ⬇ Download
                     </button>
                   </div>
-                  <img src={compareOverlayUrl} alt="Overlay translation result" loading="lazy" />
+                  <img
+                    src={compareOverlayUrl}
+                    alt="Overlay translation result"
+                    loading="lazy"
+                    className="compare-clickable"
+                    onClick={() => setPreviewModal({ src: compareOverlayUrl, title: "Overlay result" })}
+                  />
                 </figure>
                 <figure className="compare-card">
                   <div className="compare-card-header">
@@ -1037,7 +1054,13 @@ function App() {
                       ⬇ Download
                     </button>
                   </div>
-                  <img src={compareLayoutUrl} alt="Layout translation result" loading="lazy" />
+                  <img
+                    src={compareLayoutUrl}
+                    alt="Layout translation result"
+                    loading="lazy"
+                    className="compare-clickable"
+                    onClick={() => setPreviewModal({ src: compareLayoutUrl, title: "Layout result" })}
+                  />
                 </figure>
               </div>
             ) : (
@@ -1115,6 +1138,31 @@ function App() {
           <div key={t.id} className={`toast toast-${t.type}`}>{t.msg}</div>
         ))}
       </div>
+
+      {previewModal && (
+        <div
+          className="image-preview-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={previewModal.title}
+          onClick={() => setPreviewModal(null)}
+        >
+          <div className="image-preview-modal-card" onClick={e => e.stopPropagation()}>
+            <div className="image-preview-modal-header">
+              <strong>{previewModal.title}</strong>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setPreviewModal(null)}
+                aria-label="Close image preview"
+              >
+                ✕
+              </button>
+            </div>
+            <img src={previewModal.src} alt={`${previewModal.title} preview`} className="image-preview-modal-img" />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
