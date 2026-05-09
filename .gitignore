@@ -52,4 +52,5 @@ yarn-error.log*
 
 PROJECT_OVERVIEW.md
 *.prs
+!NOTES.prs
 __pycache__
