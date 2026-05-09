@@ -3,6 +3,10 @@ package handlers
 import (
 	"bytes"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -144,6 +148,9 @@ func validateImageUpload(file *multipart.FileHeader, maxBytes int64) (string, er
 	}
 	detectedExt := detectImageExtFromHeader(header)
 	if detectedExt == "" {
+		detectedExt = detectImageExtFromDecode(file)
+	}
+	if detectedExt == "" {
 		return "", fmt.Errorf("file must be a supported image")
 	}
 	if ext != "" {
@@ -165,6 +172,30 @@ func validateImageUpload(file *multipart.FileHeader, maxBytes int64) (string, er
 		return detectedExt, nil
 	}
 	return ext, nil
+}
+
+func detectImageExtFromDecode(file *multipart.FileHeader) string {
+	f, err := file.Open()
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	_, format, err := image.DecodeConfig(f)
+	if err != nil {
+		return ""
+	}
+
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "png":
+		return ".png"
+	case "jpeg", "jpg":
+		return ".jpeg"
+	case "gif":
+		return ".gif"
+	default:
+		return ""
+	}
 }
 
 func readFileHeaderBytes(file *multipart.FileHeader, maxBytes int64) ([]byte, error) {
