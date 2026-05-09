@@ -8,9 +8,9 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
-	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -158,20 +158,29 @@ func validateImageUpload(file *multipart.FileHeader, maxBytes int64) (string, er
 		if canonicalExt == ".jpg" {
 			canonicalExt = ".jpeg"
 		}
-		if !isAllowedImageExt(canonicalExt) || detectedExt != canonicalExt {
-			return "", fmt.Errorf("file must be a supported image")
+		if isAllowedImageExt(canonicalExt) && detectedExt != canonicalExt {
+			slog.Warn("image extension/signature mismatch; using detected type",
+				"filename", file.Filename,
+				"ext", canonicalExt,
+				"detected_ext", detectedExt,
+			)
 		}
 	}
 	if contentType != "" && contentType != "application/octet-stream" {
-		detectedMime := http.DetectContentType(header)
-		if !strings.HasPrefix(contentType, "image/") || !strings.HasPrefix(detectedMime, "image/") {
+		if !strings.HasPrefix(contentType, "image/") {
 			return "", fmt.Errorf("file must be a supported image")
 		}
 	}
-	if ext == "" {
-		return detectedExt, nil
+	if ext != "" {
+		canonicalExt := ext
+		if canonicalExt == ".jpg" {
+			canonicalExt = ".jpeg"
+		}
+		if isAllowedImageExt(canonicalExt) && canonicalExt == detectedExt {
+			return ext, nil
+		}
 	}
-	return ext, nil
+	return detectedExt, nil
 }
 
 func detectImageExtFromDecode(file *multipart.FileHeader) string {

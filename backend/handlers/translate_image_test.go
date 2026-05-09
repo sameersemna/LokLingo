@@ -315,6 +315,34 @@ func TestTranslateImage_ExtensionlessPNGAccepted(t *testing.T) {
 	}
 }
 
+func TestTranslateImage_MismatchedExtensionButValidPNGAccepted(t *testing.T) {
+	oldPollInterval := syncImagePollInterval
+	oldPollTimeout := syncImagePollTimeout
+	syncImagePollInterval = 1 * time.Millisecond
+	syncImagePollTimeout = 2 * time.Second
+	t.Cleanup(func() {
+		syncImagePollInterval = oldPollInterval
+		syncImagePollTimeout = oldPollTimeout
+	})
+
+	store := &translateImageTestStore{completedAfter: 1}
+	h := NewTranslateHandler(nil, store)
+	app := fiber.New()
+	app.Post("/translate/image", h.TranslateImage)
+
+	req := makeImageMultipartRequestWithFileName(t, "de", "photo.webp", []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for mismatched-but-valid image upload, got %d", resp.StatusCode)
+	}
+	if store.enqueued == nil {
+		t.Fatal("expected image job to be enqueued")
+	}
+}
+
 func TestTranslateImage_DefaultsSourceAndMode(t *testing.T) {
 	oldPollInterval := syncImagePollInterval
 	oldPollTimeout := syncImagePollTimeout
