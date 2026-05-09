@@ -23,9 +23,14 @@ const LANGUAGES = [
 
 const TARGET_LANGUAGES = LANGUAGES.filter(l => l.code !== "auto")
 const TRANSLATION_MODES = [
-  { value: "overlay", label: "Basic (fast)" },
-  { value: "layout", label: "Layout-preserving" },
-  { value: "ocr_only", label: "OCR only (no translation)" },
+  { value: "overlay", label: "Balanced" },
+  { value: "layout", label: "Keep layout" },
+  { value: "ocr_only", label: "Extract text" },
+] as const
+const WORKFLOWS = [
+  { value: "image", label: "Image", detail: "Hero workflow for instant visual translation", icon: "🖼" },
+  { value: "pdf", label: "PDF", detail: "Queue full-document translation in background", icon: "📄" },
+  { value: "text", label: "Text", detail: "Translate pasted or typed text", icon: "✍" },
 ] as const
 const MAX_CHARS = 2000
 const HISTORY_KEY = "loklingo-history"
@@ -51,6 +56,24 @@ interface HistoryEntry {
   ts: number
 }
 
+type InputWorkflow = "image" | "pdf" | "text"
+
+interface UploadSelection {
+  kind: "image" | "pdf"
+  name: string
+  size: number
+  previewUrl?: string
+}
+
+type ComparisonFocus = "original" | "overlay" | "layout"
+type ProgressStage = "ocr" | "translation" | "rendering"
+
+const IMAGE_PROGRESS_STAGES: Array<{ key: ProgressStage; label: string }> = [
+  { key: "ocr", label: "OCR" },
+  { key: "translation", label: "Translation" },
+  { key: "rendering", label: "Rendering" },
+]
+
 function loadHistory(): HistoryEntry[] {
   try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]") } catch { return [] }
 }
@@ -75,6 +98,15 @@ function pressureLevel(score: number): "normal" | "warn" | "critical" {
   return "normal"
 }
 
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B"
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`
+  const mb = kb / 1024
+  return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`
+}
+
 function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("loklingo-theme")
@@ -85,6 +117,9 @@ function App() {
   const [sourceLang, setSourceLang] = useState(() => loadLangs().source)
   const [targetLang, setTargetLang] = useState(() => loadLangs().target)
   const [mode, setMode] = useState<string>("overlay")
+  const [workflow, setWorkflow] = useState<InputWorkflow>("image")
+  const [uploadSelection, setUploadSelection] = useState<UploadSelection | null>(null)
+  const [uploadDragActive, setUploadDragActive] = useState(false)
   const [result, setResult] = useState("")
   const [resultKind, setResultKind] = useState<"translation" | "ocr">("translation")
   const [resultImageUrl, setResultImageUrl] = useState<string | null>(null)
@@ -94,7 +129,17 @@ function App() {
   const [compareView, setCompareView] = useState<"side" | "slider">("side")
   const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("layout")
   const [sliderPercent, setSliderPercent] = useState(50)
-  const [previewModal, setPreviewModal] = useState<{ src: string; title: string } | null>(null)
+  const [comparisonModalOpen, setComparisonModalOpen] = useState(false)
+  const [comparisonModalFocus, setComparisonModalFocus] = useState<ComparisonFocus>("layout")
+  const [comparisonModalView, setComparisonModalView] = useState<"gallery" | "slider">("gallery")
+  const [comparisonModalSliderTarget, setComparisonModalSliderTarget] = useState<"overlay" | "layout">("layout")
+  const [comparisonModalSliderPercent, setComparisonModalSliderPercent] = useState(50)
+  const [comparisonModalZoom, setComparisonModalZoom] = useState(1)
+  const [comparisonModalPan, setComparisonModalPan] = useState({ x: 0, y: 0 })
+  const [comparisonModalPanning, setComparisonModalPanning] = useState(false)
+  const [imageProgressStage, setImageProgressStage] = useState<ProgressStage | null>(null)
+  const [imageProgressCompleted, setImageProgressCompleted] = useState<ProgressStage[]>([])
+  const [imageProgressStatus, setImageProgressStatus] = useState<"idle" | "running" | "done" | "error">("idle")
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -125,12 +170,29 @@ function App() {
   const histId = useRef(history.length)
   const fileRef = useRef<HTMLInputElement>(null)
   const chipRef = useRef<HTMLDivElement>(null)
+  const compareSectionRef = useRef<HTMLElement>(null)
+  const modalPanOriginRef = useRef<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>(null)
+  const imageProgressTimersRef = useRef<number[]>([])
 
   useEffect(() => {
     return () => {
       if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
     }
   }, [compareOriginalUrl])
+
+  useEffect(() => {
+    return () => {
+      if (uploadSelection?.previewUrl) {
+        URL.revokeObjectURL(uploadSelection.previewUrl)
+      }
+    }
+  }, [uploadSelection])
+
+  useEffect(() => {
+    if (ocrLoading) return
+    if (!compareOriginalUrl || !compareOverlayUrl || !compareLayoutUrl) return
+    compareSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme)
@@ -285,15 +347,15 @@ function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && previewModal) {
-        setPreviewModal(null)
+      if (e.key === "Escape" && comparisonModalOpen) {
+        setComparisonModalOpen(false)
         return
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") handleTranslate()
     }
     window.addEventListener("keydown", handler)
     return () => window.removeEventListener("keydown", handler)
-  }, [handleTranslate, previewModal])
+  }, [handleTranslate, comparisonModalOpen])
 
   const handleCopy = async () => {
     if (!result) return
@@ -344,8 +406,146 @@ function App() {
     setDetectedLang("")
   }
 
+  const openComparisonModal = useCallback((focus: ComparisonFocus) => {
+    const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
+    if (!hasComparison && !resultImageUrl) return
+    setComparisonModalFocus(hasComparison ? focus : "layout")
+    setComparisonModalSliderTarget(focus === "overlay" ? "overlay" : "layout")
+    setComparisonModalSliderPercent(50)
+    setComparisonModalView(hasComparison ? "slider" : "gallery")
+    setComparisonModalZoom(1)
+    setComparisonModalPan({ x: 0, y: 0 })
+    setComparisonModalPanning(false)
+    setComparisonModalOpen(true)
+  }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl])
+
+  const closeComparisonModal = () => {
+    setComparisonModalPanning(false)
+    setComparisonModalOpen(false)
+  }
+
+  const clearImageProgressTimers = useCallback(() => {
+    imageProgressTimersRef.current.forEach(timer => window.clearTimeout(timer))
+    imageProgressTimersRef.current = []
+  }, [])
+
+  const startImageProgress = useCallback(() => {
+    clearImageProgressTimers()
+    setImageProgressStatus("running")
+    setImageProgressStage("ocr")
+    setImageProgressCompleted([])
+
+    const toTranslation = window.setTimeout(() => {
+      setImageProgressCompleted(["ocr"])
+      setImageProgressStage("translation")
+    }, 900)
+
+    const toRendering = window.setTimeout(() => {
+      setImageProgressCompleted(["ocr", "translation"])
+      setImageProgressStage("rendering")
+    }, 2200)
+
+    imageProgressTimersRef.current = [toTranslation, toRendering]
+  }, [clearImageProgressTimers])
+
+  const completeImageProgress = useCallback(() => {
+    clearImageProgressTimers()
+    setImageProgressStatus("done")
+    setImageProgressCompleted(["ocr", "translation", "rendering"])
+    setImageProgressStage(null)
+
+    const settle = window.setTimeout(() => {
+      setImageProgressStatus("idle")
+      setImageProgressCompleted([])
+      setImageProgressStage(null)
+    }, 3600)
+    imageProgressTimersRef.current = [settle]
+  }, [clearImageProgressTimers])
+
+  const failImageProgress = useCallback(() => {
+    clearImageProgressTimers()
+    setImageProgressStatus("error")
+    setImageProgressStage(null)
+
+    const settle = window.setTimeout(() => {
+      setImageProgressStatus("idle")
+      setImageProgressCompleted([])
+      setImageProgressStage(null)
+    }, 4200)
+    imageProgressTimersRef.current = [settle]
+  }, [clearImageProgressTimers])
+
+  useEffect(() => {
+    return () => {
+      clearImageProgressTimers()
+    }
+  }, [clearImageProgressTimers])
+
+  const hasModalComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
+  const modalImageSrc =
+    comparisonModalFocus === "original"
+      ? compareOriginalUrl
+      : comparisonModalFocus === "overlay"
+      ? compareOverlayUrl
+      : compareLayoutUrl ?? resultImageUrl
+  const clampModalZoom = (value: number) => Math.max(0.6, Math.min(3, Number(value.toFixed(2))))
+  const clampModalPan = (x: number, y: number, zoom: number) => {
+    const maxOffset = Math.max(0, (zoom - 1) * 520)
+    return {
+      x: Math.max(-maxOffset, Math.min(maxOffset, x)),
+      y: Math.max(-maxOffset, Math.min(maxOffset, y)),
+    }
+  }
+  const modalTransform = `translate(${comparisonModalPan.x}px, ${comparisonModalPan.y}px) scale(${comparisonModalZoom})`
+
+  const adjustComparisonModalZoom = (delta: number) => {
+    const next = clampModalZoom(comparisonModalZoom + delta)
+    setComparisonModalZoom(next)
+    if (next <= 1) {
+      setComparisonModalPan({ x: 0, y: 0 })
+      setComparisonModalPanning(false)
+      modalPanOriginRef.current = null
+    }
+  }
+
+  const handleComparisonModalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!comparisonModalOpen) return
+    event.preventDefault()
+    const delta = event.deltaY < 0 ? 0.12 : -0.12
+    adjustComparisonModalZoom(delta)
+  }
+
+  const handleComparisonModalPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (comparisonModalZoom <= 1) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    modalPanOriginRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      panX: comparisonModalPan.x,
+      panY: comparisonModalPan.y,
+    }
+    setComparisonModalPanning(true)
+  }
+
+  const handleComparisonModalPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!modalPanOriginRef.current || !comparisonModalPanning) return
+    const dx = event.clientX - modalPanOriginRef.current.pointerX
+    const dy = event.clientY - modalPanOriginRef.current.pointerY
+    setComparisonModalPan(clampModalPan(modalPanOriginRef.current.panX + dx, modalPanOriginRef.current.panY + dy, comparisonModalZoom))
+  }
+
+  const handleComparisonModalPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    modalPanOriginRef.current = null
+    setComparisonModalPanning(false)
+  }
+
   const runImageFile = async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
+    startImageProgress()
     try {
       const originalUrl = URL.createObjectURL(file)
       if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
@@ -361,6 +561,7 @@ function App() {
         if (src === "auto" && ocrRes.source && ocrRes.source !== "auto") {
           setDetectedLang(ocrRes.source)
         }
+        completeImageProgress()
         pushToast("OCR extracted", "success")
         return
       }
@@ -387,12 +588,17 @@ function App() {
           : ""
         if (resolved) setDetectedLang(resolved)
       }
+      completeImageProgress()
       pushToast("Image translated", "success")
     } catch (err) {
+      failImageProgress()
       pushToast(err instanceof Error ? err.message : "Image translation failed", "error")
     } finally {
       setOcrLoading(false)
-      if (fileRef.current) fileRef.current.value = ""
+      if (fileRef.current) {
+        fileRef.current.value = ""
+        fileRef.current.accept = "image/*,application/pdf"
+      }
     }
   }
 
@@ -424,6 +630,15 @@ function App() {
   const handleOCRFile = async (file: File) => {
     // PDF files → async translate_pdf job (enqueue + track in PDF Jobs panel)
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      if (uploadSelection?.previewUrl) {
+        URL.revokeObjectURL(uploadSelection.previewUrl)
+      }
+      setWorkflow("pdf")
+      setUploadSelection({
+        kind: "pdf",
+        name: file.name,
+        size: file.size,
+      })
       setPdfLoading(true)
       try {
         const { job_id } = await uploadPDF(file, sourceLang, targetLang, mode)
@@ -444,16 +659,51 @@ function App() {
         pushToast(err instanceof Error ? err.message : 'PDF upload failed', 'error')
       } finally {
         setPdfLoading(false)
-        if (fileRef.current) fileRef.current.value = ""
+        if (fileRef.current) {
+          fileRef.current.value = ""
+          fileRef.current.accept = "image/*,application/pdf"
+        }
       }
       return
     }
 
     if (!file.type.startsWith("image/")) {
       pushToast("Please upload an image or PDF file", "error")
+      if (fileRef.current) {
+        fileRef.current.value = ""
+        fileRef.current.accept = "image/*,application/pdf"
+      }
       return
     }
+
+    if (uploadSelection?.previewUrl) {
+      URL.revokeObjectURL(uploadSelection.previewUrl)
+    }
+    setWorkflow("image")
+    setUploadSelection({
+      kind: "image",
+      name: file.name,
+      size: file.size,
+      previewUrl: URL.createObjectURL(file),
+    })
+
     await runImageFile(file, sourceLang, targetLang)
+  }
+
+  const openUploadPicker = (accept: string) => {
+    if (!fileRef.current || ocrLoading || pdfLoading) return
+    fileRef.current.accept = accept
+    fileRef.current.click()
+  }
+
+  const handleUploadDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (ocrLoading || pdfLoading) return
+    setUploadDragActive(false)
+    const dropped = event.dataTransfer.files?.[0]
+    if (!dropped) return
+    await handleOCRFile(dropped)
   }
 
   const langLabel = (code: string) =>
@@ -461,6 +711,18 @@ function App() {
 
   const charCount = sourceText.length
   const nearLimit = charCount > MAX_CHARS * 0.8
+  const uploadBrowseAccept = workflow === "pdf" ? "application/pdf" : "image/*"
+  const uploadHeroSubtitle = workflow === "pdf"
+    ? "Drop a PDF to queue full-document translation in the background."
+    : workflow === "text"
+    ? "Text workflow is active. Image upload is still available as the primary path."
+    : "Drop an image to translate instantly, or upload a PDF for async document translation."
+  const uploadEmptyTitle = workflow === "pdf"
+    ? "Drop a PDF to upload"
+    : "Drop an image to upload"
+  const uploadEmptySupport = workflow === "pdf"
+    ? "PDF files are queued and tracked in PDF Jobs."
+    : "Supports JPG, PNG, WEBP, and other image formats."
   const readinessState = readiness?.status ?? "checking"
   const readinessLabel =
     readinessState === "ok" ? "System healthy" :
@@ -774,38 +1036,6 @@ function App() {
       )}
 
       <main className="translator">
-        {/* Demo presets */}
-        <div className="demo-presets" role="group" aria-label="Demo presets">
-          <span className="demo-presets-label">Try a sample:</span>
-          {DEMO_PRESETS.map(preset => (
-            <button
-              key={preset.id}
-              type="button"
-              className="demo-preset-btn"
-              disabled={ocrLoading}
-              onClick={() => handleDemoPreset(preset)}
-              title={`${preset.label} — ${preset.source === "auto" ? "auto" : preset.source} → ${preset.target}`}
-            >
-              <span className="demo-preset-thumb-wrap">
-                <img
-                  className="demo-preset-thumb"
-                  src={preset.src}
-                  alt=""
-                  loading="lazy"
-                  aria-hidden="true"
-                />
-              </span>
-              <span className="demo-preset-info">
-                <span className="demo-preset-emoji">{preset.emoji}</span>
-                <span className="demo-preset-name">{preset.label}</span>
-                <span className="demo-preset-langs">
-                  {preset.source === "auto" ? "auto" : preset.source.toUpperCase()} → {preset.target.toUpperCase()}
-                </span>
-              </span>
-            </button>
-          ))}
-        </div>
-
         <div className="lang-selectors">
           <div className="lang-select-wrap">
             <select
@@ -843,7 +1073,7 @@ function App() {
         </div>
 
         <div className="mode-row">
-          <label className="mode-label" htmlFor="translation-mode">Mode</label>
+          <label className="mode-label" htmlFor="translation-mode">Style</label>
           <select
             id="translation-mode"
             className="mode-select"
@@ -858,121 +1088,190 @@ function App() {
         </div>
         <p className="mode-help" role="note" aria-live="polite">
           {mode === "ocr_only"
-            ? "OCR only extracts text from image/PDF and skips translation rendering."
-            : "Overlay and Layout translate text and render it onto image output."}
+            ? "Extract text without generating a translated image."
+            : "Balanced is faster, while Keep layout preserves the original structure."}
         </p>
 
-        <div className="panels">
-          {/* Source panel */}
-          <div className="panel">
-            <textarea
-              aria-label="Source text"
-              placeholder="Enter text to translate…"
-              value={sourceText}
-              maxLength={MAX_CHARS}
-              onChange={e => setSourceText(e.target.value)}
-              rows={8}
-            />
-            <div className="panel-footer">
-              <span className={`char-count${nearLimit ? " near-limit" : ""}`}>
-                {charCount}/{MAX_CHARS} · {sourceText.trim() ? sourceText.trim().split(/\s+/).length : 0}w
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*,application/pdf"
+          className="ocr-input"
+          id="ocr-file"
+          onChange={e => e.target.files?.[0] && handleOCRFile(e.target.files[0])}
+        />
+
+        <section className="workflow-switch-wrap" aria-label="Input workflow">
+          <div className="workflow-switch-heading">Choose workflow: Image, PDF, or Text</div>
+          <div className="workflow-switch">
+          {WORKFLOWS.map(item => (
+            <button
+              key={item.value}
+              type="button"
+              className={`workflow-card${workflow === item.value ? " is-active" : ""}${item.value === "image" ? " is-primary" : ""}`}
+              onClick={() => setWorkflow(item.value)}
+              aria-pressed={workflow === item.value}
+            >
+              <span className="workflow-card-top">
+                <span className="workflow-card-icon" aria-hidden="true">{item.icon}</span>
+                <span className="workflow-card-title">{item.label}</span>
+                {item.value === "image" && <span className="workflow-card-badge">Primary</span>}
               </span>
-              <div className="panel-footer-actions">
-                {/* OCR upload button */}
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept="image/*,application/pdf"
-                  className="ocr-input"
-                  id="ocr-file"
-                  onChange={e => e.target.files?.[0] && handleOCRFile(e.target.files[0])}
-                />
-                <label htmlFor="ocr-file" className="icon-btn" title="Extract text from image (OCR) or queue a PDF translation">
-                  {ocrLoading
-                    ? <><span className="spinner spinner-sm" aria-hidden="true" /> Translating image…</>
-                    : pdfLoading
-                    ? <><span className="spinner spinner-sm" aria-hidden="true" /> Uploading…</>
-                    : "📷 Image / PDF"
-                  }
-                </label>
-                {sourceText && (
-                  <button
-                    className="icon-btn"
-                    title="Clear"
-                    onClick={() => {
-                      setSourceText("")
-                      setResult("")
-                      setResultKind("translation")
-                      setResultImageUrl(null)
-                      if (compareOriginalUrl) {
-                        URL.revokeObjectURL(compareOriginalUrl)
-                        setCompareOriginalUrl(null)
-                      }
-                      setCompareOverlayUrl(null)
-                      setCompareLayoutUrl(null)
-                      setDetectedLang("")
-                    }}
+              <span className="workflow-card-detail">{item.detail}</span>
+            </button>
+          ))}
+          </div>
+        </section>
+
+        <section
+          className={`upload-hero${uploadDragActive ? " is-drag-active" : ""}${workflow === "image" ? " is-image-primary" : ""}${workflow === "pdf" ? " is-pdf-focus" : ""}${workflow === "text" ? " is-text-focus" : ""}`}
+          onDragEnter={e => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (!ocrLoading && !pdfLoading) setUploadDragActive(true)
+          }}
+          onDragOver={e => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (!ocrLoading && !pdfLoading) setUploadDragActive(true)
+          }}
+          onDragLeave={e => {
+            e.preventDefault()
+            e.stopPropagation()
+            setUploadDragActive(false)
+          }}
+          onDrop={handleUploadDrop}
+          aria-label="Upload image or PDF"
+        >
+          <div className="upload-hero-head">
+            <h2>Image Translation</h2>
+            <span className="upload-hero-pill">Primary workflow</span>
+          </div>
+          <p className="upload-hero-subtitle">{uploadHeroSubtitle}</p>
+
+          {uploadSelection?.kind === "image" && uploadSelection.previewUrl ? (
+            <div className="upload-preview upload-preview-image">
+              <img src={uploadSelection.previewUrl} alt="Selected upload preview" />
+              <div className="upload-preview-meta">
+                <strong>{uploadSelection.name}</strong>
+                <span>{formatFileSize(uploadSelection.size)} · Image</span>
+              </div>
+            </div>
+          ) : uploadSelection?.kind === "pdf" ? (
+            <div className="upload-preview upload-preview-pdf">
+              <div className="upload-preview-file-icon" aria-hidden="true">PDF</div>
+              <div className="upload-preview-meta">
+                <strong>{uploadSelection.name}</strong>
+                <span>{formatFileSize(uploadSelection.size)} · PDF queued for background translation</span>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={`upload-preview upload-preview-empty upload-drop-target${uploadDragActive ? " is-drag-active" : ""}`}
+              disabled={ocrLoading || pdfLoading}
+              onClick={() => openUploadPicker(uploadBrowseAccept)}
+            >
+              <strong>{uploadDragActive ? "Release to upload" : uploadEmptyTitle}</strong>
+              <span>{uploadEmptySupport}</span>
+            </button>
+          )}
+
+          <div className="upload-hero-actions">
+            <button
+              type="button"
+              className="upload-primary-btn"
+              disabled={ocrLoading || pdfLoading}
+              onClick={() => openUploadPicker("image/*")}
+            >
+              {ocrLoading
+                ? "Translating image..."
+                : "Upload image"}
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              disabled={ocrLoading || pdfLoading}
+              onClick={() => openUploadPicker("application/pdf")}
+            >
+              {pdfLoading ? "Uploading PDF..." : "Upload PDF"}
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setWorkflow("text")}
+            >
+              Use text input
+            </button>
+          </div>
+        </section>
+
+        {imageProgressStatus !== "idle" && (
+          <section className={`image-progress image-progress-${imageProgressStatus}`} aria-live="polite">
+            <div className="image-progress-header">
+              <strong>
+                {imageProgressStatus === "running"
+                  ? "Image pipeline in progress"
+                  : imageProgressStatus === "done"
+                  ? "Image pipeline completed"
+                  : "Image pipeline failed"}
+              </strong>
+              <span className="image-progress-summary">
+                {imageProgressStatus === "running"
+                  ? `Active stage: ${IMAGE_PROGRESS_STAGES.find(stage => stage.key === imageProgressStage)?.label ?? "OCR"}`
+                  : imageProgressStatus === "done"
+                  ? "All stages finished"
+                  : "Job stopped before completion"}
+              </span>
+            </div>
+            <ol className="image-progress-stages">
+              {IMAGE_PROGRESS_STAGES.map(stage => {
+                const done = imageProgressCompleted.includes(stage.key)
+                const active = imageProgressStatus === "running" && imageProgressStage === stage.key
+                const failed = imageProgressStatus === "error" && !done
+                return (
+                  <li
+                    key={stage.key}
+                    className={`image-progress-stage${done ? " is-done" : ""}${active ? " is-active" : ""}${failed ? " is-failed" : ""}`}
                   >
-                    ✕ Clear
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
+                    <span className="image-progress-dot" aria-hidden="true" />
+                    <span>{stage.label}</span>
+                    {done && <span className="image-progress-state">Done</span>}
+                    {active && <span className="image-progress-state">Running</span>}
+                    {failed && <span className="image-progress-state">Waiting</span>}
+                  </li>
+                )
+              })}
+            </ol>
+          </section>
+        )}
 
-          {/* Output panel */}
-          <div className="panel">
-            <div className="output-body">
-              {loading || pdfLoading ? (
-                <span className="status">
-                  <span className="spinner" aria-hidden="true" />
-                  {pdfLoading ? 'Translating PDF…' : 'Translating…'}
-                </span>
-              ) : (
-                <>
-                  {result && (
-                    <div className={`result-kind-badge result-kind-${resultKind}`}>
-                      {resultKind === "ocr" ? "OCR extraction only" : "Translated text"}
-                    </div>
-                  )}
-                  <div className="result-text">{result}</div>
-                  {resultImageUrl && !(compareOverlayUrl && compareLayoutUrl) && (
-                    <div className="result-image-wrap">
-                      <img
-                        className="result-image"
-                        src={resultImageUrl}
-                        alt="Translated output preview"
-                        loading="lazy"
-                      />
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-            {result && !loading && (
-              <div className="panel-footer">
-                <span className="char-count">{result.length} chars</span>
-                <button className="icon-btn" title="Copy translation" onClick={handleCopy}>
-                  ⎘ Copy
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Loading indicator while both translation modes process */}
+        {/* Comparison spotlight */}
         {ocrLoading && compareOriginalUrl && (
-          <div className="comparison-loading">
+          <div className="comparison-loading comparison-loading-spotlight">
             <span className="spinner" aria-hidden="true" />
-            {mode === "ocr_only"
-              ? "Running OCR only — hang tight..."
-              : "Processing overlay & layout — hang tight..."}
+            {imageProgressStage === "ocr"
+              ? "Running OCR..."
+              : imageProgressStage === "translation"
+              ? "Running translation..."
+              : imageProgressStage === "rendering"
+              ? "Rendering results..."
+              : mode === "ocr_only"
+              ? "Extracting text..."
+              : "Preparing visual comparison — overlay and layout are processing..."}
           </div>
         )}
 
-        {/* Full-width three-panel image comparison */}
         {!ocrLoading && compareOriginalUrl && compareOverlayUrl && compareLayoutUrl && (
-          <section className="comparison-wrap comparison-wrap--full" aria-label="Image comparison">
+          <section
+            ref={compareSectionRef}
+            className="comparison-wrap comparison-wrap--full comparison-hero"
+            aria-label="Image comparison"
+          >
+            <div className="comparison-intro">
+              <h3>Visual Quality Comparison</h3>
+              <p>Compare original, overlay, and layout outputs instantly.</p>
+            </div>
             <div className="comparison-controls">
               <div className="comparison-segment" role="group" aria-label="Comparison layout">
                 <button
@@ -1019,7 +1318,7 @@ function App() {
                     alt="Original image"
                     loading="lazy"
                     className="compare-clickable"
-                    onClick={() => setPreviewModal({ src: compareOriginalUrl, title: "Original" })}
+                    onClick={() => openComparisonModal("original")}
                   />
                 </figure>
                 <figure className="compare-card">
@@ -1039,7 +1338,7 @@ function App() {
                     alt="Overlay translation result"
                     loading="lazy"
                     className="compare-clickable"
-                    onClick={() => setPreviewModal({ src: compareOverlayUrl, title: "Overlay result" })}
+                    onClick={() => openComparisonModal("overlay")}
                   />
                 </figure>
                 <figure className="compare-card">
@@ -1059,7 +1358,7 @@ function App() {
                     alt="Layout translation result"
                     loading="lazy"
                     className="compare-clickable"
-                    onClick={() => setPreviewModal({ src: compareLayoutUrl, title: "Layout result" })}
+                    onClick={() => openComparisonModal("layout")}
                   />
                 </figure>
               </div>
@@ -1116,17 +1415,147 @@ function App() {
           </section>
         )}
 
+        {/* Demo presets */}
+        <div className="demo-presets" role="group" aria-label="Demo presets">
+          <span className="demo-presets-label">Sample images:</span>
+          {DEMO_PRESETS.map(preset => (
+            <button
+              key={preset.id}
+              type="button"
+              className="demo-preset-btn"
+              disabled={ocrLoading}
+              onClick={() => handleDemoPreset(preset)}
+              title={`${preset.label} — ${preset.source === "auto" ? "auto" : preset.source} → ${preset.target}`}
+            >
+              <span className="demo-preset-thumb-wrap">
+                <img
+                  className="demo-preset-thumb"
+                  src={preset.src}
+                  alt=""
+                  loading="lazy"
+                  aria-hidden="true"
+                />
+              </span>
+              <span className="demo-preset-info">
+                <span className="demo-preset-emoji">{preset.emoji}</span>
+                <span className="demo-preset-name">{preset.label}</span>
+                <span className="demo-preset-langs">
+                  {preset.source === "auto" ? "auto" : preset.source.toUpperCase()} → {preset.target.toUpperCase()}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {workflow !== "text" && (
+          <p className="text-mode-hint">Switch to Text workflow to translate typed text with the Translate button.</p>
+        )}
+
+        <div className={`panels panels-workflow-${workflow}`}>
+          {/* Source panel */}
+          <div className={`panel panel-source${workflow !== "text" ? " panel-muted" : ""}`}>
+            <textarea
+              aria-label="Source text"
+              placeholder="Enter text to translate…"
+              value={sourceText}
+              maxLength={MAX_CHARS}
+              onChange={e => {
+                setSourceText(e.target.value)
+                if (workflow !== "text") setWorkflow("text")
+              }}
+              onFocus={() => {
+                if (workflow !== "text") setWorkflow("text")
+              }}
+              rows={8}
+            />
+            <div className="panel-footer">
+              <span className={`char-count${nearLimit ? " near-limit" : ""}`}>
+                {charCount}/{MAX_CHARS} · {sourceText.trim() ? sourceText.trim().split(/\s+/).length : 0}w
+              </span>
+              <div className="panel-footer-actions">
+                {sourceText && (
+                  <button
+                    className="icon-btn"
+                    title="Clear"
+                    onClick={() => {
+                      setSourceText("")
+                      setResult("")
+                      setResultKind("translation")
+                      setResultImageUrl(null)
+                      if (compareOriginalUrl) {
+                        URL.revokeObjectURL(compareOriginalUrl)
+                        setCompareOriginalUrl(null)
+                      }
+                      setCompareOverlayUrl(null)
+                      setCompareLayoutUrl(null)
+                      setDetectedLang("")
+                    }}
+                  >
+                    ✕ Clear
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Output panel */}
+          <div className={`panel panel-output${workflow === "text" ? " panel-priority" : ""}`}>
+            <div className="output-body">
+              {loading || pdfLoading ? (
+                <span className="status">
+                  <span className="spinner" aria-hidden="true" />
+                  {pdfLoading ? 'Translating PDF…' : 'Translating…'}
+                </span>
+              ) : (
+                <>
+                  {result && (
+                    <div className={`result-kind-badge result-kind-${resultKind}`}>
+                      {resultKind === "ocr" ? "OCR extraction only" : "Translated text"}
+                    </div>
+                  )}
+                  <div className="result-text">{result}</div>
+                  {resultImageUrl && !(compareOverlayUrl && compareLayoutUrl) && (
+                    <div className="result-image-wrap">
+                      <img
+                        className="result-image compare-clickable"
+                        src={resultImageUrl}
+                        alt="Translated output preview"
+                        loading="lazy"
+                        onClick={() => openComparisonModal("layout")}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {result && !loading && (
+              <div className="panel-footer">
+                <span className="char-count">{result.length} chars</span>
+                <button className="icon-btn" title="Copy translation" onClick={handleCopy}>
+                  ⎘ Copy
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
         <div className="actions">
-          <span className="hint">Ctrl+Enter to translate</span>
+          <span className="hint">
+            {workflow === "text"
+              ? "Ctrl+Enter to translate text"
+              : "Image/PDF upload starts processing automatically"}
+          </span>
           <button
             className="translate-btn"
             onClick={handleTranslate}
-            disabled={loading || pdfLoading || !sourceText.trim()}
+            disabled={loading || pdfLoading || ocrLoading || workflow !== "text" || !sourceText.trim()}
           >
             {loading
               ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating…</>
               : pdfLoading
               ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating PDF…</>
+              : ocrLoading
+              ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating image…</>
               : "Translate"}
           </button>
         </div>
@@ -1139,27 +1568,182 @@ function App() {
         ))}
       </div>
 
-      {previewModal && (
+      {comparisonModalOpen && modalImageSrc && (
         <div
-          className="image-preview-modal"
+          className="comparison-modal"
           role="dialog"
           aria-modal="true"
-          aria-label={previewModal.title}
-          onClick={() => setPreviewModal(null)}
+          aria-label="Translation comparison viewer"
+          onClick={closeComparisonModal}
         >
-          <div className="image-preview-modal-card" onClick={e => e.stopPropagation()}>
-            <div className="image-preview-modal-header">
-              <strong>{previewModal.title}</strong>
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={() => setPreviewModal(null)}
-                aria-label="Close image preview"
-              >
-                ✕
-              </button>
+          <div className="comparison-modal-card" onClick={e => e.stopPropagation()}>
+            <div className="comparison-modal-header">
+              <strong>Translation Quality Viewer</strong>
+              <div className="comparison-modal-header-actions">
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => adjustComparisonModalZoom(-0.2)}
+                  title="Zoom out"
+                >
+                  −
+                </button>
+                <span className="comparison-modal-zoom-label">{Math.round(comparisonModalZoom * 100)}%</span>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => adjustComparisonModalZoom(0.2)}
+                  title="Zoom in"
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => {
+                    setComparisonModalZoom(1)
+                    setComparisonModalPan({ x: 0, y: 0 })
+                    setComparisonModalPanning(false)
+                    modalPanOriginRef.current = null
+                  }}
+                  title="Reset zoom"
+                >
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={closeComparisonModal}
+                  aria-label="Close comparison viewer"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
-            <img src={previewModal.src} alt={`${previewModal.title} preview`} className="image-preview-modal-img" />
+
+            {hasModalComparison && (
+              <div className="comparison-modal-toolbar">
+                <div className="comparison-segment" role="group" aria-label="Modal comparison mode">
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalView === "gallery" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalView("gallery")}
+                  >
+                    Gallery
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalView === "slider" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalView("slider")}
+                  >
+                    Slider
+                  </button>
+                </div>
+                <div className="comparison-segment" role="group" aria-label="Focused image">
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalFocus === "original" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalFocus("original")}
+                  >
+                    Original
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalFocus === "overlay" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalFocus("overlay")}
+                  >
+                    Overlay
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalFocus === "layout" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalFocus("layout")}
+                  >
+                    Layout
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {hasModalComparison && comparisonModalView === "slider" ? (
+              <div className="comparison-modal-body">
+                <div
+                  className={`comparison-modal-stage${comparisonModalZoom > 1 ? " is-pannable" : ""}${comparisonModalPanning ? " is-panning" : ""}`}
+                  onWheel={handleComparisonModalWheel}
+                  onPointerDown={handleComparisonModalPointerDown}
+                  onPointerMove={handleComparisonModalPointerMove}
+                  onPointerUp={handleComparisonModalPointerUp}
+                  onPointerLeave={handleComparisonModalPointerUp}
+                >
+                <div className="compare-slider-frame comparison-modal-slider-frame" aria-live="polite">
+                  <img
+                    className="compare-slider-base"
+                    src={compareOriginalUrl ?? ""}
+                    alt="Original image"
+                    loading="lazy"
+                    style={{ transform: modalTransform, transformOrigin: "center" }}
+                  />
+                  <div
+                    className="compare-slider-overlay"
+                    style={{ width: `${comparisonModalSliderPercent}%` }}
+                    aria-hidden="true"
+                  >
+                    <img
+                      src={comparisonModalSliderTarget === "overlay" ? compareOverlayUrl ?? "" : compareLayoutUrl ?? ""}
+                      alt=""
+                      loading="lazy"
+                      style={{ transform: modalTransform, transformOrigin: "center" }}
+                    />
+                  </div>
+                  <div className="compare-slider-handle" style={{ left: `${comparisonModalSliderPercent}%` }} aria-hidden="true" />
+                </div>
+                </div>
+                <label className="compare-slider-label">
+                  Original vs {comparisonModalSliderTarget === "overlay" ? "overlay" : "layout"} — drag to reveal
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={comparisonModalSliderPercent}
+                    onChange={e => setComparisonModalSliderPercent(Number(e.target.value))}
+                  />
+                </label>
+                <div className="comparison-segment" role="group" aria-label="Modal slider target">
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalSliderTarget === "overlay" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalSliderTarget("overlay")}
+                  >
+                    Compare Overlay
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalSliderTarget === "layout" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalSliderTarget("layout")}
+                  >
+                    Compare Layout
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="comparison-modal-body">
+                <div
+                  className={`comparison-modal-stage${comparisonModalZoom > 1 ? " is-pannable" : ""}${comparisonModalPanning ? " is-panning" : ""}`}
+                  onWheel={handleComparisonModalWheel}
+                  onPointerDown={handleComparisonModalPointerDown}
+                  onPointerMove={handleComparisonModalPointerMove}
+                  onPointerUp={handleComparisonModalPointerUp}
+                  onPointerLeave={handleComparisonModalPointerUp}
+                >
+                  <img
+                    src={modalImageSrc}
+                    alt="Comparison preview"
+                    className="comparison-modal-image"
+                    style={{ transform: modalTransform }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

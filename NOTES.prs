@@ -69,6 +69,35 @@ npm run dev
 Then do a hard reload in browser: Ctrl+Shift+R.
 
 
+---
+
+Frontend UX phase (May 2026) — image-first translator redesign
+
+Highlights:
+- Made image upload the primary workflow with a large drag-and-drop hero zone.
+- Added explicit workflow choices for Image, PDF, and Text with opinionated defaults.
+- Added upload previews for both image and PDF files.
+- Promoted visual QA to center stage:
+  - automatic Original / Overlay / Layout comparison after image translation
+  - side-by-side and slider comparison modes
+- Added fullscreen comparison viewer:
+  - opens from translated images
+  - in-modal gallery + slider comparison
+  - zoom controls and wheel zoom
+  - drag-to-pan when zoomed
+- Added staged image progress feedback:
+  - OCR -> Translation -> Rendering
+  - animated active stage and done/error completion states
+- Simplified mode naming for less technical UX:
+  - Balanced
+  - Keep layout
+  - Extract text
+
+Validation status:
+- frontend: npm run build
+- Docker frontend rebuilt and verified on http://localhost:13000
+
+
 
 
 
