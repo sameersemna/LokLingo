@@ -84,7 +84,7 @@ func makeImageMultipartRequest(t *testing.T, target string, withFile bool, sourc
 		if err != nil {
 			t.Fatalf("create form file: %v", err)
 		}
-		if _, err := part.Write([]byte("not-a-real-png")); err != nil {
+		if _, err := part.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}); err != nil {
 			t.Fatalf("write form file: %v", err)
 		}
 	}

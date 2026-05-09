@@ -30,6 +30,22 @@ type Worker struct {
 	chunkMaxWords        int           // hard cap words for a PDF translation chunk
 }
 
+type storeAcker interface {
+	Ack(ctx context.Context, id string) error
+}
+
+type staleRecoverer interface {
+	RecoverStale(ctx context.Context, olderThan time.Duration) (int, error)
+}
+
+type retryRequeuer interface {
+	Requeue(ctx context.Context, id string, delay time.Duration) error
+}
+
+type deadLetterer interface {
+	DeadLetter(ctx context.Context, id string, reason string) error
+}
+
 // WorkerOption is a functional option for NewWorker.
 type WorkerOption func(*Worker)
 
@@ -135,6 +151,35 @@ func (w *Worker) Run(ctx context.Context) {
 		}
 	}()
 
+	if recoverer, ok := w.store.(staleRecoverer); ok {
+		if moved, err := recoverer.RecoverStale(ctx, 10*time.Minute); err != nil {
+			slog.Warn("recover_stale_inflight_failed", "err", err)
+		} else if moved > 0 {
+			slog.Info("recovered_stale_inflight_jobs", "count", moved)
+		}
+	}
+
+	go func() {
+		recoverTicker := time.NewTicker(1 * time.Minute)
+		defer recoverTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-recoverTicker.C:
+				recoverer, ok := w.store.(staleRecoverer)
+				if !ok {
+					continue
+				}
+				if moved, err := recoverer.RecoverStale(ctx, 10*time.Minute); err != nil {
+					slog.Warn("recover_stale_inflight_failed", "err", err)
+				} else if moved > 0 {
+					slog.Info("recovered_stale_inflight_jobs", "count", moved)
+				}
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -158,6 +203,14 @@ func (w *Worker) Run(ctx context.Context) {
 		}
 
 		w.process(ctx, job)
+		if job.Status == StatusFailed {
+			w.handleFailedJob(ctx, job)
+		}
+		if acker, ok := w.store.(storeAcker); ok {
+			if err := acker.Ack(ctx, job.ID); err != nil {
+				slog.Warn("ack_inflight_job_failed", "job_id", job.ID, "err", err)
+			}
+		}
 	}
 }
 
@@ -227,6 +280,9 @@ const pdfChunkMinWords = 80
 const pdfChunkMaxWords = 150
 
 const pdfChunkSep = "\n\n[[[LK_PAGE_BREAK]]]\n\n"
+
+const defaultJobMaxAttempts = 3
+const maxRetryDelay = 60 * time.Second
 
 type chunkUnit struct {
 	pageIndex int
@@ -620,6 +676,110 @@ func cleanStaleUploads(dir string, maxAge time.Duration) {
 	if removed > 0 {
 		slog.Info("stale_pdf_cleanup: removed stale uploads", "dir", dir, "count", removed)
 	}
+}
+
+func isRetryableJobError(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "litellm status 429") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "timed out") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "service unavailable") ||
+		strings.Contains(lower, "temporarily unavailable")
+}
+
+func retryDelayForAttempt(attempt int) time.Duration {
+	if attempt <= 1 {
+		return 2 * time.Second
+	}
+	delay := 2 * time.Second
+	for i := 1; i < attempt && delay < maxRetryDelay; i++ {
+		delay *= 2
+	}
+	if delay > maxRetryDelay {
+		delay = maxRetryDelay
+	}
+	return delay
+}
+
+func (w *Worker) handleFailedJob(ctx context.Context, job *Job) {
+	reason := strings.TrimSpace(job.ErrorMsg)
+	if reason == "" {
+		reason = "job failed without an error message"
+	}
+
+	if job.MaxAttempts <= 0 {
+		job.MaxAttempts = defaultJobMaxAttempts
+	}
+
+	retryable := isRetryableJobError(reason)
+	job.Attempt++
+	job.LastErrorMsg = reason
+
+	if retryable && job.Attempt < job.MaxAttempts {
+		delay := retryDelayForAttempt(job.Attempt)
+		nextRetry := time.Now().Add(delay)
+		job.Status = StatusPending
+		job.ErrorMsg = ""
+		job.NextRetryAt = nextRetry
+		if err := w.store.Update(ctx, job); err != nil {
+			slog.Error("update job for retry failed", "job_id", job.ID, "attempt", job.Attempt, "max_attempts", job.MaxAttempts, "err", err)
+			return
+		}
+		requeuer, ok := w.store.(retryRequeuer)
+		if !ok {
+			slog.Warn("store does not support delayed requeue; falling back to terminal failure", "job_id", job.ID)
+			job.Status = StatusFailed
+			job.ErrorMsg = reason
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update job after retry fallback failed", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+		if err := requeuer.Requeue(ctx, job.ID, delay); err != nil {
+			slog.Error("requeue job failed", "job_id", job.ID, "attempt", job.Attempt, "delay_ms", delay.Milliseconds(), "err", err)
+			job.Status = StatusFailed
+			job.ErrorMsg = reason
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update job after requeue failure failed", "job_id", job.ID, "err", uerr)
+			}
+			return
+		}
+		slog.Warn("job scheduled for retry",
+			"job_id", job.ID,
+			"attempt", job.Attempt,
+			"max_attempts", job.MaxAttempts,
+			"next_retry_at", nextRetry.UTC().Format(time.RFC3339),
+			"reason", reason,
+		)
+		return
+	}
+
+	job.Status = StatusFailed
+	job.ErrorMsg = reason
+	job.DeadLetteredAt = time.Now().UTC()
+	if err := w.store.Update(ctx, job); err != nil {
+		slog.Error("update job terminal failure failed", "job_id", job.ID, "attempt", job.Attempt, "max_attempts", job.MaxAttempts, "err", err)
+		return
+	}
+	dl, ok := w.store.(deadLetterer)
+	if ok {
+		if err := dl.DeadLetter(ctx, job.ID, reason); err != nil {
+			slog.Warn("dead letter enqueue failed", "job_id", job.ID, "err", err)
+		}
+	}
+	slog.Error("job moved to dead letter",
+		"job_id", job.ID,
+		"attempt", job.Attempt,
+		"max_attempts", job.MaxAttempts,
+		"retryable", retryable,
+		"reason", reason,
+	)
 }
 
 func (w *Worker) process(ctx context.Context, job *Job) {

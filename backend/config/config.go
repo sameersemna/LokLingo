@@ -25,6 +25,11 @@ type Config struct {
 	TranslateChunkMaxWords       int    // hard cap words per translation chunk; default 150
 	LiteLLMRequestTimeoutSeconds int    // HTTP client timeout for LLM calls in seconds; default 300 (5 min)
 	InternalToken                string // optional; enforces X-Internal-Token on internal routes
+	WriteAPIToken                string // optional in development; required in production for write routes
+	GlobalRateLimitPerMinute     int    // max requests per minute per IP for non-health routes
+	WriteRateLimitPerMinute      int    // max write requests per minute per IP
+	UploadRateLimitPerMinute     int    // max upload-heavy write requests per minute per IP
+	SyncImageMaxInflight         int    // max concurrent in-flight sync image requests
 }
 
 func Load() *Config {
@@ -48,6 +53,11 @@ func Load() *Config {
 		TranslateChunkMaxWords:       getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 150),
 		LiteLLMRequestTimeoutSeconds: getEnvInt("LITELLM_REQUEST_TIMEOUT_SECONDS", 300),
 		InternalToken:                getEnv("INTERNAL_TOKEN", ""),
+		WriteAPIToken:                getEnv("WRITE_API_TOKEN", ""),
+		GlobalRateLimitPerMinute:     getEnvInt("GLOBAL_RATE_LIMIT_PER_MINUTE", 120),
+		WriteRateLimitPerMinute:      getEnvInt("WRITE_RATE_LIMIT_PER_MINUTE", 40),
+		UploadRateLimitPerMinute:     getEnvInt("UPLOAD_RATE_LIMIT_PER_MINUTE", 12),
+		SyncImageMaxInflight:         getEnvInt("SYNC_IMAGE_MAX_INFLIGHT", 8),
 	}
 }
 
@@ -66,6 +76,9 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.RedisURL) == "" {
 		missing = append(missing, "REDIS_URL")
+	}
+	if strings.EqualFold(strings.TrimSpace(c.AppEnv), "production") && strings.TrimSpace(c.WriteAPIToken) == "" {
+		missing = append(missing, "WRITE_API_TOKEN")
 	}
 
 	if len(missing) > 0 {
@@ -86,6 +99,18 @@ func (c *Config) Validate() error {
 	}
 	if c.LiteLLMRequestTimeoutSeconds <= 0 {
 		invalid = append(invalid, "LITELLM_REQUEST_TIMEOUT_SECONDS must be >= 1")
+	}
+	if c.GlobalRateLimitPerMinute <= 0 {
+		invalid = append(invalid, "GLOBAL_RATE_LIMIT_PER_MINUTE must be >= 1")
+	}
+	if c.WriteRateLimitPerMinute <= 0 {
+		invalid = append(invalid, "WRITE_RATE_LIMIT_PER_MINUTE must be >= 1")
+	}
+	if c.UploadRateLimitPerMinute <= 0 {
+		invalid = append(invalid, "UPLOAD_RATE_LIMIT_PER_MINUTE must be >= 1")
+	}
+	if c.SyncImageMaxInflight <= 0 {
+		invalid = append(invalid, "SYNC_IMAGE_MAX_INFLIGHT must be >= 1")
 	}
 
 	if len(invalid) > 0 {

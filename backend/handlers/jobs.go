@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,14 @@ import (
 type JobsHandler struct {
 	store             jobs.Store
 	maxPDFUploadBytes int64
+}
+
+type deadLetterLister interface {
+	ListDead(ctx context.Context, limit int) ([]jobs.DeadJobEntry, error)
+}
+
+type deadLetterReplayer interface {
+	ReplayDead(ctx context.Context, id string) (*jobs.Job, error)
 }
 
 // NewJobsHandler constructs a JobsHandler.
@@ -330,4 +339,86 @@ func (h *JobsHandler) DownloadJobOutput(c *fiber.Ctx) error {
 	c.Set("Content-Type", contentType)
 	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(clean)))
 	return c.SendFile(clean)
+}
+
+// ListDeadJobs handles GET /api/v1/jobs/dead.
+// It returns dead-lettered jobs with their last failure reason.
+func (h *JobsHandler) ListDeadJobs(c *fiber.Ctx) error {
+	lister, ok := h.store.(deadLetterLister)
+	if !ok {
+		return errResponse(c, fiber.StatusNotImplemented, "dead-letter listing not supported by this store")
+	}
+
+	limit := 25
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return errResponse(c, fiber.StatusBadRequest, "limit must be a positive integer")
+		}
+		if n > 200 {
+			n = 200
+		}
+		limit = n
+	}
+
+	entries, err := lister.ListDead(c.Context(), limit)
+	if err != nil {
+		slog.Error("failed to list dead-letter jobs", "request_id", c.Locals("requestID"), "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to list dead-letter jobs")
+	}
+
+	items := make([]fiber.Map, 0, len(entries))
+	for _, e := range entries {
+		item := fiber.Map{
+			"job_id": e.ID,
+			"reason": e.Reason,
+		}
+		if e.Job != nil {
+			item["status"] = e.Job.Status
+			item["type"] = e.Job.Type
+			item["mode"] = e.Job.Mode
+			item["source"] = e.Job.Source
+			item["target"] = e.Job.Target
+			item["attempt"] = e.Job.Attempt
+			item["max_attempts"] = e.Job.MaxAttempts
+			item["dead_lettered_at"] = e.Job.DeadLetteredAt
+			item["updated_at"] = e.Job.UpdatedAt
+		}
+		items = append(items, item)
+	}
+
+	return c.JSON(fiber.Map{
+		"count": len(items),
+		"jobs":  items,
+	})
+}
+
+// ReplayDeadJob handles POST /api/v1/jobs/:id/replay.
+// It removes a dead-lettered job from dead-letter storage and requeues it.
+func (h *JobsHandler) ReplayDeadJob(c *fiber.Ctx) error {
+	replayer, ok := h.store.(deadLetterReplayer)
+	if !ok {
+		return errResponse(c, fiber.StatusNotImplemented, "dead-letter replay not supported by this store")
+	}
+
+	id := strings.TrimSpace(c.Params("id"))
+	if id == "" {
+		return errResponse(c, fiber.StatusBadRequest, "job id is required")
+	}
+
+	job, err := replayer.ReplayDead(c.Context(), id)
+	if errors.Is(err, jobs.ErrNotFound) {
+		return errResponse(c, fiber.StatusNotFound, "job not found")
+	}
+	if err != nil {
+		slog.Error("failed to replay dead-letter job", "request_id", c.Locals("requestID"), "job_id", id, "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to replay job")
+	}
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"job_id":       job.ID,
+		"status":       job.Status,
+		"attempt":      job.Attempt,
+		"max_attempts": job.MaxAttempts,
+	})
 }

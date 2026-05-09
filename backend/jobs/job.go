@@ -39,12 +39,17 @@ type Job struct {
 	Status         Status    `json:"status"`
 	Type           JobType   `json:"type,omitempty"`
 	Mode           Mode      `json:"mode"`
+	Attempt        int       `json:"attempt,omitempty"`
+	MaxAttempts    int       `json:"max_attempts,omitempty"`
 	Text           string    `json:"text"`
 	Source         string    `json:"source"`
 	Target         string    `json:"target"`
 	TranslatedText string    `json:"translated_text,omitempty"`
 	OutputFilePath string    `json:"output_file_path,omitempty"`
 	ErrorMsg       string    `json:"error,omitempty"`
+	LastErrorMsg   string    `json:"last_error,omitempty"`
+	NextRetryAt    time.Time `json:"next_retry_at,omitempty"`
+	DeadLetteredAt time.Time `json:"dead_lettered_at,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 

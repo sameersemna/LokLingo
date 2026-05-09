@@ -21,6 +21,10 @@ type mockWorkerStore struct {
 	updateErr    error
 	lastJob      *Job
 	callCount    int
+	requeueIDs   []string
+	requeueDelay []time.Duration
+	deadIDs      []string
+	deadReasons  []string
 }
 
 func (m *mockWorkerStore) Enqueue(_ context.Context, _ *Job) error { return nil }
@@ -40,6 +44,16 @@ func (m *mockWorkerStore) GetCached(_ context.Context, _, _, _ string) (string, 
 	return "", ErrNotFound
 }
 func (m *mockWorkerStore) SetCached(_ context.Context, _, _, _, _ string) error { return nil }
+func (m *mockWorkerStore) Requeue(_ context.Context, id string, delay time.Duration) error {
+	m.requeueIDs = append(m.requeueIDs, id)
+	m.requeueDelay = append(m.requeueDelay, delay)
+	return nil
+}
+func (m *mockWorkerStore) DeadLetter(_ context.Context, id string, reason string) error {
+	m.deadIDs = append(m.deadIDs, id)
+	m.deadReasons = append(m.deadReasons, reason)
+	return nil
+}
 
 type mockTranslSvc struct {
 	result string
@@ -972,6 +986,80 @@ func TestWorker_TranslateWithRetry_NoRetryOnCancelledJobContext(t *testing.T) {
 	transSvc.mu.Unlock()
 	if totalCalls > 1 {
 		t.Fatalf("expected at most 1 Translate call for cancelled context, got %d", totalCalls)
+	}
+}
+
+func TestWorker_HandleFailedJob_SchedulesRetryForRetryableError(t *testing.T) {
+	store := &mockWorkerStore{}
+	w := NewWorker(store, &mockTranslSvc{}, &mockPDFSvc{}, nil, 0)
+
+	job := &Job{
+		ID:          "job-retry-1",
+		Status:      StatusFailed,
+		ErrorMsg:    "litellm status 429: rate limit exceeded",
+		Attempt:     0,
+		MaxAttempts: 3,
+	}
+
+	w.handleFailedJob(context.Background(), job)
+
+	if job.Status != StatusPending {
+		t.Fatalf("expected status=pending after retry scheduling, got %s", job.Status)
+	}
+	if job.Attempt != 1 {
+		t.Fatalf("expected attempt=1, got %d", job.Attempt)
+	}
+	if job.LastErrorMsg == "" {
+		t.Fatal("expected last_error to be set")
+	}
+	if job.ErrorMsg != "" {
+		t.Fatalf("expected error message to be cleared while pending retry, got %q", job.ErrorMsg)
+	}
+	if job.NextRetryAt.IsZero() {
+		t.Fatal("expected next_retry_at to be set")
+	}
+	if len(store.requeueIDs) != 1 || store.requeueIDs[0] != job.ID {
+		t.Fatalf("expected one requeue for %s, got %+v", job.ID, store.requeueIDs)
+	}
+	if len(store.requeueDelay) != 1 || store.requeueDelay[0] <= 0 {
+		t.Fatalf("expected positive requeue delay, got %+v", store.requeueDelay)
+	}
+	if len(store.deadIDs) != 0 {
+		t.Fatalf("expected no dead-letter entries, got %+v", store.deadIDs)
+	}
+}
+
+func TestWorker_HandleFailedJob_DeadLettersAfterMaxAttempts(t *testing.T) {
+	store := &mockWorkerStore{}
+	w := NewWorker(store, &mockTranslSvc{}, &mockPDFSvc{}, nil, 0)
+
+	job := &Job{
+		ID:          "job-dead-1",
+		Status:      StatusFailed,
+		ErrorMsg:    "litellm status 429: rate limit exceeded",
+		Attempt:     2,
+		MaxAttempts: 3,
+	}
+
+	w.handleFailedJob(context.Background(), job)
+
+	if job.Status != StatusFailed {
+		t.Fatalf("expected status=failed at terminal attempt, got %s", job.Status)
+	}
+	if job.Attempt != 3 {
+		t.Fatalf("expected attempt=3, got %d", job.Attempt)
+	}
+	if job.DeadLetteredAt.IsZero() {
+		t.Fatal("expected dead_lettered_at to be set")
+	}
+	if len(store.requeueIDs) != 0 {
+		t.Fatalf("expected no requeue entries, got %+v", store.requeueIDs)
+	}
+	if len(store.deadIDs) != 1 || store.deadIDs[0] != job.ID {
+		t.Fatalf("expected dead-letter entry for %s, got %+v", job.ID, store.deadIDs)
+	}
+	if len(store.deadReasons) != 1 || store.deadReasons[0] == "" {
+		t.Fatalf("expected dead-letter reason, got %+v", store.deadReasons)
 	}
 }
 

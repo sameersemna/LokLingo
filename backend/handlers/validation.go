@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -108,6 +111,9 @@ func normalizedMediaType(contentType string) string {
 }
 
 func validatePDFUpload(file *multipart.FileHeader, maxBytes int64) error {
+	if file.Size > maxBytes {
+		return fmt.Errorf("file exceeds max size (%d bytes)", maxBytes)
+	}
 	contentType := normalizedMediaType(file.Header.Get("Content-Type"))
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if ext != ".pdf" {
@@ -116,22 +122,80 @@ func validatePDFUpload(file *multipart.FileHeader, maxBytes int64) error {
 	if contentType != "" && contentType != "application/octet-stream" && !strings.Contains(contentType, "pdf") {
 		return fmt.Errorf("file must be a PDF")
 	}
-	if file.Size > maxBytes {
-		return fmt.Errorf("file exceeds max size (%d bytes)", maxBytes)
+	header, err := readFileHeaderBytes(file, 16)
+	if err != nil {
+		return fmt.Errorf("failed to inspect file signature")
+	}
+	if !bytes.HasPrefix(header, []byte("%PDF-")) {
+		return fmt.Errorf("file must be a PDF")
 	}
 	return nil
 }
 
 func validateImageUpload(file *multipart.FileHeader, maxBytes int64) (string, error) {
+	if file.Size > maxBytes {
+		return "", fmt.Errorf("file exceeds max size (%d bytes)", maxBytes)
+	}
 	contentType := normalizedMediaType(file.Header.Get("Content-Type"))
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if !isAllowedImageUpload(contentType, ext) {
 		return "", fmt.Errorf("file must be a supported image")
 	}
-	if file.Size > maxBytes {
-		return "", fmt.Errorf("file exceeds max size (%d bytes)", maxBytes)
+	header, err := readFileHeaderBytes(file, 32)
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect file signature")
+	}
+	detectedExt := detectImageExtFromHeader(header)
+	if detectedExt == "" {
+		return "", fmt.Errorf("file must be a supported image")
+	}
+	canonicalExt := ext
+	if canonicalExt == ".jpg" {
+		canonicalExt = ".jpeg"
+	}
+	if detectedExt != canonicalExt {
+		return "", fmt.Errorf("file must be a supported image")
+	}
+	if contentType != "" && contentType != "application/octet-stream" {
+		detectedMime := http.DetectContentType(header)
+		if !strings.HasPrefix(contentType, "image/") || !strings.HasPrefix(detectedMime, "image/") {
+			return "", fmt.Errorf("file must be a supported image")
+		}
 	}
 	return ext, nil
+}
+
+func readFileHeaderBytes(file *multipart.FileHeader, maxBytes int64) ([]byte, error) {
+	f, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, maxBytes)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+func detectImageExtFromHeader(header []byte) string {
+	if len(header) >= 4 && bytes.HasPrefix(header, []byte{0x89, 'P', 'N', 'G'}) {
+		return ".png"
+	}
+	if len(header) >= 8 && bytes.HasPrefix(header, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return ".png"
+	}
+	if len(header) >= 3 && bytes.HasPrefix(header, []byte{0xff, 0xd8, 0xff}) {
+		return ".jpeg"
+	}
+	if len(header) >= 6 && (bytes.HasPrefix(header, []byte("GIF87a")) || bytes.HasPrefix(header, []byte("GIF89a"))) {
+		return ".gif"
+	}
+	if len(header) >= 12 && bytes.HasPrefix(header, []byte("RIFF")) && bytes.Equal(header[8:12], []byte("WEBP")) {
+		return ".webp"
+	}
+	return ""
 }
 
 func isAllowedImageUpload(contentType, ext string) bool {

@@ -85,6 +85,11 @@ Important variables:
 * `FRONTEND_HOST_PORT`: host port mapped to frontend container port `80`
 * `OCR_HOST_PORT`: host port mapped to OCR container port `8000`
 * `OCR_SHARED_STORAGE_DIR`: shared directory mounted into backend and OCR containers for zero-copy OCR requests, defaults to `/tmp/loklingo`
+* `WRITE_API_TOKEN`: protects write routes (`POST /api/v1/translate*`, `POST /api/v1/jobs*`); required in `production`, optional in `development`
+* `GLOBAL_RATE_LIMIT_PER_MINUTE`: per-IP request cap for non-health routes, defaults to `120`
+* `WRITE_RATE_LIMIT_PER_MINUTE`: per-IP cap for authenticated write requests, defaults to `40`
+* `UPLOAD_RATE_LIMIT_PER_MINUTE`: stricter per-IP cap for upload-heavy routes (`/translate/image`, `/jobs/pdf`, `/jobs/image`), defaults to `12`
+* `SYNC_IMAGE_MAX_INFLIGHT`: max concurrent in-flight sync image translations, defaults to `8`
 * `MAX_PDF_UPLOAD_BYTES`: max accepted PDF upload size for backend and OCR guards, defaults to `104857600` (100 MB)
 * `MAX_PDF_PAGES`: max accepted PDF page count for backend and OCR guards, defaults to `200`
 * `TRANSLATE_CONCURRENCY`: max concurrent LLM translation requests in the worker, defaults to `3`
@@ -129,6 +134,7 @@ Translate through the frontend edge:
 
 ```bash
 curl http://localhost:13000/translate \
+    -H 'X-API-Token: $WRITE_API_TOKEN' \
     -H 'Content-Type: application/json' \
     --data-raw '{"text":"hello world","source":"en","target":"de"}'
 ```
@@ -159,6 +165,25 @@ The readiness endpoint reports dependency status without sending a translation r
 ```bash
 curl http://localhost:28080/ready
 ```
+
+Write-route authentication:
+
+Use either:
+
+* `X-API-Token: <WRITE_API_TOKEN>`
+* `Authorization: Bearer <WRITE_API_TOKEN>`
+
+In production, backend startup validation requires `WRITE_API_TOKEN`.
+
+Async job failure handling:
+
+* Failed jobs now track attempt metadata (`attempt`, `max_attempts`, `last_error`, `next_retry_at`, `dead_lettered_at`).
+* Transient failures (rate limit/timeouts/network/service unavailable) are retried with bounded exponential backoff.
+* Terminal failures are moved to a Redis dead-letter queue for later inspection (`loklingo:jobs:dead:queue`).
+* Delayed retries are staged in Redis and promoted back to the active queue when due (`loklingo:jobs:retry:zset`).
+* Operator endpoints (guarded by `X-Internal-Token`) are available for dead-letter operations:
+    * `GET /api/v1/jobs/dead?limit=25`
+    * `POST /api/v1/jobs/:id/replay`
 
 ## 📊 Reliability Telemetry
 

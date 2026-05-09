@@ -3,6 +3,7 @@ import { translate, translateImage, uploadPDF } from "./api/translate"
 import { getReadiness, type ReadinessResponse } from "./api/health"
 import { getOCRMetrics, type MetricsWindow, type OCRMetricsResponse } from "./api/metrics"
 import { PdfJobsPanel } from "./PdfJobsPanel"
+import { DeadLetterOpsPanel } from "./DeadLetterOpsPanel"
 import { saveStoredJob } from "./pdfJobsStorage"
 import "./App.css"
 
@@ -100,6 +101,7 @@ function App() {
   const [showHistory, setShowHistory] = useState(false)
   const [showPdfJobs, setShowPdfJobs] = useState(false)
   const [showReliability, setShowReliability] = useState(false)
+  const [showDeadOps, setShowDeadOps] = useState(false)
   const [pdfJobsVersion, setPdfJobsVersion] = useState(0)
   const [metricsWindow, setMetricsWindow] = useState<MetricsWindow>("24h")
   const [metrics, setMetrics] = useState<OCRMetricsResponse | null>(null)
@@ -511,6 +513,15 @@ function App() {
               📊 Reliability
             </button>
             <button
+              className={`icon-btn${showDeadOps ? " is-active" : ""}`}
+              type="button"
+              onClick={() => setShowDeadOps(v => !v)}
+              aria-pressed={showDeadOps}
+              title="Dead-letter operations"
+            >
+              🛠 Dead Ops
+            </button>
+            <button
               className={`icon-btn${showHistory ? " is-active" : ""}`}
               type="button"
               onClick={() => { setShowHistory(h => !h); setShowPdfJobs(false) }}
@@ -711,6 +722,10 @@ function App() {
             </>
           )}
         </section>
+      )}
+
+      {showDeadOps && (
+        <DeadLetterOpsPanel onToast={pushToast} />
       )}
 
       {/* History drawer */}

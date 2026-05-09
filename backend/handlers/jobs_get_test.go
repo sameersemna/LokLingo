@@ -17,8 +17,11 @@ import (
 )
 
 type getJobStore struct {
-	job *jobs.Job
-	err error
+	job         *jobs.Job
+	err         error
+	deadEntries []jobs.DeadJobEntry
+	replayJob   *jobs.Job
+	replayErr   error
 }
 
 func (s *getJobStore) Enqueue(_ context.Context, _ *jobs.Job) error { return nil }
@@ -34,6 +37,24 @@ func (s *getJobStore) GetCached(_ context.Context, _, _, _ string) (string, erro
 	return "", jobs.ErrNotFound
 }
 func (s *getJobStore) SetCached(_ context.Context, _, _, _, _ string) error { return nil }
+func (s *getJobStore) ListDead(_ context.Context, limit int) ([]jobs.DeadJobEntry, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if limit <= 0 || limit >= len(s.deadEntries) {
+		return s.deadEntries, nil
+	}
+	return s.deadEntries[:limit], nil
+}
+func (s *getJobStore) ReplayDead(_ context.Context, _ string) (*jobs.Job, error) {
+	if s.replayErr != nil {
+		return nil, s.replayErr
+	}
+	if s.replayJob == nil {
+		return nil, jobs.ErrNotFound
+	}
+	return s.replayJob, nil
+}
 
 func TestGetJob_PDFProgressFieldsIncluded(t *testing.T) {
 	now := time.Now()
@@ -355,6 +376,113 @@ func TestDownloadJobOutput_PathTraversalRejected(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestListDeadJobs_ReturnsEntries(t *testing.T) {
+	now := time.Now().UTC()
+	store := &getJobStore{deadEntries: []jobs.DeadJobEntry{
+		{
+			ID:     "dead-1",
+			Reason: "litellm status 429: rate limit",
+			Job: &jobs.Job{
+				ID:             "dead-1",
+				Status:         jobs.StatusFailed,
+				Type:           jobs.TypePDF,
+				Mode:           jobs.ModeOverlay,
+				Source:         "en",
+				Target:         "de",
+				Attempt:        3,
+				MaxAttempts:    3,
+				DeadLetteredAt: now,
+				UpdatedAt:      now,
+			},
+		},
+	}}
+
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Get("/jobs/dead", h.ListDeadJobs)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/dead?limit=10", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["count"] != float64(1) {
+		t.Fatalf("expected count=1, got %#v", body["count"])
+	}
+	items, ok := body["jobs"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one job entry, got %#v", body["jobs"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected job item object, got %#v", items[0])
+	}
+	if item["job_id"] != "dead-1" {
+		t.Fatalf("expected job_id dead-1, got %#v", item["job_id"])
+	}
+}
+
+func TestListDeadJobs_InvalidLimit(t *testing.T) {
+	store := &getJobStore{}
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Get("/jobs/dead", h.ListDeadJobs)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/dead?limit=abc", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestReplayDeadJob_Accepted(t *testing.T) {
+	store := &getJobStore{replayJob: &jobs.Job{
+		ID:          "dead-2",
+		Status:      jobs.StatusPending,
+		Attempt:     0,
+		MaxAttempts: 3,
+	}}
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Post("/jobs/:id/replay", h.ReplayDeadJob)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/dead-2/replay", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", resp.StatusCode)
+	}
+}
+
+func TestReplayDeadJob_NotFound(t *testing.T) {
+	store := &getJobStore{replayErr: jobs.ErrNotFound}
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Post("/jobs/:id/replay", h.ReplayDeadJob)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/missing/replay", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 }
 

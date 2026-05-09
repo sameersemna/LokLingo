@@ -87,7 +87,7 @@ func main() {
 		AllowMethods: "GET,POST,OPTIONS",
 		AllowHeaders: "Content-Type,Authorization",
 	}))
-	app.Use(middleware.RateLimiter())
+	app.Use(middleware.GlobalRateLimiter(cfg.GlobalRateLimitPerMinute))
 
 	app.Get("/health", handlers.HealthHandler)
 	app.Get("/ready", handlers.NewReadinessHandler(cfg).Ready)
@@ -97,11 +97,14 @@ func main() {
 	ocrMetricsHandler := handlers.NewOCRMetricsHandler(pgPool)
 
 	api := app.Group("/api/v1")
-	api.Post("/translate", translateHandler.Translate)
-	api.Post("/translate/image", translateHandler.TranslateImage)
-	api.Post("/jobs", jobsHandler.CreateJob)
-	api.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
-	api.Post("/jobs/image", jobsHandler.CreateImageJob)
+	writeAPI := api.Group("", middleware.WriteAPIAuth(cfg.AppEnv, cfg.WriteAPIToken), middleware.WriteRateLimiter(cfg.WriteRateLimitPerMinute), middleware.UploadRateLimiter(cfg.UploadRateLimitPerMinute))
+	writeAPI.Post("/translate", translateHandler.Translate)
+	writeAPI.Post("/translate/image", middleware.InflightGate(cfg.SyncImageMaxInflight, "/api/v1/translate/image"), translateHandler.TranslateImage)
+	writeAPI.Post("/jobs", jobsHandler.CreateJob)
+	writeAPI.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
+	writeAPI.Post("/jobs/image", jobsHandler.CreateImageJob)
+	api.Get("/jobs/dead", middleware.InternalToken(cfg.InternalToken), jobsHandler.ListDeadJobs)
+	api.Post("/jobs/:id/replay", middleware.InternalToken(cfg.InternalToken), jobsHandler.ReplayDeadJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)
 	api.Get("/jobs/:id/output", jobsHandler.DownloadJobOutput)
 	api.Get("/metrics/ocr", middleware.InternalToken(cfg.InternalToken), ocrMetricsHandler.Summary)

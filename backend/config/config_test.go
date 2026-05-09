@@ -52,6 +52,10 @@ func TestConfigValidatePassesForCompleteConfig(t *testing.T) {
 		TranslateChunkMinWords:       500,
 		TranslateChunkMaxWords:       1000,
 		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -95,13 +99,17 @@ func TestLoadReadsChunkingEnvValues(t *testing.T) {
 
 func TestConfigValidateRejectsInvalidTranslationLimits(t *testing.T) {
 	cfg := &Config{
-		LiteLLMBaseURL:         "http://latitude:11435",
-		LiteLLMModel:           "ollama/llama3.2:latest",
-		OCRServiceURL:          "http://loklingo-ocr:8000",
-		RedisURL:               "redis://loklingo-redis:6379",
-		TranslateConcurrency:   0,
-		TranslateChunkMinWords: 500,
-		TranslateChunkMaxWords: 1000,
+		LiteLLMBaseURL:           "http://latitude:11435",
+		LiteLLMModel:             "ollama/llama3.2:latest",
+		OCRServiceURL:            "http://loklingo-ocr:8000",
+		RedisURL:                 "redis://loklingo-redis:6379",
+		TranslateConcurrency:     0,
+		TranslateChunkMinWords:   500,
+		TranslateChunkMaxWords:   1000,
+		GlobalRateLimitPerMinute: 120,
+		WriteRateLimitPerMinute:  40,
+		UploadRateLimitPerMinute: 12,
+		SyncImageMaxInflight:     8,
 	}
 
 	err := cfg.Validate()
@@ -123,6 +131,10 @@ func TestConfigValidateRejectsInvalidChunkRange(t *testing.T) {
 		TranslateChunkMinWords:       1000,
 		TranslateChunkMaxWords:       500,
 		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
 	}
 
 	err := cfg.Validate()
@@ -154,6 +166,10 @@ func TestConfigValidateRejectsZeroRequestTimeout(t *testing.T) {
 		TranslateChunkMinWords:       250,
 		TranslateChunkMaxWords:       500,
 		LiteLLMRequestTimeoutSeconds: 0,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
 	}
 
 	err := cfg.Validate()
@@ -162,5 +178,90 @@ func TestConfigValidateRejectsZeroRequestTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "LITELLM_REQUEST_TIMEOUT_SECONDS") {
 		t.Fatalf("expected validation error to mention LITELLM_REQUEST_TIMEOUT_SECONDS, got %q", err.Error())
+	}
+}
+
+func TestConfigValidate_ProductionRequiresWriteAPIToken(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                       "production",
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "gpt-4o-mini",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for missing WRITE_API_TOKEN in production")
+	}
+	if !strings.Contains(err.Error(), "WRITE_API_TOKEN") {
+		t.Fatalf("expected validation error to mention WRITE_API_TOKEN, got %q", err.Error())
+	}
+}
+
+func TestConfigValidate_DevelopmentAllowsMissingWriteAPIToken(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                       "development",
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "gpt-4o-mini",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid development config without WRITE_API_TOKEN, got %v", err)
+	}
+}
+
+func TestConfigValidateRejectsInvalidTrafficLimits(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                       "development",
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "gpt-4o-mini",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     0,
+		WriteRateLimitPerMinute:      0,
+		UploadRateLimitPerMinute:     0,
+		SyncImageMaxInflight:         0,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for invalid traffic limits")
+	}
+	msg := err.Error()
+	for _, key := range []string{
+		"GLOBAL_RATE_LIMIT_PER_MINUTE",
+		"WRITE_RATE_LIMIT_PER_MINUTE",
+		"UPLOAD_RATE_LIMIT_PER_MINUTE",
+		"SYNC_IMAGE_MAX_INFLIGHT",
+	} {
+		if !strings.Contains(msg, key) {
+			t.Fatalf("expected validation error to mention %s, got %q", key, msg)
+		}
 	}
 }
