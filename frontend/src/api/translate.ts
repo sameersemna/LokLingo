@@ -29,6 +29,7 @@ export interface JobResponse {
 const POLL_INTERVAL_MS = 600
 const MAX_POLLS = 100 // 60 s timeout
 const REQUEST_TIMEOUT_MS = 30_000
+const IMAGE_REQUEST_TIMEOUT_MS = 120_000
 
 // ---------- shared helpers ----------
 
@@ -41,23 +42,32 @@ function buildTranslateError(status: number, err: { error?: string; request_id?:
     const requestId = err.request_id ? ` Request ID: ${err.request_id}.` : ''
     return new Error(`Translation upstream failed. Check LiteLLM model/config and backend logs.${requestId}`)
   }
+  if (status === 504) {
+    return new Error('Image translation timed out. Please retry or use OCR only mode for faster results.')
+  }
   return new Error(err.error ?? `HTTP ${status}`)
 }
 
 async function parseErrorBody(res: Response): Promise<{ error?: string; request_id?: string }> {
-  const parsed = await res.json().catch(() => ({ error: 'Unknown error' })) as {
-    error?: unknown
-    request_id?: unknown
+  const raw = await res.text().catch(() => '')
+  let parsed: { error?: unknown; request_id?: unknown } = {}
+  if (raw) {
+    try {
+      parsed = JSON.parse(raw) as { error?: unknown; request_id?: unknown }
+    } catch {
+      parsed = {}
+    }
   }
+  const fallback = raw && !raw.trim().startsWith('<') ? raw.trim() : undefined
   return {
-    error: typeof parsed.error === 'string' ? parsed.error : 'Unknown error',
+    error: typeof parsed.error === 'string' ? parsed.error : fallback,
     request_id: typeof parsed.request_id === 'string' ? parsed.request_id : undefined,
   }
 }
 
-async function fetchWithTimeout(input: string, init?: RequestInit): Promise<Response> {
+async function fetchWithTimeout(input: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(input, { ...init, signal: controller.signal })
   } catch (err) {
@@ -73,8 +83,8 @@ async function fetchWithTimeout(input: string, init?: RequestInit): Promise<Resp
   }
 }
 
-async function fetchJsonOrThrow<T>(input: string, init?: RequestInit): Promise<T> {
-  const res = await fetchWithTimeout(input, init)
+async function fetchJsonOrThrow<T>(input: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const res = await fetchWithTimeout(input, init, timeoutMs)
   if (!res.ok) {
     const err = await parseErrorBody(res)
     throw buildTranslateError(res.status, err)
@@ -207,7 +217,7 @@ export async function translateImage(
   }>('/api/v1/translate/image', {
     method: 'POST',
     body: form,
-  })
+  }, IMAGE_REQUEST_TIMEOUT_MS)
   return {
     translated_text: data.translated_text ?? '',
     source: data.source ?? source,

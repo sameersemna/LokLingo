@@ -360,10 +360,8 @@ function App() {
         return
       }
 
-      const [overlayRes, layoutRes] = await Promise.all([
-        translateImage(file, src, tgt, "overlay"),
-        translateImage(file, src, tgt, "layout"),
-      ])
+      const overlayRes = await translateImage(file, src, tgt, "overlay")
+      const layoutRes = await translateImage(file, src, tgt, "layout")
 
       if (!overlayRes.image_url || !layoutRes.image_url) {
         throw new Error("Image comparison requires both overlay and layout outputs")
