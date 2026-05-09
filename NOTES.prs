@@ -1,0 +1,328 @@
+cp .env.example .env   # fill in LITELLM_BASE_URL + API key
+# Backend dev:
+cd backend && go run .
+# Frontend dev:
+cd frontend && npm run dev
+
+# Development (local Redis container)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+# Production (external Redis — REDIS_URL must be set in environment)
+docker compose up
+
+curl -X POST http://localhost:28080/api/v1/jobs/pdf \
+  -F "file=@document.pdf" \
+  -F "target=en" \
+  -F "source=de"
+
+in chunk translation like in PDFs sometimes the paragraph breaks in between pages, 
+so the translation may lose the context, 
+which will cause the translation to be either inaccurate or of lower quality, 
+how to avoid this?
+
+Also make an only OCR option
+
+
+
+
+
+
+
+
+If you run with Docker Compose (recommended for your setup), rebuild and restart backend + frontend:
+
+docker compose down
+docker compose build --no-cache loklingo-backend loklingo-frontend
+docker compose up -d
+docker compose logs -f loklingo-backend
+
+
+If you run dev overlay:
+
+docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+docker compose -f docker-compose.yml -f docker-compose.dev.yml build --no-cache loklingo-backend loklingo-frontend
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f loklingo-backend
+
+
+Quick verify OCR service + backend readiness:
+
+curl -s http://localhost:8000/health | jq
+curl -s http://localhost:8080/ready | jq
+
+
+Quick verify image OCR endpoint (replace with a real local image path):
+
+curl -s -X POST http://localhost:8080/api/v1/translate/image \
+  -F "file=@/absolute/path/to/test.png" \
+  -F "source=auto" \
+  -F "target=en" \
+  -F "mode=ocr_only" | jq
+
+
+If you run frontend dev server, restart it too:
+
+cd /home/sameer/Public/Shared/Work/Projects/LokLingo/frontend
+rm -rf node_modules/.vite
+npm run dev
+
+Then do a hard reload in browser: Ctrl+Shift+R.
+
+
+
+
+
+
+
+
+
+
+---
+
+Reliability hardening rollout summary (May 2026)
+
+Backend:
+- Added strict validation shared helpers for text/lang/mode and upload media checks.
+- Hardened LiteLLM integration with retries, bounded response decode, schema checks, and circuit breaker.
+- Hardened OCR client with retry/backoff improvements, Retry-After support, bounded decode, and response schema validation.
+- Added structured reliability logs for retry/circuit/rejection paths.
+- Added in-memory reliability counters and exposed them from /api/v1/metrics/ocr.
+- Persisted reliability events to Postgres via pglog handler.
+- Added migrations:
+  - 003_create_reliability_events.sql
+  - 004_add_reliability_retention_policy.sql
+- Added integration test coverage for pglog Postgres insert paths (skips unless LOKLINGO_TEST_POSTGRES_DSN is set).
+
+Frontend:
+- Added Reliability panel with live counters + windowed reliability event table.
+- Added readiness-popover mini reliability widget with:
+  - trend delta (up/down/flat)
+  - rolling sparkline
+  - quick jump to full Reliability panel
+- Added severity thresholds with Vite env vars:
+  - VITE_RELIABILITY_PRESSURE_WARN
+  - VITE_RELIABILITY_PRESSURE_CRITICAL
+
+Docs/ops:
+- README updated with migration/apply steps, retention helper usage, metrics endpoint details, and threshold configuration.
+- analytics/ocr_dashboard.sql extended with reliability trend/failure queries.
+
+Validation status:
+- backend: go test ./...
+- frontend: npm run lint && npm run build
+- All green after each hardening increment.
+
+---
+
+OCR-only mode rollout summary (May 2026)
+
+Backend:
+- Added mode constant: `ocr_only`.
+- Allowed `ocr_only` for image/PDF endpoints while keeping text endpoint modes unchanged.
+- Worker behavior:
+  - image + `ocr_only`: OCR extract only, no translation render, job completes with extracted text fields.
+  - pdf + `ocr_only`: OCR pages extract only, no translation call, job completes with extracted text fields.
+- Sync image endpoint now returns text/source/target and only includes image_url when output exists.
+
+Frontend:
+- Added mode option: OCR only (no translation).
+- Image OCR-only flow now executes a single OCR request (no overlay/layout comparison fan-out).
+- Added output badge to distinguish OCR extraction from translated text.
+- PDF Jobs panel now stores and displays submitted mode, including an OCR-only pill per queued job.
+
+Validation status:
+- backend: go test ./...
+- frontend: npm run lint && npm run build
+- All green for OCR-only changes.
+
+---
+
+Hardening increment (queue safety + upload signature checks)
+
+Backend:
+- Redis queue processing hardened with inflight bookkeeping:
+  - dequeue now atomically moves IDs from queue -> inflight
+  - worker acks inflight IDs after processing
+  - stale inflight IDs are periodically recovered back to the queue
+- Upload validation now verifies file signatures (magic bytes):
+  - PDF requires `%PDF-` header
+  - image uploads validate PNG/JPEG/GIF/WEBP signatures and extension match
+- Size-limit checks now run before deep signature validation so oversized requests consistently return 413.
+
+Validation status:
+- backend: go test ./...
+- All green after queue/upload hardening changes.
+
+---
+
+Hardening increment (write endpoint authentication)
+
+Backend:
+- Added write-route auth middleware for:
+  - `POST /api/v1/translate`
+  - `POST /api/v1/translate/image`
+  - `POST /api/v1/jobs`
+  - `POST /api/v1/jobs/pdf`
+  - `POST /api/v1/jobs/image`
+- Auth supports either `X-API-Token` or `Authorization: Bearer <token>`.
+- Added production config guard: `WRITE_API_TOKEN` is now required when `APP_ENV=production`.
+
+Ops/docs:
+- Added `WRITE_API_TOKEN` to `.env.example`, `.env.development`, and `.env.production`.
+- README updated with write-route auth usage.
+
+---
+
+Hardening increment (route-specific rate + concurrency controls)
+
+Backend:
+- Added route-tiered rate limiters:
+  - global limiter for non-health routes
+  - stricter write-route limiter
+  - strictest limiter for upload-heavy routes (`/translate/image`, `/jobs/pdf`, `/jobs/image`)
+- Added in-flight concurrency gate for sync image endpoint (`POST /api/v1/translate/image`).
+- New config/env controls:
+  - `GLOBAL_RATE_LIMIT_PER_MINUTE`
+  - `WRITE_RATE_LIMIT_PER_MINUTE`
+  - `UPLOAD_RATE_LIMIT_PER_MINUTE`
+  - `SYNC_IMAGE_MAX_INFLIGHT`
+
+Validation status:
+- backend: go test ./...
+- All green after route traffic-control hardening changes.
+
+---
+
+Hardening increment (job retry metadata + dead-letter flow)
+
+Backend:
+- Added async job retry/dead-letter metadata fields on job state:
+  - `attempt`, `max_attempts`, `last_error`, `next_retry_at`, `dead_lettered_at`
+- Added delayed retry queue support in Redis:
+  - transient failures are requeued with exponential backoff via `loklingo:jobs:retry:zset`
+  - due retries are promoted back into the active queue during dequeue
+- Added terminal dead-letter flow in Redis:
+  - exhausted/non-retryable failures are recorded in `loklingo:jobs:dead:queue`
+  - failure reasons persisted in `loklingo:jobs:dead:meta`
+- Worker loop now handles failed jobs centrally:
+  - retry transient errors until max attempts
+  - dead-letter on exhaustion/non-retryable errors
+
+Tests:
+- Added worker tests for:
+  - retry scheduling on transient failure
+  - dead-letter transition after max attempts
+
+Validation status:
+- backend: go test ./...
+- All green after retry/dead-letter hardening changes.
+
+---
+
+Hardening increment (dead-letter operator APIs)
+
+Backend:
+- Added dead-letter operations to Redis-backed store:
+  - list dead-letter queue entries with reason + job payload
+  - replay dead-lettered job back into pending queue
+- Tightened replay safety: only jobs currently present in dead-letter queue can be replayed (non-dead IDs now return not found).
+- Added operator endpoints:
+  - `GET /api/v1/jobs/dead?limit=...`
+  - `POST /api/v1/jobs/:id/replay`
+- Endpoints are protected with `InternalToken` middleware and intended for ops use.
+
+Tests:
+- Added handler tests for:
+  - dead-letter listing response
+  - invalid limit handling
+  - replay accepted path
+  - replay not-found path
+
+Validation status:
+- backend: go test ./...
+
+---
+
+Hardening increment (frontend dead-letter operations panel)
+
+Frontend:
+- Added dead-letter API client for ops workflows:
+  - list dead jobs (`GET /api/v1/jobs/dead`)
+  - replay dead job (`POST /api/v1/jobs/:id/replay`)
+- Added a new Dead Ops panel in the app header with:
+  - optional `X-Internal-Token` input (persisted locally)
+  - dead-letter list with status/type/language/attempt/reason/timestamps
+  - per-row replay action with optimistic row removal and toast feedback
+- Added triage controls to the Dead Ops panel:
+  - search by job id, reason, type, source, or target
+  - status and type filters
+  - newest/oldest sort order
+- Added an auto-refresh toggle to keep the Dead Ops queue view live every 30 seconds.
+
+---
+
+Mixed styles image sample fix (May 2026)
+
+Symptoms:
+- Frontend toast showed "Unknown error" or timeout while running "Mixed styles EN -> FR" sample.
+- Through frontend proxy, image requests returned `504 Gateway Time-out` HTML.
+
+Root causes:
+- Frontend nginx upstream timeout was too low for long-running sync image translation requests.
+- Error parser assumed JSON and collapsed HTML/non-JSON failures to generic message.
+- Sample flow sent overlay + layout in parallel, which increased contention and timeout risk.
+
+Fixes applied:
+- frontend/nginx.conf
+  - Added upstream timeouts on `/translate` and `/api/`:
+    - `proxy_connect_timeout 30s`
+    - `proxy_send_timeout 300s`
+    - `proxy_read_timeout 300s`
+- frontend/src/api/translate.ts
+  - Added image-specific request timeout (`IMAGE_REQUEST_TIMEOUT_MS = 120000`).
+  - `fetchWithTimeout` now accepts per-request timeout override.
+  - Improved non-JSON error parsing (`res.text()` fallback, JSON parse guarded).
+  - Added explicit message for HTTP 504 image path.
+- frontend/src/App.tsx
+  - Changed Mixed styles sample image flow from parallel to sequential requests:
+    - overlay first, layout second.
+
+Verification:
+- Rebuilt/restarted frontend with compose dev stack.
+- Curl via frontend proxy:
+  - overlay: HTTP 200 (about 61s)
+  - layout: HTTP 200 (about 70s)
+- Browser E2E check:
+  - Clicked "Mixed styles EN -> FR" sample in UI.
+  - Captured two `/api/v1/translate/image` responses, both HTTP 200.
+  - Image comparison rendered original/overlay/layout successfully.
+- Added bulk replay for the currently filtered dead-letter jobs, with per-job progress and partial-failure reporting.
+- Bulk replay now asks for confirmation before replaying the filtered set.
+
+Validation status:
+- frontend: npm run lint
+- frontend: npm run build
+
+---
+
+Release note (May 9, 2026)
+
+Shipped commits on main:
+- 434f18d Fix mixed-styles image timeout path in frontend
+  - Increased nginx proxy timeouts for long-running image requests.
+  - Improved image API timeout handling and 504 error messaging.
+  - Switched sample overlay/layout image requests to sequential execution.
+- 670d668 Harden OCR compatibility and worker retry file handling
+  - Added PaddleOCR constructor/call/output compatibility handling.
+  - Preserved image source files across retryable failures.
+  - Kept PDF source cleanup behavior on completion/failure.
+  - Added/updated regression tests for worker file handling and OCR parsing.
+
+Verification snapshot:
+- Browser check: Mixed styles sample completed with overlay and layout outputs rendered.
+- API status check: both image calls returned HTTP 200 through frontend proxy.
+- Backend tests: go test ./jobs passed.
+- OCR tests in container: python test_app.py passed.
+
+Publish status:
+- Pushed to origin/main at 670d668.
