@@ -149,6 +149,26 @@ func TestCreateImageJob_InvalidFileType(t *testing.T) {
 	}
 }
 
+func TestCreateImageJob_ExtensionlessPNGAccepted(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequest(t, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, "blob", "de", "en", "overlay")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202 for extensionless png upload, got %d", resp.StatusCode)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if !strings.HasSuffix(cs.job.FilePath, ".png") {
+		t.Fatalf("expected generated file path to use detected .png extension, got %q", cs.job.FilePath)
+	}
+}
+
 func TestCreateImageJob_InvalidLanguageCodes(t *testing.T) {
 	app, _ := newImageJobsApp(&mockStore{})
 	req := newMultipartImageRequest(t, []byte("\x89PNG"), "img.png", "auto", "en", "overlay")

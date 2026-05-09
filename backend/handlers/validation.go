@@ -138,9 +138,6 @@ func validateImageUpload(file *multipart.FileHeader, maxBytes int64) (string, er
 	}
 	contentType := normalizedMediaType(file.Header.Get("Content-Type"))
 	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if !isAllowedImageUpload(contentType, ext) {
-		return "", fmt.Errorf("file must be a supported image")
-	}
 	header, err := readFileHeaderBytes(file, 32)
 	if err != nil {
 		return "", fmt.Errorf("failed to inspect file signature")
@@ -149,18 +146,23 @@ func validateImageUpload(file *multipart.FileHeader, maxBytes int64) (string, er
 	if detectedExt == "" {
 		return "", fmt.Errorf("file must be a supported image")
 	}
-	canonicalExt := ext
-	if canonicalExt == ".jpg" {
-		canonicalExt = ".jpeg"
-	}
-	if detectedExt != canonicalExt {
-		return "", fmt.Errorf("file must be a supported image")
+	if ext != "" {
+		canonicalExt := ext
+		if canonicalExt == ".jpg" {
+			canonicalExt = ".jpeg"
+		}
+		if !isAllowedImageExt(canonicalExt) || detectedExt != canonicalExt {
+			return "", fmt.Errorf("file must be a supported image")
+		}
 	}
 	if contentType != "" && contentType != "application/octet-stream" {
 		detectedMime := http.DetectContentType(header)
 		if !strings.HasPrefix(contentType, "image/") || !strings.HasPrefix(detectedMime, "image/") {
 			return "", fmt.Errorf("file must be a supported image")
 		}
+	}
+	if ext == "" {
+		return detectedExt, nil
 	}
 	return ext, nil
 }
@@ -198,13 +200,10 @@ func detectImageExtFromHeader(header []byte) string {
 	return ""
 }
 
-func isAllowedImageUpload(contentType, ext string) bool {
+func isAllowedImageExt(ext string) bool {
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
-		if contentType == "" || contentType == "application/octet-stream" {
-			return true
-		}
-		return strings.HasPrefix(contentType, "image/")
+		return true
 	default:
 		return false
 	}
