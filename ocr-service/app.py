@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import io
 import logging
 import os
@@ -8,7 +9,7 @@ import shutil
 import tempfile
 import threading
 import time
-from typing import Annotated
+from typing import Annotated, Any
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, UploadFile
@@ -85,19 +86,37 @@ _ocr_cache: dict[str, PaddleOCR] = {}
 _cache_lock = threading.Lock()
 
 
+def _build_ocr_engine(paddle_lang: str) -> PaddleOCR:
+    """Construct PaddleOCR with backwards/forwards-compatible kwargs."""
+    kwargs = {
+        "use_angle_cls": True,  # auto-correct rotated text
+        "lang": paddle_lang,
+        "show_log": False,
+        "use_gpu": False,
+        "rec_batch_num": 6,     # process multiple lines at once
+    }
+    while True:
+        try:
+            return PaddleOCR(**kwargs)
+        except ValueError as exc:
+            # PaddleOCR >=3 may reject legacy args (e.g., use_gpu/show_log).
+            msg = str(exc)
+            if "Unknown argument:" not in msg:
+                raise
+            bad_arg = msg.split("Unknown argument:", 1)[1].strip().split()[0]
+            if bad_arg not in kwargs:
+                raise
+            logger.warning("PaddleOCR arg %s unsupported; retrying without it", bad_arg)
+            kwargs.pop(bad_arg)
+
+
 def get_ocr(lang: str) -> PaddleOCR:
     """Return a cached PaddleOCR instance for the given language."""
     paddle_lang = LANG_MAP.get(lang.lower(), "ch")
     with _cache_lock:
         if paddle_lang not in _ocr_cache:
             logger.info("Initialising PaddleOCR engine: lang=%s", paddle_lang)
-            _ocr_cache[paddle_lang] = PaddleOCR(
-                use_angle_cls=True,   # auto-correct rotated text
-                lang=paddle_lang,
-                show_log=False,
-                use_gpu=False,
-                rec_batch_num=6,      # process multiple lines at once
-            )
+            _ocr_cache[paddle_lang] = _build_ocr_engine(paddle_lang)
     return _ocr_cache[paddle_lang]
 
 
@@ -161,17 +180,74 @@ def _ocr_pil_image(image: Image.Image, lang: str) -> list[TextBlock]:
     """Run PaddleOCR on a PIL Image and return structured TextBlock list."""
     ocr = get_ocr(lang)
     img_array = np.array(image.convert("RGB"))
-    result = ocr.ocr(img_array, cls=True)
+    try:
+        result = ocr.ocr(img_array, cls=True)
+    except TypeError as exc:
+        if "unexpected keyword argument 'cls'" not in str(exc):
+            raise
+        logger.warning("PaddleOCR ocr() does not accept cls kwarg; retrying without it")
+        result = ocr.ocr(img_array)
+
+    def _to_bbox(poly: Any) -> list[float]:
+        xs: list[float] = []
+        ys: list[float] = []
+        if poly is None:
+            return [0.0, 0.0, 0.0, 0.0]
+        for pt in poly:
+            try:
+                xs.append(float(pt[0]))
+                ys.append(float(pt[1]))
+            except Exception:
+                continue
+        if not xs or not ys:
+            return [0.0, 0.0, 0.0, 0.0]
+        return [min(xs), min(ys), max(xs), max(ys)]
+
     blocks: list[TextBlock] = []
     for page in result or []:
+        # PaddleOCR v3 pipeline output shape: dict-like OCRResult with
+        # arrays in dt_polys + rec_texts + rec_scores.
+        if isinstance(page, Mapping) or (hasattr(page, "get") and hasattr(page, "keys")):
+            texts = page.get("rec_texts") or []
+            scores = page.get("rec_scores") or []
+            polys = page.get("dt_polys") or page.get("rec_polys") or []
+            count = min(len(texts), len(scores), len(polys))
+            for i in range(count):
+                text = str(texts[i])
+                conf = float(scores[i])
+                bbox = _to_bbox(polys[i])
+                blocks.append(
+                    TextBlock(
+                        text=text,
+                        confidence=round(conf, 4),
+                        bbox=bbox,
+                    )
+                )
+            continue
+
+        # PaddleOCR v2 legacy output shape: list of line tuples.
         for line in page or []:
-            bbox_raw, (text, conf) = line
-            xs = [pt[0] for pt in bbox_raw]
-            ys = [pt[1] for pt in bbox_raw]
-            bbox = [min(xs), min(ys), max(xs), max(ys)]
+            if not isinstance(line, (list, tuple)):
+                continue
+
+            bbox_raw: Any
+            text: Any
+            conf: Any
+            if len(line) >= 2 and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
+                bbox_raw = line[0]
+                text = line[1][0]
+                conf = line[1][1]
+            elif len(line) >= 3:
+                bbox_raw = line[0]
+                text = line[1]
+                conf = line[2]
+            else:
+                continue
+
+            bbox = _to_bbox(bbox_raw)
             blocks.append(
                 TextBlock(
-                    text=text,
+                    text=str(text),
                     confidence=round(float(conf), 4),
                     bbox=bbox,
                 )

@@ -154,6 +154,26 @@ class TestSummarise(unittest.TestCase):
         self.assertAlmostEqual(conf, 0.9, places=4)
 
 
+class TestOCRImageParsingCompatibility(unittest.TestCase):
+    def test_ocr_pil_image_parses_v3_dict_shape(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=[{
+            "rec_texts": ["日本語", "English"],
+            "rec_scores": [0.99, 0.85],
+            "dt_polys": [
+                [[10, 10], [40, 10], [40, 30], [10, 30]],
+                [[50, 20], [100, 20], [100, 40], [50, 40]],
+            ],
+        }])
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "auto")
+
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0].text, "日本語")
+        self.assertEqual(blocks[1].text, "English")
+        self.assertEqual(blocks[0].bbox, [10.0, 10.0, 40.0, 30.0])
+
+
 # ---------------------------------------------------------------------------
 # Tests: _ocr_pdf_file — page-by-page processing
 # ---------------------------------------------------------------------------

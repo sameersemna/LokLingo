@@ -242,6 +242,39 @@ func TestWorker_ImageJob_OCROnly_CompletesWithoutRendering(t *testing.T) {
 	}
 }
 
+func TestWorkerImageRetryKeepsSourceFile(t *testing.T) {
+	ctx := context.Background()
+	store := &mockWorkerStore{}
+	ocr := &mockOCRSvc{err: context.DeadlineExceeded}
+	w := NewWorker(store, &mockTranslSvc{}, &mockPDFSvc{}, ocr, 0)
+
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "retry-source.png")
+	if err := os.WriteFile(inPath, []byte("PNGDATA"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	job := &Job{
+		ID:       "img-retry-keep-file",
+		Type:     TypeImage,
+		Mode:     ModeOCROnly,
+		FilePath: inPath,
+		Source:   "auto",
+		Target:   "en",
+	}
+
+	w.process(ctx, job)
+
+	if _, statErr := os.Stat(inPath); statErr != nil {
+		t.Fatalf("expected source file to remain for retry path, stat err: %v", statErr)
+	}
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusFailed {
+		t.Fatalf("expected intermediate failed status before retry handling, got %q", store.lastJob.Status)
+	}
+}
 func TestApplyLayoutModeBBoxOptions_DefaultAndGeometry(t *testing.T) {
 	opts := internalservices.DefaultOverlayOptions()
 	applyLayoutModeBBoxOptions(&opts, -1)

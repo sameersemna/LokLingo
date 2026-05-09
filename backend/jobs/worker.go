@@ -785,7 +785,16 @@ func (w *Worker) handleFailedJob(ctx context.Context, job *Job) {
 func (w *Worker) process(ctx context.Context, job *Job) {
 	// Best-effort: remove uploaded source files once the job reaches a terminal state.
 	defer func() {
-		if (job.Type == TypePDF || job.Type == TypeImage) && job.FilePath != "" {
+		shouldCleanup := false
+		switch job.Type {
+		case TypePDF:
+			// PDF uploads are no longer needed after a completion/failure attempt.
+			shouldCleanup = job.Status == StatusCompleted || job.Status == StatusFailed
+		case TypeImage:
+			// Keep image source files for retryable failures; remove only once terminal.
+			shouldCleanup = job.Status == StatusCompleted || (job.Status == StatusFailed && !job.DeadLetteredAt.IsZero())
+		}
+		if shouldCleanup && job.FilePath != "" {
 			if err := os.Remove(job.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				slog.Warn("source_file_cleanup_failed", "job_id", job.ID, "file", job.FilePath, "err", err)
 			}
