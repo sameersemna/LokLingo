@@ -242,6 +242,53 @@ func TestWorker_ImageJob_OCROnly_CompletesWithoutRendering(t *testing.T) {
 	}
 }
 
+func TestWorker_ImageJob_NoOCRText_CompletesWithPassthroughOutput(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "input.png")
+
+	img := image.NewRGBA(image.Rect(0, 0, 100, 40))
+	f, err := os.Create(inPath)
+	if err != nil {
+		t.Fatalf("create input image: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode input image: %v", err)
+	}
+	_ = f.Close()
+
+	store := &mockWorkerStore{}
+	ocr := &mockOCRSvc{blocks: []internalservices.OCRTextBlock{{Text: "   ", Bbox: []float64{10, 10, 60, 30}}}}
+	w := NewWorker(store, &mockTranslSvc{result: "IGNORED"}, &mockPDFSvc{}, ocr, 0)
+
+	job := &Job{
+		ID:       "img-no-text-1",
+		Type:     TypeImage,
+		Mode:     ModeOverlay,
+		FilePath: inPath,
+		Source:   "auto",
+		Target:   "en",
+	}
+
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s, err=%s", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.OutputFilePath == "" {
+		t.Fatal("expected passthrough output_file_path to be set")
+	}
+	if _, err := os.Stat(store.lastJob.OutputFilePath); err != nil {
+		t.Fatalf("expected passthrough output image to exist: %v", err)
+	}
+	if store.lastJob.ErrorMsg != "" {
+		t.Fatalf("expected empty error message, got %q", store.lastJob.ErrorMsg)
+	}
+}
+
 func TestWorkerImageRetryKeepsSourceFile(t *testing.T) {
 	ctx := context.Background()
 	store := &mockWorkerStore{}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -128,6 +129,29 @@ func applyLayoutModeBBoxOptions(opts *internalservices.OverlayOptions, requested
 			opts.TextPadding = requestedPadding
 		}
 	}
+}
+
+func writeImagePassthroughOutput(imagePath string) (string, error) {
+	ext := filepath.Ext(imagePath)
+	outPath := strings.TrimSuffix(imagePath, ext) + "_translated" + ext
+
+	in, err := os.Open(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("open source image: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.Create(outPath)
+	if err != nil {
+		return "", fmt.Errorf("create passthrough image: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return "", fmt.Errorf("copy passthrough image: %w", err)
+	}
+
+	return outPath, nil
 }
 
 // Run blocks, processing jobs until ctx is cancelled.
@@ -1026,11 +1050,28 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 
 		if len(segmentText) == 0 {
-			job.Status = StatusFailed
-			job.ErrorMsg = "image OCR returned no translatable text"
-			if uerr := w.store.Update(ctx, job); uerr != nil {
-				slog.Error("update image job result (no text)", "job_id", job.ID, "err", uerr)
+			job.Text = ""
+			job.TranslatedText = ""
+			job.ErrorMsg = ""
+			if effectiveJobMode == ModeOCROnly {
+				job.OutputFilePath = ""
+			} else {
+				outPath, copyErr := writeImagePassthroughOutput(job.FilePath)
+				if copyErr != nil {
+					job.Status = StatusFailed
+					job.ErrorMsg = fmt.Sprintf("image passthrough failed: %v", copyErr)
+					if uerr := w.store.Update(ctx, job); uerr != nil {
+						slog.Error("update image job result (passthrough failed)", "job_id", job.ID, "err", uerr)
+					}
+					return
+				}
+				job.OutputFilePath = outPath
 			}
+			job.Status = StatusCompleted
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (no text passthrough)", "job_id", job.ID, "err", uerr)
+			}
+			slog.Warn("image_no_translatable_text_passthrough", "job_id", job.ID, "mode", effectiveJobMode)
 			return
 		}
 
@@ -1053,11 +1094,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		units := buildChunkUnits(segmentText, w.chunkMaxWords)
 		chunks := buildTextChunks(units, w.chunkMinWords, w.chunkMaxWords)
 		if len(chunks) == 0 {
-			job.Status = StatusFailed
-			job.ErrorMsg = "image OCR returned no translatable text"
-			if uerr := w.store.Update(ctx, job); uerr != nil {
-				slog.Error("update image job result (no chunks)", "job_id", job.ID, "err", uerr)
+			job.Text = strings.Join(segmentText, "\n")
+			job.TranslatedText = job.Text
+			job.ErrorMsg = ""
+			outPath, copyErr := writeImagePassthroughOutput(job.FilePath)
+			if copyErr != nil {
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("image passthrough failed: %v", copyErr)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update image job result (no chunks passthrough failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
 			}
+			job.OutputFilePath = outPath
+			job.Status = StatusCompleted
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (no chunks passthrough)", "job_id", job.ID, "err", uerr)
+			}
+			slog.Warn("image_no_chunks_passthrough", "job_id", job.ID, "mode", effectiveJobMode)
 			return
 		}
 
@@ -1120,11 +1174,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 
 		if len(fullTarget) == 0 {
-			job.Status = StatusFailed
-			job.ErrorMsg = "image OCR returned no translatable text"
-			if uerr := w.store.Update(ctx, job); uerr != nil {
-				slog.Error("update image job result (empty translation)", "job_id", job.ID, "err", uerr)
+			job.Text = strings.Join(segmentText, "\n")
+			job.TranslatedText = job.Text
+			job.ErrorMsg = ""
+			outPath, copyErr := writeImagePassthroughOutput(job.FilePath)
+			if copyErr != nil {
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("image passthrough failed: %v", copyErr)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update image job result (empty translation passthrough failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
 			}
+			job.OutputFilePath = outPath
+			job.Status = StatusCompleted
+			if uerr := w.store.Update(ctx, job); uerr != nil {
+				slog.Error("update image job result (empty translation passthrough)", "job_id", job.ID, "err", uerr)
+			}
+			slog.Warn("image_empty_translation_passthrough", "job_id", job.ID, "mode", effectiveJobMode)
 			return
 		}
 
