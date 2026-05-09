@@ -11,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"loklingo/backend/config"
+	internalservices "loklingo/backend/internal/services"
 )
 
 type readinessCheck = func(context.Context) error
@@ -44,7 +45,8 @@ func NewReadinessHandler(cfg *config.Config) *ReadinessHandler {
 			return nil
 		},
 		"ocr": func(ctx context.Context) error {
-			return checkHTTPDependency(ctx, client, strings.TrimRight(cfg.OCRServiceURL, "/")+"/health", "")
+			baseURL := internalservices.NormalizeOCRServiceURL(cfg.OCRServiceURL)
+			return checkHTTPDependency(ctx, client, strings.TrimRight(baseURL, "/")+"/health", "")
 		},
 		"litellm": func(ctx context.Context) error {
 			return checkHTTPDependency(ctx, client, strings.TrimRight(cfg.LiteLLMBaseURL, "/")+"/models", cfg.LiteLLMAPIKey)

@@ -11,6 +11,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,11 +44,30 @@ type ocrClient struct {
 	httpClient       *http.Client
 }
 
+// NormalizeOCRServiceURL removes a trailing /ocr path segment so callers can
+// configure either http://host:port or http://host:port/ocr without double-
+// prefixing request paths.
+func NormalizeOCRServiceURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	trimmed := strings.TrimRight(raw, "/")
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	if parsed.Path == "/ocr" {
+		parsed.Path = ""
+	}
+	return strings.TrimRight(parsed.String(), "/")
+}
+
 // NewOCRClient constructs an OCRClient that will call ocrBaseURL.
 // A zero ocrBaseURL is valid — callers should treat that as OCR disabled.
 func NewOCRClient(ocrBaseURL, sharedStorageDir string) OCRClient {
 	return &ocrClient{
-		baseURL:          ocrBaseURL,
+		baseURL:          NormalizeOCRServiceURL(ocrBaseURL),
 		sharedStorageDir: filepath.Clean(sharedStorageDir),
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second, // OCR on large PDFs can be slow

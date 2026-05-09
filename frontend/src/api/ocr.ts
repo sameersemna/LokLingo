@@ -1,4 +1,4 @@
-const OCR_BASE = '/ocr'
+const OCR_BASE = ''
 
 export interface TextBlock {
   text: string

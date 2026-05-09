@@ -22,6 +22,27 @@ func TestOCRClient_NoURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeOCRServiceURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain host", in: "http://localhost:8000", want: "http://localhost:8000"},
+		{name: "trailing slash", in: "http://localhost:8000/", want: "http://localhost:8000"},
+		{name: "ocr suffix", in: "http://localhost:8000/ocr", want: "http://localhost:8000"},
+		{name: "ocr suffix with slash", in: "http://localhost:8000/ocr/", want: "http://localhost:8000"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NormalizeOCRServiceURL(tc.in); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestOCRClient_NonexistentFile(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("HTTP call should not be made for a missing file")
@@ -54,6 +75,40 @@ func TestOCRClient_ServiceReturnsError(t *testing.T) {
 	_, err = client.ExtractText(f.Name(), "auto")
 	if err == nil {
 		t.Fatal("expected error when OCR service returns 500")
+	}
+}
+
+func TestOCRClient_NormalizesOCRServiceURL(t *testing.T) {
+	const expectedText = "Hello from OCR normalized base"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ocr/pdf" {
+			t.Fatalf("expected path /ocr/pdf, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text":       expectedText,
+			"confidence": 0.95,
+			"pages":      []interface{}{},
+		})
+	}))
+	defer srv.Close()
+
+	f, err := os.CreateTemp("", "loklingo-ocr-test-*.pdf")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(f.Name())
+	_, _ = f.WriteString("%PDF-1.4 test content")
+	_ = f.Close()
+
+	client := NewOCRClient(srv.URL+"/ocr", "")
+	got, err := client.ExtractText(f.Name(), "auto")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != expectedText {
+		t.Fatalf("expected %q, got %q", expectedText, got)
 	}
 }
 
