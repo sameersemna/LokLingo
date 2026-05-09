@@ -39,14 +39,11 @@ type TranslateHandler struct {
 
 var syncImagePollTimeout = 120 * time.Second
 var syncImagePollInterval = 600 * time.Millisecond
+var syncImageMaxUploadBytes int64 = 25 * 1024 * 1024
 
 // NewTranslateHandler constructs a TranslateHandler.
 func NewTranslateHandler(service services.TranslationService, store jobs.Store) *TranslateHandler {
 	return &TranslateHandler{service: service, store: store}
-}
-
-func isValidImageMode(mode string) bool {
-	return mode == jobs.ModeOverlay || mode == jobs.ModeLayout
 }
 
 // Translate handles POST /api/v1/translate.
@@ -56,35 +53,33 @@ func (h *TranslateHandler) Translate(c *fiber.Ctx) error {
 		return errResponse(c, fiber.StatusBadRequest, "invalid request body")
 	}
 
-	req.Text = strings.TrimSpace(req.Text)
-	req.Source = strings.TrimSpace(req.Source)
-	req.Target = strings.TrimSpace(req.Target)
-
-	if req.Text == "" {
-		return errResponse(c, fiber.StatusBadRequest, "text is required")
+	text, err := normalizeAndValidateText(req.Text)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "text exceeds max length") {
+			return errResponse(c, fiber.StatusRequestEntityTooLarge, err.Error())
+		}
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
-	if req.Target == "" {
-		return errResponse(c, fiber.StatusBadRequest, "target is required")
-	}
-	if req.Source == "" {
-		req.Source = "auto"
+	source, target, err := normalizeAndValidateSourceTarget(req.Source, req.Target)
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
 	// Check translation cache first.
-	if cached, err := h.store.GetCached(c.Context(), req.Text, req.Source, req.Target); err == nil {
+	if cached, err := h.store.GetCached(c.Context(), text, source, target); err == nil {
 		slog.Info("cache hit (sync)", "request_id", c.Locals("requestID"))
 		return c.JSON(TranslateResponse{
 			TranslatedText: cached,
-			Source:         req.Source,
-			Target:         req.Target,
+			Source:         source,
+			Target:         target,
 			Cached:         true,
 		})
 	}
 
 	translated, err := h.service.Translate(services.TranslationInput{
-		Text:   req.Text,
-		Source: req.Source,
-		Target: req.Target,
+		Text:   text,
+		Source: source,
+		Target: target,
 		Ctx:    c.Context(),
 	})
 	if err != nil {
@@ -93,14 +88,14 @@ func (h *TranslateHandler) Translate(c *fiber.Ctx) error {
 	}
 
 	// Populate cache for future requests.
-	if cerr := h.store.SetCached(c.Context(), req.Text, req.Source, req.Target, translated); cerr != nil {
+	if cerr := h.store.SetCached(c.Context(), text, source, target, translated); cerr != nil {
 		slog.Warn("failed to cache translation", "request_id", c.Locals("requestID"), "err", cerr)
 	}
 
 	return c.JSON(TranslateResponse{
 		TranslatedText: translated,
-		Source:         req.Source,
-		Target:         req.Target,
+		Source:         source,
+		Target:         target,
 	})
 }
 
@@ -119,23 +114,21 @@ func (h *TranslateHandler) TranslateImage(c *fiber.Ctx) error {
 	if err != nil {
 		return errResponse(c, fiber.StatusBadRequest, "file is required (multipart field: file)")
 	}
-
-	target := strings.TrimSpace(c.FormValue("target"))
-	if target == "" {
-		return errResponse(c, fiber.StatusBadRequest, "target is required")
+	ext, err := validateImageUpload(file, syncImageMaxUploadBytes)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "file exceeds max size") {
+			return errResponse(c, fiber.StatusRequestEntityTooLarge, err.Error())
+		}
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
+	}
+	source, target, err := normalizeAndValidateSourceTarget(c.FormValue("source"), c.FormValue("target"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
-	source := strings.TrimSpace(c.FormValue("source"))
-	if source == "" {
-		source = "auto"
-	}
-
-	mode := strings.TrimSpace(c.FormValue("mode"))
-	if mode == "" {
-		mode = jobs.DefaultMode
-	}
-	if !isValidImageMode(mode) {
-		return errResponse(c, fiber.StatusBadRequest, `mode must be "overlay" or "layout"`)
+	mode, err := normalizeAndValidateImageMode(c.FormValue("mode"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
 	if err := os.MkdirAll(jobs.ImageUploadDir, 0o700); err != nil {
@@ -143,7 +136,6 @@ func (h *TranslateHandler) TranslateImage(c *fiber.Ctx) error {
 		return errResponse(c, fiber.StatusInternalServerError, "failed to prepare upload directory")
 	}
 
-	ext := filepath.Ext(file.Filename)
 	if ext == "" {
 		ext = ".bin"
 	}
@@ -183,7 +175,15 @@ func (h *TranslateHandler) TranslateImage(c *fiber.Ctx) error {
 
 		switch current.Status {
 		case jobs.StatusCompleted:
-			return c.JSON(fiber.Map{"image_url": fmt.Sprintf("/api/v1/jobs/%s/output", current.ID)})
+			resp := fiber.Map{
+				"translated_text": current.TranslatedText,
+				"source":          firstNonEmpty(current.Source, source),
+				"target":          firstNonEmpty(current.Target, target),
+			}
+			if current.OutputFilePath != "" {
+				resp["image_url"] = fmt.Sprintf("/api/v1/jobs/%s/output", current.ID)
+			}
+			return c.JSON(resp)
 		case jobs.StatusFailed:
 			msg := strings.TrimSpace(current.ErrorMsg)
 			if msg == "" {
@@ -200,4 +200,12 @@ func (h *TranslateHandler) TranslateImage(c *fiber.Ctx) error {
 	}
 
 	return errResponse(c, fiber.StatusGatewayTimeout, "image translation timed out")
+}
+
+func firstNonEmpty(v, fallback string) string {
+	v = strings.TrimSpace(v)
+	if v != "" {
+		return v
+	}
+	return fallback
 }

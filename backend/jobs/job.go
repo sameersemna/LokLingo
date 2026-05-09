@@ -27,6 +27,7 @@ type Mode = string
 const (
 	ModeOverlay Mode = "overlay"
 	ModeLayout  Mode = "layout"
+	ModeOCROnly Mode = "ocr_only"
 )
 
 // DefaultMode is used when no mode is specified in a job request.

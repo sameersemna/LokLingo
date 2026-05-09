@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { translate, translateImage, uploadPDF } from "./api/translate"
 import { getReadiness, type ReadinessResponse } from "./api/health"
-import { PdfJobsPanel, saveStoredJob } from "./PdfJobsPanel"
+import { getOCRMetrics, type MetricsWindow, type OCRMetricsResponse } from "./api/metrics"
+import { PdfJobsPanel } from "./PdfJobsPanel"
+import { saveStoredJob } from "./pdfJobsStorage"
 import "./App.css"
 
 const LANGUAGES = [
@@ -22,10 +24,14 @@ const TARGET_LANGUAGES = LANGUAGES.filter(l => l.code !== "auto")
 const TRANSLATION_MODES = [
   { value: "overlay", label: "Basic (fast)" },
   { value: "layout", label: "Layout-preserving" },
+  { value: "ocr_only", label: "OCR only (no translation)" },
 ] as const
 const MAX_CHARS = 2000
 const HISTORY_KEY = "loklingo-history"
 const MAX_HISTORY = 10
+const RELIABILITY_WINDOWS: MetricsWindow[] = ["1h", "6h", "24h", "7d", "30d"]
+const PRESSURE_WARN_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_WARN ?? 8)
+const PRESSURE_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_CRITICAL ?? 20)
 
 const DEMO_PRESETS = [
   { id: "cjk",   label: "CJK text",    emoji: "🈳", src: "/samples/cjk_vertical.png",       source: "auto", target: "en" },
@@ -62,6 +68,12 @@ function loadLangs() {
   } catch { return { source: "auto", target: "de" } }
 }
 
+function pressureLevel(score: number): "normal" | "warn" | "critical" {
+  if (score >= PRESSURE_CRITICAL_THRESHOLD) return "critical"
+  if (score >= PRESSURE_WARN_THRESHOLD) return "warn"
+  return "normal"
+}
+
 function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("loklingo-theme")
@@ -73,6 +85,7 @@ function App() {
   const [targetLang, setTargetLang] = useState(() => loadLangs().target)
   const [mode, setMode] = useState<string>("overlay")
   const [result, setResult] = useState("")
+  const [resultKind, setResultKind] = useState<"translation" | "ocr">("translation")
   const [resultImageUrl, setResultImageUrl] = useState<string | null>(null)
   const [compareOriginalUrl, setCompareOriginalUrl] = useState<string | null>(null)
   const [compareOverlayUrl, setCompareOverlayUrl] = useState<string | null>(null)
@@ -86,11 +99,25 @@ function App() {
   const [pdfLoading, setPdfLoading] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showPdfJobs, setShowPdfJobs] = useState(false)
-  const pdfJobsKey = useRef(0)
+  const [showReliability, setShowReliability] = useState(false)
+  const [pdfJobsVersion, setPdfJobsVersion] = useState(0)
+  const [metricsWindow, setMetricsWindow] = useState<MetricsWindow>("24h")
+  const [metrics, setMetrics] = useState<OCRMetricsResponse | null>(null)
+  const [metricsLoading, setMetricsLoading] = useState(false)
+  const [metricsError, setMetricsError] = useState<string | null>(null)
+  const [metricsUpdatedAt, setMetricsUpdatedAt] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
   const [showStatusDetail, setShowStatusDetail] = useState(false)
+  const [readinessMetrics, setReadinessMetrics] = useState<OCRMetricsResponse | null>(null)
+  const [readinessMetricsLoading, setReadinessMetricsLoading] = useState(false)
+  const [readinessMetricsError, setReadinessMetricsError] = useState<string | null>(null)
+  const [readinessPressureDelta, setReadinessPressureDelta] = useState(0)
+  const [readinessPressureTrend, setReadinessPressureTrend] = useState<"up" | "down" | "flat">("flat")
+  const [readinessPressureSeries, setReadinessPressureSeries] = useState<number[]>([])
+  const [readinessPressureLevel, setReadinessPressureLevel] = useState<"normal" | "warn" | "critical">("normal")
+  const readinessPressureRef = useRef<number | null>(null)
   const toastId = useRef(0)
   const histId = useRef(history.length)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -130,6 +157,84 @@ function App() {
     return () => document.removeEventListener("mousedown", handler)
   }, [showStatusDetail])
 
+  useEffect(() => {
+    if (!showStatusDetail) return
+
+    let cancelled = false
+    const fetchPopoverMetrics = async () => {
+      setReadinessMetricsLoading(true)
+      try {
+        const data = await getOCRMetrics("1h")
+        if (cancelled) return
+
+        const nextPressure =
+          data.reliability.litellm.retry_attempts_total +
+          data.reliability.litellm.circuit_opened_total +
+          data.reliability.ocr.retry_attempts_total +
+          data.reliability.ocr.response_rejected_total
+        const prevPressure = readinessPressureRef.current
+        if (prevPressure === null) {
+          setReadinessPressureDelta(0)
+          setReadinessPressureTrend("flat")
+        } else {
+          const delta = nextPressure - prevPressure
+          setReadinessPressureDelta(delta)
+          setReadinessPressureTrend(delta > 0 ? "up" : delta < 0 ? "down" : "flat")
+        }
+        readinessPressureRef.current = nextPressure
+        setReadinessPressureSeries(prev => [...prev.slice(-11), nextPressure])
+        setReadinessPressureLevel(pressureLevel(nextPressure))
+
+        setReadinessMetrics(data)
+        setReadinessMetricsError(null)
+      } catch (err) {
+        if (cancelled) return
+        setReadinessMetricsError(err instanceof Error ? err.message : "Failed to load reliability summary")
+      } finally {
+        if (!cancelled) {
+          setReadinessMetricsLoading(false)
+        }
+      }
+    }
+
+    fetchPopoverMetrics()
+    const interval = setInterval(fetchPopoverMetrics, 60_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [showStatusDetail])
+
+  useEffect(() => {
+    if (!showReliability) return
+
+    let cancelled = false
+    const fetchMetrics = async () => {
+      setMetricsLoading(true)
+      try {
+        const data = await getOCRMetrics(metricsWindow)
+        if (cancelled) return
+        setMetrics(data)
+        setMetricsError(null)
+        setMetricsUpdatedAt(Date.now())
+      } catch (err) {
+        if (cancelled) return
+        setMetricsError(err instanceof Error ? err.message : "Failed to load reliability metrics")
+      } finally {
+        if (!cancelled) {
+          setMetricsLoading(false)
+        }
+      }
+    }
+
+    fetchMetrics()
+    const interval = setInterval(fetchMetrics, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [showReliability, metricsWindow])
+
   const pushToast = useCallback((msg: string, type: "success" | "error") => {
     const id = ++toastId.current
     setToasts(t => [...t, { id, msg, type }])
@@ -140,6 +245,7 @@ function App() {
     if (!sourceText.trim()) return
     setLoading(true)
     setResult("")
+    setResultKind("translation")
     setResultImageUrl(null)
     if (compareOriginalUrl) {
       URL.revokeObjectURL(compareOriginalUrl)
@@ -149,8 +255,10 @@ function App() {
     setCompareLayoutUrl(null)
     setDetectedLang("")
     try {
-      const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode })
+      const textMode = mode === "ocr_only" ? "overlay" : mode
+      const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode: textMode })
       setResult(res.translated_text)
+      setResultKind("translation")
       setResultImageUrl(res.image_url ?? null)
       // If auto-detect was used, reflect what the backend resolved it to
       if (sourceLang === "auto" && res.source && res.source !== "auto") {
@@ -170,7 +278,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [sourceText, sourceLang, targetLang, mode, pushToast])
+  }, [sourceText, sourceLang, targetLang, mode, pushToast, compareOriginalUrl])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -218,6 +326,7 @@ function App() {
     setTargetLang(sourceLang)
     setSourceText(result)
     setResult(sourceText)
+    setResultKind("translation")
     setResultImageUrl(null)
     if (compareOriginalUrl) {
       URL.revokeObjectURL(compareOriginalUrl)
@@ -235,6 +344,20 @@ function App() {
       if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
       setCompareOriginalUrl(originalUrl)
 
+      if (mode === "ocr_only") {
+        const ocrRes = await translateImage(file, src, tgt, "ocr_only")
+        setResult(ocrRes.translated_text)
+        setResultKind("ocr")
+        setResultImageUrl(ocrRes.image_url ?? null)
+        setCompareOverlayUrl(null)
+        setCompareLayoutUrl(null)
+        if (src === "auto" && ocrRes.source && ocrRes.source !== "auto") {
+          setDetectedLang(ocrRes.source)
+        }
+        pushToast("OCR extracted", "success")
+        return
+      }
+
       const [overlayRes, layoutRes] = await Promise.all([
         translateImage(file, src, tgt, "overlay"),
         translateImage(file, src, tgt, "layout"),
@@ -246,6 +369,7 @@ function App() {
 
       const activeRes = mode === "layout" ? layoutRes : overlayRes
       setResult(activeRes.translated_text)
+      setResultKind("translation")
       setResultImageUrl(activeRes.image_url ?? null)
       setCompareOverlayUrl(overlayRes.image_url)
       setCompareLayoutUrl(layoutRes.image_url)
@@ -273,6 +397,7 @@ function App() {
     setTargetLang(preset.target)
     setDetectedLang("")
     setResult("")
+    setResultKind("translation")
     setResultImageUrl(null)
     setCompareOverlayUrl(null)
     setCompareLayoutUrl(null)
@@ -303,9 +428,10 @@ function App() {
           source: sourceLang,
           target: targetLang,
           submittedAt: Date.now(),
+          mode,
         })
         // Force panel refresh by bumping key, then show it
-        pdfJobsKey.current += 1
+        setPdfJobsVersion(v => v + 1)
         setShowPdfJobs(true)
         setShowHistory(false)
         pushToast('PDF uploaded — translating in background', 'success')
@@ -335,6 +461,30 @@ function App() {
     readinessState === "ok" ? "System healthy" :
     readinessState === "degraded" ? "System degraded" :
     "Checking system"
+  const miniSparklinePoints = (() => {
+    if (readinessPressureSeries.length === 0) {
+      return ""
+    }
+    const width = 120
+    const height = 28
+    const minV = Math.min(...readinessPressureSeries)
+    const maxV = Math.max(...readinessPressureSeries)
+    const range = Math.max(1, maxV - minV)
+    return readinessPressureSeries
+      .map((v, i) => {
+        const x = readinessPressureSeries.length === 1
+          ? 0
+          : (i * width) / (readinessPressureSeries.length - 1)
+        const y = height - ((v - minV) / range) * height
+        return `${x},${y}`
+      })
+      .join(" ")
+  })()
+  const readinessPressureLabel = readinessPressureLevel === "critical"
+    ? "Critical"
+    : readinessPressureLevel === "warn"
+    ? "Warn"
+    : "Normal"
 
   return (
     <div className="app">
@@ -350,6 +500,15 @@ function App() {
               title="PDF translation jobs"
             >
               📄 PDF Jobs
+            </button>
+            <button
+              className={`icon-btn${showReliability ? " is-active" : ""}`}
+              type="button"
+              onClick={() => setShowReliability(v => !v)}
+              aria-pressed={showReliability}
+              title="Reliability telemetry"
+            >
+              📊 Reliability
             </button>
             <button
               className={`icon-btn${showHistory ? " is-active" : ""}`}
@@ -388,21 +547,76 @@ function App() {
               {readiness === null ? (
                 <p className="readiness-popover-checking">Fetching…</p>
               ) : (
-                <ul className="readiness-dep-list">
-                  {Object.entries(readiness.dependencies)
-                    .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([name, dep]) => (
-                      <li key={name} className={`readiness-dep-item dep-${dep.status}`}>
-                        <span className="dep-dot" />
-                        <span className="dep-name">{name}</span>
-                        {dep.status === "error" && dep.error && (
-                          <span className="dep-error" title={dep.error}>
-                            {dep.error.length > 60 ? dep.error.slice(0, 57) + "…" : dep.error}
-                          </span>
+                <>
+                  <ul className="readiness-dep-list">
+                    {Object.entries(readiness.dependencies)
+                      .sort(([a], [b]) => a.localeCompare(b))
+                      .map(([name, dep]) => (
+                        <li key={name} className={`readiness-dep-item dep-${dep.status}`}>
+                          <span className="dep-dot" />
+                          <span className="dep-name">{name}</span>
+                          {dep.status === "error" && dep.error && (
+                            <span className="dep-error" title={dep.error}>
+                              {dep.error.length > 60 ? dep.error.slice(0, 57) + "…" : dep.error}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                  </ul>
+
+                  <div className="readiness-mini-reliability">
+                    <div className="mini-rel-header">
+                      <div className="mini-rel-title">Reliability (1h)</div>
+                      {readinessMetrics && (
+                        <span className={`mini-rel-trend mini-rel-trend-${readinessPressureTrend} mini-rel-level-${readinessPressureLevel}`}>
+                          {readinessPressureTrend === "up" ? "▲" : readinessPressureTrend === "down" ? "▼" : "■"}
+                          {readinessPressureDelta === 0 ? "0" : readinessPressureDelta > 0 ? `+${readinessPressureDelta}` : `${readinessPressureDelta}`} {readinessPressureLabel}
+                        </span>
+                      )}
+                    </div>
+                    {readinessMetricsLoading && <p className="mini-rel-state">Loading...</p>}
+                    {readinessMetricsError && <p className="mini-rel-state mini-rel-state-error">{readinessMetricsError}</p>}
+                    {readinessMetrics && !readinessMetricsLoading && !readinessMetricsError && (
+                      <>
+                        {miniSparklinePoints && (
+                          <div className={`mini-rel-sparkline-wrap mini-rel-level-${readinessPressureLevel}`} aria-hidden="true">
+                            <svg className={`mini-rel-sparkline mini-rel-level-${readinessPressureLevel}`} viewBox="0 0 120 28" preserveAspectRatio="none">
+                              <polyline points={miniSparklinePoints} />
+                            </svg>
+                          </div>
                         )}
-                      </li>
-                    ))}
-                </ul>
+                        <div className="mini-rel-grid">
+                          <div className="mini-rel-item">
+                            <span>LiteLLM retries</span>
+                            <strong>{readinessMetrics.reliability.litellm.retry_attempts_total}</strong>
+                          </div>
+                          <div className="mini-rel-item">
+                            <span>LiteLLM circuit opens</span>
+                            <strong>{readinessMetrics.reliability.litellm.circuit_opened_total}</strong>
+                          </div>
+                          <div className="mini-rel-item">
+                            <span>OCR retries</span>
+                            <strong>{readinessMetrics.reliability.ocr.retry_attempts_total}</strong>
+                          </div>
+                          <div className="mini-rel-item">
+                            <span>OCR response rejects</span>
+                            <strong>{readinessMetrics.reliability.ocr.response_rejected_total}</strong>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="mini-rel-open-btn"
+                          onClick={() => {
+                            setShowReliability(true)
+                            setShowStatusDetail(false)
+                          }}
+                        >
+                          Open full Reliability panel
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -411,7 +625,92 @@ function App() {
 
       {/* PDF Jobs panel */}
       {showPdfJobs && (
-        <PdfJobsPanel key={pdfJobsKey.current} onToast={pushToast} />
+        <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} />
+      )}
+
+      {/* Reliability telemetry panel */}
+      {showReliability && (
+        <section className="reliability-panel" aria-live="polite">
+          <div className="reliability-header">
+            <div>
+              <h2>Reliability telemetry</h2>
+              <p>Live counters and windowed event aggregates from /api/v1/metrics/ocr.</p>
+            </div>
+            <label className="reliability-window-control">
+              Window
+              <select value={metricsWindow} onChange={e => setMetricsWindow(e.target.value as MetricsWindow)}>
+                {RELIABILITY_WINDOWS.map(w => (
+                  <option key={w} value={w}>{w}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {metricsLoading && <p className="reliability-state">Loading reliability metrics...</p>}
+          {metricsError && <p className="reliability-state reliability-state-error">{metricsError}</p>}
+
+          {metrics && (
+            <>
+              <div className="reliability-summary-grid">
+                <article className="reliability-card">
+                  <h3>LiteLLM</h3>
+                  <dl>
+                    <div><dt>Retries</dt><dd>{metrics.reliability.litellm.retry_attempts_total}</dd></div>
+                    <div><dt>Cancelled retries</dt><dd>{metrics.reliability.litellm.retry_cancelled_total}</dd></div>
+                    <div><dt>Exhausted retries</dt><dd>{metrics.reliability.litellm.retry_exhausted_total}</dd></div>
+                    <div><dt>Circuit opened</dt><dd>{metrics.reliability.litellm.circuit_opened_total}</dd></div>
+                    <div><dt>Circuit rejects</dt><dd>{metrics.reliability.litellm.circuit_reject_total}</dd></div>
+                    <div><dt>Response rejects</dt><dd>{metrics.reliability.litellm.response_rejected_total}</dd></div>
+                  </dl>
+                </article>
+
+                <article className="reliability-card">
+                  <h3>OCR</h3>
+                  <dl>
+                    <div><dt>Retries</dt><dd>{metrics.reliability.ocr.retry_attempts_total}</dd></div>
+                    <div><dt>Retry-After honored</dt><dd>{metrics.reliability.ocr.retry_after_honored_total}</dd></div>
+                    <div><dt>Cancelled retries</dt><dd>{metrics.reliability.ocr.retry_cancelled_total}</dd></div>
+                    <div><dt>Exhausted retries</dt><dd>{metrics.reliability.ocr.retry_exhausted_total}</dd></div>
+                    <div><dt>Response rejects</dt><dd>{metrics.reliability.ocr.response_rejected_total}</dd></div>
+                    <div><dt>OCR events ({metrics.window.name})</dt><dd>{metrics.events_total}</dd></div>
+                  </dl>
+                </article>
+              </div>
+
+              <div className="reliability-windowed-table-wrap">
+                <div className="reliability-windowed-title">Windowed reliability events ({metrics.window.name})</div>
+                {metrics.reliability_windowed.events.length === 0 ? (
+                  <p className="reliability-state">No reliability events recorded in this window.</p>
+                ) : (
+                  <table className="reliability-table">
+                    <thead>
+                      <tr>
+                        <th>Integration</th>
+                        <th>Event</th>
+                        <th>Reason</th>
+                        <th>Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metrics.reliability_windowed.events.slice(0, 12).map((event, idx) => (
+                        <tr key={`${event.integration}:${event.event_name}:${event.reason}:${idx}`}>
+                          <td>{event.integration}</td>
+                          <td>{event.event_name}</td>
+                          <td>{event.reason || "-"}</td>
+                          <td>{event.count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {metricsUpdatedAt && (
+                <p className="reliability-updated">Updated {new Date(metricsUpdatedAt).toLocaleTimeString()}</p>
+              )}
+            </>
+          )}
+        </section>
       )}
 
       {/* History drawer */}
@@ -435,6 +734,7 @@ function App() {
                   setSourceLang(h.sourceLang)
                   setTargetLang(h.targetLang)
                   setResult(h.result)
+                  setResultKind("translation")
                   setResultImageUrl(null)
                   if (compareOriginalUrl) {
                     URL.revokeObjectURL(compareOriginalUrl)
@@ -538,6 +838,11 @@ function App() {
             ))}
           </select>
         </div>
+        <p className="mode-help" role="note" aria-live="polite">
+          {mode === "ocr_only"
+            ? "OCR only extracts text from image/PDF and skips translation rendering."
+            : "Overlay and Layout translate text and render it onto image output."}
+        </p>
 
         <div className="panels">
           {/* Source panel */}
@@ -579,6 +884,7 @@ function App() {
                     onClick={() => {
                       setSourceText("")
                       setResult("")
+                      setResultKind("translation")
                       setResultImageUrl(null)
                       if (compareOriginalUrl) {
                         URL.revokeObjectURL(compareOriginalUrl)
@@ -606,6 +912,11 @@ function App() {
                 </span>
               ) : (
                 <>
+                  {result && (
+                    <div className={`result-kind-badge result-kind-${resultKind}`}>
+                      {resultKind === "ocr" ? "OCR extraction only" : "Translated text"}
+                    </div>
+                  )}
                   <div className="result-text">{result}</div>
                   {resultImageUrl && !(compareOverlayUrl && compareLayoutUrl) && (
                     <div className="result-image-wrap">
@@ -635,7 +946,9 @@ function App() {
         {ocrLoading && compareOriginalUrl && (
           <div className="comparison-loading">
             <span className="spinner" aria-hidden="true" />
-            Processing overlay &amp; layout — hang tight…
+            {mode === "ocr_only"
+              ? "Running OCR only — hang tight..."
+              : "Processing overlay & layout — hang tight..."}
           </div>
         )}
 

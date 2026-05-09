@@ -8,6 +8,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -67,6 +69,31 @@ func newMultipartImageRequest(t *testing.T, imageData []byte, filename, target, 
 	return req
 }
 
+func newMultipartImageRequestWithPartContentType(t *testing.T, imageData []byte, filename, target, partContentType string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
+	h.Set("Content-Type", partContentType)
+	fw, err := w.CreatePart(h)
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := fw.Write(imageData); err != nil {
+		t.Fatalf("write image data: %v", err)
+	}
+	if err := w.WriteField("target", target); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/image", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
 func newImageJobsApp(store jobs.Store) (*fiber.App, *JobsHandler) {
 	h := NewJobsHandler(store, 25*1024*1024)
 	app := fiber.New()
@@ -107,6 +134,58 @@ func TestCreateImageJob_InvalidMode(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid mode, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateImageJob_InvalidFileType(t *testing.T) {
+	app, _ := newImageJobsApp(&mockStore{})
+	req := newMultipartImageRequest(t, []byte("not-an-image"), "doc.txt", "de", "en", "overlay")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid file type, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateImageJob_InvalidLanguageCodes(t *testing.T) {
+	app, _ := newImageJobsApp(&mockStore{})
+	req := newMultipartImageRequest(t, []byte("\x89PNG"), "img.png", "auto", "en", "overlay")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid target language, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateImageJob_ContentTypeSpoofRejected(t *testing.T) {
+	app, _ := newImageJobsApp(&mockStore{})
+	req := newMultipartImageRequestWithPartContentType(t, []byte("hello"), "note.txt", "de", "image/png")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for content-type spoof, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateImageJob_PathTraversalFilenameNeutralized(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequest(t, []byte("\x89PNG"), "../../evil.png", "de", "en", "overlay")
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if strings.Contains(cs.job.FilePath, "evil") || strings.Contains(cs.job.FilePath, "..") {
+		t.Fatalf("expected sanitized generated path, got %q", cs.job.FilePath)
 	}
 }
 
@@ -156,6 +235,22 @@ func TestCreateImageJob_ModeLayout(t *testing.T) {
 	}
 	if cs.job.Mode != jobs.ModeLayout {
 		t.Fatalf("expected mode=%q, got %q", jobs.ModeLayout, cs.job.Mode)
+	}
+}
+
+func TestCreateImageJob_ModeOCROnly(t *testing.T) {
+	cs := &imageJobStore{}
+	app, _ := newImageJobsApp(cs)
+
+	req := newMultipartImageRequest(t, []byte("\x89PNG"), "img.png", "de", "en", string(jobs.ModeOCROnly))
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.Mode != jobs.ModeOCROnly {
+		t.Fatalf("expected mode=%q, got %q", jobs.ModeOCROnly, cs.job.Mode)
 	}
 }
 

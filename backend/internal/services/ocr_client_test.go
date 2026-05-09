@@ -372,6 +372,43 @@ func TestOCRClient_UsesSharedPathWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestOCRClient_RetriesTransientSharedPath(t *testing.T) {
+	sharedDir := t.TempDir()
+	filePath := filepath.Join(sharedDir, "sample.pdf")
+	if err := os.WriteFile(filePath, []byte("%PDF-1.4 transient"), 0o600); err != nil {
+		t.Fatalf("write shared temp file: %v", err)
+	}
+
+	requestCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"busy"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text":       "Recovered",
+			"confidence": 0.9,
+			"pages":      []interface{}{},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewOCRClient(srv.URL, sharedDir)
+	text, err := client.ExtractText(filePath, "de")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "Recovered" {
+		t.Fatalf("expected recovery response, got %q", text)
+	}
+	if requestCount != 2 {
+		t.Fatalf("expected 2 requests (retry once), got %d", requestCount)
+	}
+}
+
 func TestOCRClient_FallsBackToMultipartWhenSharedPathUnavailable(t *testing.T) {
 	sharedDir := t.TempDir()
 	filePath := filepath.Join(sharedDir, "sample.pdf")
@@ -483,5 +520,57 @@ func TestOCRClient_GivesUpAfterMaxRetries(t *testing.T) {
 	// multipart (503 is not a fallback-eligible status).
 	if callCount != 3 {
 		t.Fatalf("expected exactly 3 shared-path attempts, got %d", callCount)
+	}
+}
+
+func TestOCRClient_ResponseTooLargeRejected(t *testing.T) {
+	oldLimit := ocrMaxResponseBodyBytes
+	ocrMaxResponseBodyBytes = 128
+	t.Cleanup(func() {
+		ocrMaxResponseBodyBytes = oldLimit
+	})
+
+	sharedDir := t.TempDir()
+	filePath := filepath.Join(sharedDir, "sample.pdf")
+	if err := os.WriteFile(filePath, []byte("%PDF-1.4 shared"), 0o600); err != nil {
+		t.Fatalf("write shared temp file: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text": strings.Repeat("a", 1024),
+		})
+	}))
+	defer srv.Close()
+
+	client := NewOCRClient(srv.URL, sharedDir)
+	_, err := client.ExtractText(filePath, "de")
+	if err == nil || !strings.Contains(err.Error(), "exceeds max size") {
+		t.Fatalf("expected oversized response error, got %v", err)
+	}
+}
+
+func TestOCRClient_InvalidImageBlockSchemaRejected(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "img.png")
+	if err := os.WriteFile(tmp, []byte("png-data"), 0o600); err != nil {
+		t.Fatalf("write temp image: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text": "hello",
+			"blocks": []map[string]interface{}{
+				{"text": "a", "bbox": []float64{0, 0, 10}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewOCRClient(srv.URL, "")
+	_, err := client.ExtractImageBlocks(tmp, "auto")
+	if err == nil || !strings.Contains(err.Error(), "invalid image block") {
+		t.Fatalf("expected invalid block schema error, got %v", err)
 	}
 }

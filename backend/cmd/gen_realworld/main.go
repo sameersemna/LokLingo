@@ -1,4 +1,3 @@
-package main
 // gen_realworld renders a real downloaded JPEG with Arabic, Devanagari,
 // Bengali and CJK overlays to verify no-tofu rendering on a genuine photo.
 //
@@ -37,10 +36,10 @@ func main() {
 		{Text: "Wing structure detail", Bbox: []float64{330, 60, 630, 120}},
 	}
 	translated := []string{
-		"نوع النمل",                    // Arabic
-		"वैज्ञानिक नाम हिंदी में",       // Devanagari
-		"আবাসস্থলের বিবরণ বাংলায়",      // Bengali
-		"翅膀结构细节",                     // CJK
+		"نوع النمل", // Arabic
+		"वैज्ञानिक नाम हिंदी में",  // Devanagari
+		"আবাসস্থলের বিবরণ বাংলায়", // Bengali
+		"翅膀结构细节", // CJK
 	}
 
 	opts := services.DefaultOverlayOptions()

@@ -160,6 +160,81 @@ The readiness endpoint reports dependency status without sending a translation r
 curl http://localhost:28080/ready
 ```
 
+## 📊 Reliability Telemetry
+
+LokLingo can persist OCR and LiteLLM reliability events into Postgres for
+time-windowed operations dashboards.
+
+### 1) Apply analytics migrations
+
+If `POSTGRES_DSN` is configured for backend analytics logging, apply SQL
+migrations in order:
+
+```bash
+for f in backend/migrations/*.sql; do
+    psql "$POSTGRES_DSN" -f "$f"
+done
+```
+
+The new reliability telemetry table is created by:
+
+* `backend/migrations/003_create_reliability_events.sql`
+* `backend/migrations/004_add_reliability_retention_policy.sql`
+
+Retention cleanup helper:
+
+```sql
+SELECT prune_reliability_events(INTERVAL '30 days');
+```
+
+Recommended: run that SQL daily from an external scheduler (system cron,
+Kubernetes CronJob, CI maintenance job, etc.).
+
+### 2) Query API-level metrics
+
+The internal metrics endpoint now returns both:
+
+* `reliability`: in-process counters since backend start
+* `reliability_windowed.events`: Postgres-aggregated reliability events for the requested window
+
+Example:
+
+```bash
+curl "http://localhost:28080/api/v1/metrics/ocr?window=24h" \
+    -H "X-Internal-Token: $INTERNAL_TOKEN"
+```
+
+Accepted windows: `1h`, `6h`, `24h`, `7d`, `30d`.
+
+### 3) Query dashboard SQL directly
+
+Use:
+
+* `backend/analytics/ocr_dashboard.sql`
+
+This file now includes reliability-focused queries such as top failure reasons,
+retry/circuit event volumes, and integration/event trends over time.
+
+### 4) Frontend reliability severity thresholds
+
+The readiness popover mini-widget and sparkline support configurable severity
+thresholds through Vite environment variables:
+
+* `VITE_RELIABILITY_PRESSURE_WARN`: warn threshold for pressure score (default `8`)
+* `VITE_RELIABILITY_PRESSURE_CRITICAL`: critical threshold for pressure score (default `20`)
+
+Pressure score is computed from the latest 1h metrics as:
+
+```text
+litellm.retry_attempts_total
++ litellm.circuit_opened_total
++ ocr.retry_attempts_total
++ ocr.response_rejected_total
+```
+
+Set these in the frontend environment used at build time to tune alert
+sensitivity per environment (dev/staging/prod).
+
 ---
 
 ## 📌 Roadmap

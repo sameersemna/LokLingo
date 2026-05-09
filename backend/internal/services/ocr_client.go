@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"loklingo/backend/internal/observability"
 )
 
 // OCRClient extracts text from PDF files by calling the remote OCR service.
@@ -76,6 +79,8 @@ type ocrImageResponse struct {
 
 const ocrPDFPath = "/ocr/pdf"
 const ocrImagePath = "/ocr/image"
+
+var ocrMaxResponseBodyBytes int64 = 8 * 1024 * 1024
 
 // fetchOCRResponse routes the PDF through shared-path → multipart → JSON-stream
 // strategies and returns the decoded OCR response.
@@ -214,9 +219,22 @@ func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, e
 		return nil, fmt.Errorf("ocr: service returned HTTP %d", httpResp.StatusCode)
 	}
 
-	var decoded ocrImageResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
+	raw, err = readBodyLimited(httpResp.Body, ocrMaxResponseBodyBytes)
+	if err != nil {
+		observability.IncOCRResponseRejectedBody()
+		slog.Warn("ocr_response_rejected", "endpoint", ocrImagePath, "reason", "body_too_large_or_unreadable", "err", err)
 		return nil, fmt.Errorf("ocr: decode image response: %w", err)
+	}
+	var decoded ocrImageResponse
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		observability.IncOCRResponseRejectedJSON()
+		slog.Warn("ocr_response_rejected", "endpoint", ocrImagePath, "reason", "invalid_json", "err", err)
+		return nil, fmt.Errorf("ocr: decode image response: %w", err)
+	}
+	if err := validateImageOCRResponse(decoded); err != nil {
+		observability.IncOCRResponseRejectedShape()
+		slog.Warn("ocr_response_rejected", "endpoint", ocrImagePath, "reason", "invalid_schema", "err", err)
+		return nil, err
 	}
 	if len(decoded.Blocks) == 0 {
 		return nil, fmt.Errorf("ocr: image response returned no blocks")
@@ -264,14 +282,22 @@ func (c *ocrClient) doWithRetry(buildReq func() (*http.Request, error), maxRetri
 	backoff := 200 * time.Millisecond
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			slog.Warn("ocr_retry", "attempt", attempt, "backoff_ms", backoff.Milliseconds(), "err", lastErr)
-			time.Sleep(backoff)
-			backoff *= 2
-		}
 		req, err := buildReq()
 		if err != nil {
 			return nil, err
+		}
+		if attempt > 0 {
+			observability.IncOCRRetryAttempt()
+			slog.Warn("ocr_retry", "attempt", attempt, "backoff_ms", backoff.Milliseconds(), "err", lastErr)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-req.Context().Done():
+				timer.Stop()
+				observability.IncOCRRetryCancelled()
+				return nil, fmt.Errorf("ocr: request cancelled while retrying: %w", req.Context().Err())
+			case <-timer.C:
+			}
+			backoff *= 2
 		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -280,6 +306,10 @@ func (c *ocrClient) doWithRetry(buildReq func() (*http.Request, error), maxRetri
 			continue
 		}
 		if isTransientStatus(resp.StatusCode) {
+			if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > 0 {
+				observability.IncOCRRetryAfterHonored()
+				backoff = retryAfter
+			}
 			// Drain and close before retrying to free the connection.
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -288,7 +318,36 @@ func (c *ocrClient) doWithRetry(buildReq func() (*http.Request, error), maxRetri
 		}
 		return resp, nil
 	}
+	observability.IncOCRRetryExhausted()
 	return nil, fmt.Errorf("ocr: all %d attempts failed: %w", maxRetries+1, lastErr)
+}
+
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+	if ts, err := http.ParseTime(v); err == nil {
+		d := time.Until(ts)
+		if d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+func readBodyLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeds max size (%d bytes)", maxBytes)
+	}
+	return b, nil
 }
 
 func (c *ocrClient) extractOCRSharedPath(filePath, lang string) (ocrPDFResponse, int, error) {
@@ -447,12 +506,63 @@ func (c *ocrClient) extractOCRJSONStream(filePath, lang string) (ocrPDFResponse,
 }
 
 func decodeOCRResponse(r io.Reader) (ocrPDFResponse, error) {
-	var result ocrPDFResponse
-	if err := json.NewDecoder(r).Decode(&result); err != nil {
+	raw, err := readBodyLimited(r, ocrMaxResponseBodyBytes)
+	if err != nil {
+		observability.IncOCRResponseRejectedBody()
+		slog.Warn("ocr_response_rejected", "endpoint", ocrPDFPath, "reason", "body_too_large_or_unreadable", "err", err)
 		return ocrPDFResponse{}, fmt.Errorf("ocr: decode response: %w", err)
+	}
+	var result ocrPDFResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		observability.IncOCRResponseRejectedJSON()
+		slog.Warn("ocr_response_rejected", "endpoint", ocrPDFPath, "reason", "invalid_json", "err", err)
+		return ocrPDFResponse{}, fmt.Errorf("ocr: decode response: %w", err)
+	}
+	if err := validatePDFOCRResponse(result); err != nil {
+		observability.IncOCRResponseRejectedShape()
+		slog.Warn("ocr_response_rejected", "endpoint", ocrPDFPath, "reason", "invalid_schema", "err", err)
+		return ocrPDFResponse{}, err
 	}
 	if result.Text == "" && len(result.Pages) == 0 {
 		return ocrPDFResponse{}, fmt.Errorf("ocr: service returned empty response")
 	}
 	return result, nil
+}
+
+func validatePDFOCRResponse(resp ocrPDFResponse) error {
+	if len(resp.Pages) == 0 {
+		return nil
+	}
+	for i, page := range resp.Pages {
+		for j, block := range page.Blocks {
+			if err := validateOCRTextBlock(block); err != nil {
+				return fmt.Errorf("ocr: invalid page block %d/%d: %w", i, j, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateImageOCRResponse(resp ocrImageResponse) error {
+	for i, block := range resp.Blocks {
+		if err := validateOCRTextBlock(block); err != nil {
+			return fmt.Errorf("ocr: invalid image block %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func validateOCRTextBlock(block OCRTextBlock) error {
+	if len(block.Bbox) != 4 {
+		return fmt.Errorf("bbox must have 4 values")
+	}
+	for _, v := range block.Bbox {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("bbox contains non-finite value")
+		}
+	}
+	if block.Bbox[2] <= block.Bbox[0] || block.Bbox[3] <= block.Bbox[1] {
+		return fmt.Errorf("bbox has invalid geometry")
+	}
+	return nil
 }

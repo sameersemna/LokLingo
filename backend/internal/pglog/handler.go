@@ -1,9 +1,10 @@
 // Package pglog provides a slog.Handler that intercepts structured log events
 // and persists analytics records to Postgres.
 //
-// Only events with the message "ocr_fallback_triggered" are written to the
-// ocr_events table; every other event is forwarded to the wrapped handler
-// unchanged.  This keeps the Postgres writes narrow and cheap.
+// Events with message "ocr_fallback_triggered" are written to the ocr_events
+// table. Reliability events with messages prefixed by "litellm_" or "ocr_"
+// are written to reliability_events. Every other event is forwarded to the
+// wrapped handler unchanged. This keeps the Postgres writes narrow and cheap.
 package pglog
 
 import (
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,7 +21,8 @@ import (
 const ocrFallbackMsg = "ocr_fallback_triggered"
 
 // Handler wraps another slog.Handler and additionally writes
-// ocr_fallback_triggered events to the ocr_events Postgres table.
+// ocr_fallback_triggered events to ocr_events and reliability-prefixed
+// integration events to reliability_events.
 type Handler struct {
 	inner slog.Handler
 	pool  *pgxpool.Pool
@@ -56,19 +59,35 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		return err
 	}
 
-	if r.Message != ocrFallbackMsg || h.pool == nil {
+	if h.pool == nil {
 		return nil
 	}
 
-	// Collect the structured fields from the record.
+	if r.Message == ocrFallbackMsg {
+		fields := collectFields(r)
+		go h.insertOCREvent(fields, r.Time)
+		return nil
+	}
+
+	if isReliabilityEvent(r.Message) {
+		fields := collectFields(r)
+		go h.insertReliabilityEvent(r.Message, fields, r.Time)
+	}
+
+	return nil
+}
+
+func collectFields(r slog.Record) map[string]slog.Value {
 	fields := make(map[string]slog.Value, 10)
 	r.Attrs(func(a slog.Attr) bool {
 		fields[a.Key] = a.Value
 		return true
 	})
+	return fields
+}
 
-	go h.insertOCREvent(fields, r.Time)
-	return nil
+func isReliabilityEvent(message string) bool {
+	return strings.HasPrefix(message, "litellm_") || strings.HasPrefix(message, "ocr_")
 }
 
 // insertOCREvent writes one row to ocr_events in the background.
@@ -94,6 +113,33 @@ func (h *Handler) insertOCREvent(fields map[string]slog.Value, recordedAt time.T
 		fieldInt64(fields, "ocr_ms"),
 		fieldInt64(fields, "translate_ms"),
 		fieldInt64(fields, "total_ms"),
+	)
+}
+
+func (h *Handler) insertReliabilityEvent(message string, fields map[string]slog.Value, recordedAt time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	integration := "unknown"
+	if strings.HasPrefix(message, "litellm_") {
+		integration = "litellm"
+	} else if strings.HasPrefix(message, "ocr_") {
+		integration = "ocr"
+	}
+
+	const q = `
+		INSERT INTO reliability_events
+			(recorded_at, integration, event_name, reason, endpoint, attempt, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+
+	_, _ = h.pool.Exec(ctx, q,
+		recordedAt,
+		integration,
+		message,
+		fieldString(fields, "reason"),
+		fieldString(fields, "endpoint"),
+		fieldInt64(fields, "attempt"),
+		fieldInt64(fields, "status"),
 	)
 }
 

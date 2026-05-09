@@ -28,6 +28,7 @@ export interface JobResponse {
 
 const POLL_INTERVAL_MS = 600
 const MAX_POLLS = 100 // 60 s timeout
+const REQUEST_TIMEOUT_MS = 30_000
 
 // ---------- shared helpers ----------
 
@@ -43,16 +44,49 @@ function buildTranslateError(status: number, err: { error?: string; request_id?:
   return new Error(err.error ?? `HTTP ${status}`)
 }
 
+async function parseErrorBody(res: Response): Promise<{ error?: string; request_id?: string }> {
+  const parsed = await res.json().catch(() => ({ error: 'Unknown error' })) as {
+    error?: unknown
+    request_id?: unknown
+  }
+  return {
+    error: typeof parsed.error === 'string' ? parsed.error : 'Unknown error',
+    request_id: typeof parsed.request_id === 'string' ? parsed.request_id : undefined,
+  }
+}
+
+async function fetchWithTimeout(input: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Request timed out. Please try again.', { cause: err })
+    }
+    if (err instanceof Error) {
+      throw new Error('Network request failed.', { cause: err })
+    }
+    throw new Error('Network request failed.', { cause: err })
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+async function fetchJsonOrThrow<T>(input: string, init?: RequestInit): Promise<T> {
+  const res = await fetchWithTimeout(input, init)
+  if (!res.ok) {
+    const err = await parseErrorBody(res)
+    throw buildTranslateError(res.status, err)
+  }
+  return res.json() as Promise<T>
+}
+
 /**
  * Fetches a single job snapshot from GET /api/v1/jobs/:id.
  */
 export async function fetchJob(jobId: string): Promise<JobResponse> {
-  const res = await fetch(`/api/v1/jobs/${jobId}`)
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Unknown error' }))
-    throw buildTranslateError(res.status, err)
-  }
-  return res.json()
+  return fetchJsonOrThrow<JobResponse>(`/api/v1/jobs/${jobId}`)
 }
 
 /**
@@ -99,18 +133,12 @@ async function pollJob(
  * Translates text via the async jobs API (POST /api/v1/jobs → poll GET /api/v1/jobs/:id).
  */
 export async function translate(req: TranslateRequest): Promise<TranslateResponse> {
-  const enqueueRes = await fetch('/api/v1/jobs', {
+  const enqueue = await fetchJsonOrThrow<{ job_id: string }>('/api/v1/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...req, mode: req.mode ?? 'overlay' }),
   })
-
-  if (!enqueueRes.ok) {
-    const err = await enqueueRes.json().catch(() => ({ error: 'Unknown error' }))
-    throw buildTranslateError(enqueueRes.status, err)
-  }
-
-  const { job_id }: { job_id: string } = await enqueueRes.json()
+  const { job_id } = enqueue
   return pollJob(job_id, req.source, req.target, 'Translation job failed')
 }
 
@@ -135,17 +163,10 @@ export async function uploadPDF(
   form.append('target', target)
   form.append('mode', mode)
 
-  const enqueueRes = await fetch('/api/v1/jobs/pdf', {
+  return fetchJsonOrThrow<UploadPDFResponse>('/api/v1/jobs/pdf', {
     method: 'POST',
     body: form,
   })
-
-  if (!enqueueRes.ok) {
-    const err = await enqueueRes.json().catch(() => ({ error: 'Unknown error' }))
-    throw buildTranslateError(enqueueRes.status, err)
-  }
-
-  return enqueueRes.json()
 }
 
 
@@ -178,21 +199,19 @@ export async function translateImage(
   form.append('target', target)
   form.append('mode', mode)
 
-  const res = await fetch('/api/v1/translate/image', {
+  const data = await fetchJsonOrThrow<{
+    image_url?: string
+    translated_text?: string
+    source?: string
+    target?: string
+  }>('/api/v1/translate/image', {
     method: 'POST',
     body: form,
   })
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Unknown error' }))
-    throw buildTranslateError(res.status, err)
-  }
-
-  const data = await res.json() as { image_url?: string }
   return {
-    translated_text: '',
-    source,
-    target,
+    translated_text: data.translated_text ?? '',
+    source: data.source ?? source,
+    target: data.target ?? target,
     image_url: data.image_url,
   }
 }

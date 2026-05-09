@@ -77,7 +77,7 @@ const (
 	overlayTextContrastThreshold = 0.20
 )
 
-var overlayFontData = mustParseOverlayFont()
+var overlayFontData = parseOverlayFont()
 
 // embeddedGoBoldFont / embeddedGoMonoFont are always-available embedded fonts
 // used as fallbacks when the system Noto Bold / Mono files are absent (e.g.
@@ -1954,6 +1954,9 @@ func loadOverlayFace(fontSize float64) (font.Face, error) {
 // loadFaceFromFont creates (or retrieves from cache) a font.Face at fontSize for the
 // given parsed font. It is safe for concurrent use.
 func loadFaceFromFont(fontData *opentype.Font, cache *sync.Map, fontSize float64) (font.Face, error) {
+	if fontData == nil {
+		return nil, fmt.Errorf("font data unavailable")
+	}
 	key := int(fontSize)
 	if cached, ok := cache.Load(key); ok {
 		return cached.(font.Face), nil
@@ -2030,6 +2033,9 @@ func (e *fallbackFontEntry) face(fontSize float64) (font.Face, error) {
 // marks, etc.) are skipped because they carry no visible glyph and many
 // otherwise-correct fonts omit them from their cmap.
 func fontCoversText(f *opentype.Font, text string) bool {
+	if f == nil {
+		return false
+	}
 	var buf sfnt.Buffer
 	for _, r := range text {
 		if unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
@@ -2417,10 +2423,11 @@ func computeStrokeOffsets(style BlockFontStyle, fontSize float64) []strokeOffset
 	return nil
 }
 
-func mustParseOverlayFont() *opentype.Font {
+func parseOverlayFont() *opentype.Font {
 	parsed, err := opentype.Parse(goregular.TTF)
 	if err != nil {
-		panic(fmt.Sprintf("parse overlay font: %v", err))
+		slog.Error("parse overlay font failed", "err", err)
+		return nil
 	}
 	return parsed
 }
@@ -2428,7 +2435,8 @@ func mustParseOverlayFont() *opentype.Font {
 func mustParseEmbeddedFont(data []byte, name string) *opentype.Font {
 	parsed, err := opentype.Parse(data)
 	if err != nil {
-		panic(fmt.Sprintf("parse embedded font %s: %v", name, err))
+		slog.Error("parse embedded font failed", "name", name, "err", err)
+		return nil
 	}
 	return parsed
 }

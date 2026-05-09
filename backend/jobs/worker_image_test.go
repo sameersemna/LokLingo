@@ -198,6 +198,50 @@ func TestWorker_ImageJob_LayoutMode_RendersOutputImage(t *testing.T) {
 	}
 }
 
+func TestWorker_ImageJob_OCROnly_CompletesWithoutRendering(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "input.png")
+
+	img := image.NewRGBA(image.Rect(0, 0, 100, 40))
+	f, err := os.Create(inPath)
+	if err != nil {
+		t.Fatalf("create input image: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode input image: %v", err)
+	}
+	_ = f.Close()
+
+	store := &mockWorkerStore{}
+	ocr := &mockOCRSvc{blocks: []internalservices.OCRTextBlock{{Text: "Hello", Bbox: []float64{10, 10, 60, 30}}}}
+	w := NewWorker(store, &mockTranslSvc{result: "IGNORED"}, &mockPDFSvc{}, ocr, 0)
+
+	job := &Job{
+		ID:       "img-ocr-only-1",
+		Type:     TypeImage,
+		Mode:     ModeOCROnly,
+		FilePath: inPath,
+		Source:   "en",
+		Target:   "de",
+	}
+
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s, err=%s", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText != "Hello" {
+		t.Fatalf("expected OCR text in translated_text, got %q", store.lastJob.TranslatedText)
+	}
+	if store.lastJob.OutputFilePath != "" {
+		t.Fatalf("expected no rendered output path for OCR-only mode, got %q", store.lastJob.OutputFilePath)
+	}
+}
+
 func TestApplyLayoutModeBBoxOptions_DefaultAndGeometry(t *testing.T) {
 	opts := internalservices.DefaultOverlayOptions()
 	applyLayoutModeBBoxOptions(&opts, -1)

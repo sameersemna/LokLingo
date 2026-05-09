@@ -5,6 +5,26 @@ import (
 	"testing"
 )
 
+func TestIsReliabilityEvent(t *testing.T) {
+	cases := []struct {
+		message string
+		want    bool
+	}{
+		{message: "litellm_retry", want: true},
+		{message: "litellm_circuit_opened", want: true},
+		{message: "ocr_retry", want: true},
+		{message: "ocr_response_rejected", want: true},
+		{message: "ocr_fallback_triggered", want: true},
+		{message: "translation completed", want: false},
+	}
+
+	for _, tc := range cases {
+		if got := isReliabilityEvent(tc.message); got != tc.want {
+			t.Fatalf("isReliabilityEvent(%q) = %v, want %v", tc.message, got, tc.want)
+		}
+	}
+}
+
 func TestFieldString(t *testing.T) {
 	fields := map[string]slog.Value{
 		"plain": slog.StringValue("value"),

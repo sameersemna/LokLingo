@@ -648,6 +648,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	// For PDF jobs this is populated during extraction; for text jobs it wraps job.Text.
 	var pages []string
 
+	// effectiveMode normalises a missing mode value (legacy jobs) to ModeOverlay.
+	effectiveJobMode := effectiveMode(job.Mode)
+
 	// For PDF jobs: extract text from the file before translating.
 	if job.Type == TypePDF {
 		if job.FilePath == "" {
@@ -673,6 +676,55 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				return
 			}
 		}
+		if effectiveJobMode == ModeOCROnly {
+			if w.ocrClient == nil {
+				slog.Error("pdf OCR-only requested, no OCR client configured", "job_id", job.ID, "file", job.FilePath)
+				job.Status = StatusFailed
+				job.ErrorMsg = "ocr client is required for translate_pdf jobs in ocr_only mode"
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update job result (missing ocr client in ocr_only mode)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+			ocrStart := time.Now()
+			ocrPages, ocrErr := w.ocrClient.ExtractPages(job.FilePath, job.Lang)
+			ocrMS = time.Since(ocrStart).Milliseconds()
+			if ocrErr != nil {
+				slog.Error("pdf OCR-only extraction failed", "job_id", job.ID, "file", job.FilePath, "err", ocrErr)
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("pdf OCR extraction failed: %v", ocrErr)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update job result (ocr_only extraction failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+			pages = normalizePages(ocrPages)
+			if len(pages) == 0 {
+				job.Status = StatusFailed
+				job.ErrorMsg = "pdf OCR extraction returned no text"
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update job result (ocr_only empty text)", "job_id", job.ID, "err", uerr)
+				}
+				return
+			}
+			job.ProcessingMethod = "ocr"
+			job.Text = strings.Join(pages, "\n\n")
+			job.TranslatedText = job.Text
+			job.TotalPages = len(pages)
+			job.ProcessedPages = len(pages)
+			job.Status = StatusCompleted
+			if err := w.store.Update(ctx, job); err != nil {
+				slog.Error("update job result (ocr_only completed)", "job_id", job.ID, "err", err)
+			}
+			slog.Info("pdf_ocr_only_job_finished",
+				"job_id", job.ID,
+				"status", job.Status,
+				"pages", len(pages),
+				"ocr_ms", ocrMS,
+			)
+			return
+		}
+
 		extractStart := time.Now()
 		pdfPages, err := w.pdfService.ExtractPages(job.FilePath)
 		extractMS = time.Since(extractStart).Milliseconds()
@@ -736,8 +788,6 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 
 	// Branch on job.Mode to select the rendering/translation pipeline.
-	// effectiveMode normalises a missing mode value (legacy jobs) to ModeOverlay.
-	effectiveJobMode := effectiveMode(job.Mode)
 	slog.Info("translation_pipeline_selected",
 		"job_id", job.ID,
 		"mode", effectiveJobMode,
@@ -747,6 +797,15 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	case ModeLayout:
 		if job.Type != TypeImage {
 			w.processLayoutMode(ctx, job)
+			return
+		}
+	case ModeOCROnly:
+		if job.Type != TypeImage {
+			job.Status = StatusFailed
+			job.ErrorMsg = "ocr_only mode is currently supported for image and pdf jobs only"
+			if err := w.store.Update(ctx, job); err != nil {
+				slog.Error("update job result (ocr_only unsupported)", "job_id", job.ID, "err", err)
+			}
 			return
 		}
 	default: // ModeOverlay — continue with the overlay translation pipeline below.
@@ -803,6 +862,22 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			if uerr := w.store.Update(ctx, job); uerr != nil {
 				slog.Error("update image job result (no text)", "job_id", job.ID, "err", uerr)
 			}
+			return
+		}
+
+		if effectiveJobMode == ModeOCROnly {
+			job.Text = strings.Join(segmentText, "\n")
+			job.TranslatedText = job.Text
+			job.OutputFilePath = ""
+			job.Status = StatusCompleted
+			if err := w.store.Update(ctx, job); err != nil {
+				slog.Error("update image job result (ocr_only completed)", "job_id", job.ID, "err", err)
+			}
+			slog.Info("image_ocr_only_job_finished",
+				"job_id", job.ID,
+				"blocks", len(segmentText),
+				"status", job.Status,
+			)
 			return
 		}
 

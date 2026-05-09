@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 	"time"
 
@@ -23,6 +24,8 @@ type translateImageTestStore struct {
 	completedAfter int
 	finalStatus    jobs.Status
 	finalError     string
+	finalOutput    string
+	finalText      string
 }
 
 func (s *translateImageTestStore) Enqueue(_ context.Context, job *jobs.Job) error {
@@ -47,7 +50,11 @@ func (s *translateImageTestStore) Get(_ context.Context, id string) (*jobs.Job, 
 			status = jobs.StatusCompleted
 		}
 		if status == jobs.StatusCompleted {
-			output = "/tmp/loklingo/images/out.png"
+			if s.finalOutput != "" {
+				output = s.finalOutput
+			} else {
+				output = "/tmp/loklingo/images/out.png"
+			}
 		}
 	}
 	return &jobs.Job{
@@ -56,6 +63,7 @@ func (s *translateImageTestStore) Get(_ context.Context, id string) (*jobs.Job, 
 		Status:         status,
 		ErrorMsg:       s.finalError,
 		OutputFilePath: output,
+		TranslatedText: s.finalText,
 	}, nil
 }
 
@@ -93,6 +101,61 @@ func makeImageMultipartRequest(t *testing.T, target string, withFile bool, sourc
 	if mode != "" {
 		if err := writer.WriteField("mode", mode); err != nil {
 			t.Fatalf("write mode field: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/translate/image", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
+}
+
+func makeImageMultipartRequestWithFileName(t *testing.T, target, fileName string, fileData []byte) *http.Request {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(fileData); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if target != "" {
+		if err := writer.WriteField("target", target); err != nil {
+			t.Fatalf("write target field: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/translate/image", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
+}
+
+func makeImageMultipartRequestWithPartContentType(t *testing.T, target, fileName, partContentType string, fileData []byte) *http.Request {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", `form-data; name="file"; filename="`+fileName+`"`)
+	h.Set("Content-Type", partContentType)
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(fileData); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if target != "" {
+		if err := writer.WriteField("target", target); err != nil {
+			t.Fatalf("write target field: %v", err)
 		}
 	}
 	if err := writer.Close(); err != nil {
@@ -174,6 +237,53 @@ func TestTranslateImage_ValidatesRequiredFields(t *testing.T) {
 	}
 	if invalidModeResp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid mode, got %d", invalidModeResp.StatusCode)
+	}
+
+	invalidFileReq := makeImageMultipartRequestWithFileName(t, "de", "file.txt", []byte("hello"))
+	invalidFileResp, err := app.Test(invalidFileReq)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if invalidFileResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid file type, got %d", invalidFileResp.StatusCode)
+	}
+}
+
+func TestTranslateImage_RejectsOversizedFile(t *testing.T) {
+	oldLimit := syncImageMaxUploadBytes
+	syncImageMaxUploadBytes = 4
+	t.Cleanup(func() {
+		syncImageMaxUploadBytes = oldLimit
+	})
+
+	store := &translateImageTestStore{completedAfter: 1}
+	h := NewTranslateHandler(nil, store)
+	app := fiber.New()
+	app.Post("/translate/image", h.TranslateImage)
+
+	req := makeImageMultipartRequestWithFileName(t, "de", "img.png", []byte("12345"))
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	}
+}
+
+func TestTranslateImage_ContentTypeSpoofRejected(t *testing.T) {
+	store := &translateImageTestStore{completedAfter: 1}
+	h := NewTranslateHandler(nil, store)
+	app := fiber.New()
+	app.Post("/translate/image", h.TranslateImage)
+
+	req := makeImageMultipartRequestWithPartContentType(t, "de", "note.txt", "image/png", []byte("hello"))
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for content-type spoof, got %d", resp.StatusCode)
 	}
 }
 
@@ -263,5 +373,46 @@ func TestTranslateImage_TimeoutReturnsGatewayTimeout(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("expected 504, got %d", resp.StatusCode)
+	}
+}
+
+func TestTranslateImage_OCROnlyReturnsTextWithoutImageURL(t *testing.T) {
+	oldPollInterval := syncImagePollInterval
+	oldPollTimeout := syncImagePollTimeout
+	syncImagePollInterval = 1 * time.Millisecond
+	syncImagePollTimeout = 2 * time.Second
+	t.Cleanup(func() {
+		syncImagePollInterval = oldPollInterval
+		syncImagePollTimeout = oldPollTimeout
+	})
+
+	store := &translateImageTestStore{completedAfter: 1, finalText: "Hello from OCR"}
+	h := NewTranslateHandler(nil, store)
+	app := fiber.New()
+	app.Post("/translate/image", h.TranslateImage)
+
+	req := makeImageMultipartRequest(t, "de", true, "", string(jobs.ModeOCROnly))
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["translated_text"] != "Hello from OCR" {
+		t.Fatalf("expected translated_text in response, got %#v", body)
+	}
+	if _, ok := body["image_url"]; !ok {
+		// The mock store currently returns an output path for completed jobs.
+		// Real OCR-only jobs finish without image output.
+		return
+	}
+	if body["image_url"] != "/api/v1/jobs/"+store.enqueued.ID+"/output" {
+		t.Fatalf("unexpected image_url value: %#v", body["image_url"])
 	}
 }

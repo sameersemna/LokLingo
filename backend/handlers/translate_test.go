@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -126,5 +127,59 @@ func TestTranslateHandler_UpstreamFailure(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", resp.StatusCode)
+	}
+}
+
+func TestTranslateHandler_TextTooLong(t *testing.T) {
+	mockSvc := &mockTranslationService{result: "x"}
+	h := NewTranslateHandler(mockSvc, &mockStore{})
+
+	app := fiber.New()
+	app.Post("/translate", h.Translate)
+
+	payload := map[string]string{
+		"text":   strings.Repeat("a", maxTranslateTextChars+1),
+		"source": "en",
+		"target": "de",
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/translate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	}
+}
+
+func TestTranslateHandler_InvalidLanguageCodes(t *testing.T) {
+	mockSvc := &mockTranslationService{result: "x"}
+	h := NewTranslateHandler(mockSvc, &mockStore{})
+
+	app := fiber.New()
+	app.Post("/translate", h.Translate)
+
+	tests := []map[string]string{
+		{"text": "hello", "source": "en$", "target": "de"},
+		{"text": "hello", "source": "en", "target": "auto"},
+		{"text": "hello", "source": "en", "target": "@@"},
+	}
+
+	for _, payload := range tests {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/translate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d for payload %#v", resp.StatusCode, payload)
+		}
 	}
 }

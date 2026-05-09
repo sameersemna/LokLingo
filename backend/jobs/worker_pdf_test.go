@@ -1656,6 +1656,7 @@ func TestWorker_EffectiveMode(t *testing.T) {
 		{"", ModeOverlay},
 		{ModeOverlay, ModeOverlay},
 		{ModeLayout, ModeLayout},
+		{ModeOCROnly, ModeOCROnly},
 	}
 	for _, tc := range cases {
 		got := effectiveMode(tc.input)
@@ -1763,6 +1764,39 @@ func TestWorker_EmptyMode_DefaultsToOverlay(t *testing.T) {
 	}
 	if store.lastJob.Status != StatusCompleted {
 		t.Fatalf("expected legacy job to complete as overlay, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+}
+
+func TestWorker_PDFJob_OCROnly_CompletesWithoutTranslation(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "ignored native text"}
+	ocrSvc := &mockOCRSvc{result: "Hello from OCR"}
+	transSvc := &mockTranslSvc{result: "SHOULD_NOT_BE_USED"}
+	w := NewWorker(store, transSvc, pdfSvc, ocrSvc, 0)
+
+	job := &Job{
+		ID:       "pdf-ocr-only-1",
+		Type:     TypePDF,
+		Mode:     ModeOCROnly,
+		FilePath: "/tmp/input.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected store.Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s (err: %s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	want := "Hello from OCR"
+	if store.lastJob.TranslatedText != want {
+		t.Fatalf("expected OCR text in translated_text, got %q", store.lastJob.TranslatedText)
+	}
+	if store.lastJob.ProcessingMethod != "ocr" {
+		t.Fatalf("expected processing_method=ocr, got %q", store.lastJob.ProcessingMethod)
 	}
 }
 

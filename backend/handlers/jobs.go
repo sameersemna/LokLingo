@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -42,27 +43,30 @@ func (h *JobsHandler) CreateJob(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return errResponse(c, fiber.StatusBadRequest, "invalid request body")
 	}
-	if req.Text == "" {
-		return errResponse(c, fiber.StatusBadRequest, "text is required")
+	text, err := normalizeAndValidateText(req.Text)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "text exceeds max length") {
+			return errResponse(c, fiber.StatusRequestEntityTooLarge, err.Error())
+		}
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
-	if req.Target == "" {
-		return errResponse(c, fiber.StatusBadRequest, "target is required")
+	source, target, err := normalizeAndValidateSourceTarget(req.Source, req.Target)
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
-	if req.Source == "" {
-		req.Source = "auto"
-	}
-	if req.Mode == "" {
-		req.Mode = jobs.DefaultMode
+	mode, err := normalizeAndValidateMode(req.Mode)
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
 	now := time.Now()
 	job := &jobs.Job{
 		ID:        uuid.NewString(),
 		Status:    jobs.StatusPending,
-		Mode:      req.Mode,
-		Text:      req.Text,
-		Source:    req.Source,
-		Target:    req.Target,
+		Mode:      mode,
+		Text:      text,
+		Source:    source,
+		Target:    target,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -132,21 +136,20 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	if err != nil {
 		return errResponse(c, fiber.StatusBadRequest, "file is required (multipart field: file)")
 	}
-	if file.Size > h.maxPDFUploadBytes {
-		return errResponse(c, fiber.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds max size (%d bytes)", h.maxPDFUploadBytes))
+	if err := validatePDFUpload(file, h.maxPDFUploadBytes); err != nil {
+		if strings.HasPrefix(err.Error(), "file exceeds max size") {
+			return errResponse(c, fiber.StatusRequestEntityTooLarge, err.Error())
+		}
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
-	target := c.FormValue("target")
-	if target == "" {
-		return errResponse(c, fiber.StatusBadRequest, "target is required")
+	source, target, err := normalizeAndValidateSourceTarget(c.FormValue("source"), c.FormValue("target"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
-	source := c.FormValue("source")
-	if source == "" {
-		source = "auto"
-	}
-	lang := c.FormValue("lang")
-	mode := c.FormValue("mode")
-	if mode == "" {
-		mode = jobs.DefaultMode
+	lang := strings.TrimSpace(c.FormValue("lang"))
+	mode, err := normalizeAndValidatePDFMode(c.FormValue("mode"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
 	if err := os.MkdirAll(jobs.PDFUploadDir, 0o700); err != nil {
@@ -198,26 +201,23 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 	if err != nil {
 		return errResponse(c, fiber.StatusBadRequest, "file is required (multipart field: file)")
 	}
-	if file.Size > h.maxPDFUploadBytes {
-		return errResponse(c, fiber.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds max size (%d bytes)", h.maxPDFUploadBytes))
+	ext, err := validateImageUpload(file, h.maxPDFUploadBytes)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "file exceeds max size") {
+			return errResponse(c, fiber.StatusRequestEntityTooLarge, err.Error())
+		}
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
-	target := c.FormValue("target")
-	if target == "" {
-		return errResponse(c, fiber.StatusBadRequest, "target is required")
+	source, target, err := normalizeAndValidateSourceTarget(c.FormValue("source"), c.FormValue("target"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
-	source := c.FormValue("source")
-	if source == "" {
-		source = "auto"
-	}
-	lang := c.FormValue("lang")
+	lang := strings.TrimSpace(c.FormValue("lang"))
 
-	mode := c.FormValue("mode")
-	if mode == "" {
-		mode = jobs.DefaultMode
-	}
-	if !isValidMode(mode) {
-		return errResponse(c, fiber.StatusBadRequest, `mode must be "overlay" or "layout"`)
+	mode, err := normalizeAndValidateImageMode(c.FormValue("mode"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
 	jpegQuality := 0
@@ -246,7 +246,6 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 		return errResponse(c, fiber.StatusInternalServerError, "failed to prepare upload directory")
 	}
 
-	ext := filepath.Ext(file.Filename)
 	if ext == "" {
 		ext = ".bin"
 	}
@@ -283,9 +282,6 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 	})
 }
 
-// DownloadJobOutput handles GET /api/v1/jobs/:id/output.
-// Streams the rendered output file (e.g. translated image) for a completed job.
-// Returns 404 when the job does not exist, has no output, or is not yet complete.
 func (h *JobsHandler) DownloadJobOutput(c *fiber.Ctx) error {
 	id := c.Params("id")
 	if id == "" {
@@ -308,7 +304,8 @@ func (h *JobsHandler) DownloadJobOutput(c *fiber.Ctx) error {
 	// Guard against directory traversal: the output must live under ImageUploadDir.
 	clean := filepath.Clean(job.OutputFilePath)
 	allowedDir := filepath.Clean(jobs.ImageUploadDir)
-	if len(clean) <= len(allowedDir) || clean[:len(allowedDir)+1] != allowedDir+"/" {
+	rel, relErr := filepath.Rel(allowedDir, clean)
+	if relErr != nil || rel == "." || rel == "" || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		slog.Error("output_file_path outside allowed dir", "path", clean)
 		return errResponse(c, fiber.StatusForbidden, "output not accessible")
 	}

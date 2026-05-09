@@ -1,37 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { fetchJob, type JobResponse } from './api/translate'
-
-// ---------- persistence ----------
-
-const JOBS_KEY = 'loklingo-pdf-jobs'
-const MAX_STORED = 20
-
-export interface StoredPdfJob {
-  job_id: string
-  filename: string
-  source: string
-  target: string
-  submittedAt: number
-}
-
-function loadStoredJobs(): StoredPdfJob[] {
-  try {
-    return JSON.parse(localStorage.getItem(JOBS_KEY) ?? '[]')
-  } catch {
-    return []
-  }
-}
-
-export function saveStoredJob(job: StoredPdfJob) {
-  const existing = loadStoredJobs()
-  const next = [job, ...existing.filter(j => j.job_id !== job.job_id)].slice(0, MAX_STORED)
-  localStorage.setItem(JOBS_KEY, JSON.stringify(next))
-}
-
-function removeStoredJob(jobId: string) {
-  const next = loadStoredJobs().filter(j => j.job_id !== jobId)
-  localStorage.setItem(JOBS_KEY, JSON.stringify(next))
-}
+import {
+  clearStoredJobs,
+  loadStoredJobs,
+  removeStoredJob,
+  type StoredPdfJob,
+} from './pdfJobsStorage'
 
 // ---------- live job row ----------
 
@@ -114,6 +88,11 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
           <span className="pdf-job-meta">
             {stored.source} → {stored.target} · {ts}
           </span>
+          {stored.mode === 'ocr_only' && (
+            <span className="pdf-mode-badge pdf-mode-ocr-only" title="Submitted in OCR-only mode">
+              OCR-only
+            </span>
+          )}
         </div>
 
         <div className="pdf-job-actions">
@@ -174,17 +153,12 @@ interface PdfJobsPanelProps {
 export function PdfJobsPanel({ onToast }: PdfJobsPanelProps) {
   const [jobs, setJobs] = useState<StoredPdfJob[]>(loadStoredJobs)
 
-  // Re-sync from localStorage when the panel is shown (e.g. new job added externally)
-  useEffect(() => {
-    setJobs(loadStoredJobs())
-  }, [])
-
   const handleRemove = (jobId: string) => {
     setJobs(prev => prev.filter(j => j.job_id !== jobId))
   }
 
   const clearAll = () => {
-    localStorage.removeItem(JOBS_KEY)
+    clearStoredJobs()
     setJobs([])
   }
 

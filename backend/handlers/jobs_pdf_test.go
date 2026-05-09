@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -213,6 +214,69 @@ func newMultipartPDFRequestWithMode(t *testing.T, pdfData []byte, target, source
 	return req
 }
 
+func newMultipartRequestWithFileName(t *testing.T, fileData []byte, fileName, target, source string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	if fileData != nil {
+		fw, err := w.CreateFormFile("file", fileName)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := fw.Write(fileData); err != nil {
+			t.Fatalf("write file data: %v", err)
+		}
+	}
+	if target != "" {
+		if err := w.WriteField("target", target); err != nil {
+			t.Fatalf("write target field: %v", err)
+		}
+	}
+	if source != "" {
+		if err := w.WriteField("source", source); err != nil {
+			t.Fatalf("write source field: %v", err)
+		}
+	}
+	w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/pdf", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
+func newMultipartPDFRequestWithPartContentType(t *testing.T, fileData []byte, fileName, target, source, partContentType string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", `form-data; name="file"; filename="`+fileName+`"`)
+	h.Set("Content-Type", partContentType)
+	fw, err := w.CreatePart(h)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := fw.Write(fileData); err != nil {
+		t.Fatalf("write file data: %v", err)
+	}
+	if target != "" {
+		if err := w.WriteField("target", target); err != nil {
+			t.Fatalf("write target field: %v", err)
+		}
+	}
+	if source != "" {
+		if err := w.WriteField("source", source); err != nil {
+			t.Fatalf("write source field: %v", err)
+		}
+	}
+	w.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs/pdf", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
 func TestCreatePDFJob_ModeDefaultsToOverlay(t *testing.T) {
 	cs := &captureStore{}
 	h := NewJobsHandler(cs, 25*1024*1024)
@@ -247,5 +311,81 @@ func TestCreatePDFJob_ModeLayout(t *testing.T) {
 	}
 	if cs.job.Mode != jobs.ModeLayout {
 		t.Fatalf("expected mode=%q, got %q", jobs.ModeLayout, cs.job.Mode)
+	}
+}
+
+func TestCreatePDFJob_ModeOCROnly(t *testing.T) {
+	cs := &captureStore{}
+	h := NewJobsHandler(cs, 25*1024*1024)
+	app := fiber.New()
+	app.Post("/jobs/pdf", h.CreatePDFJob)
+
+	req := newMultipartPDFRequestWithMode(t, []byte("%PDF-1.4"), "de", "en", string(jobs.ModeOCROnly))
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.Mode != jobs.ModeOCROnly {
+		t.Fatalf("expected mode=%q, got %q", jobs.ModeOCROnly, cs.job.Mode)
+	}
+}
+
+func TestCreatePDFJob_InvalidMode(t *testing.T) {
+	cs := &captureStore{}
+	h := NewJobsHandler(cs, 25*1024*1024)
+	app := fiber.New()
+	app.Post("/jobs/pdf", h.CreatePDFJob)
+
+	req := newMultipartPDFRequestWithMode(t, []byte("%PDF-1.4"), "de", "en", "invalid")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid mode, got %d", resp.StatusCode)
+	}
+	if cs.job != nil {
+		t.Fatal("expected no enqueued job for invalid mode")
+	}
+}
+
+func TestCreatePDFJob_InvalidFileType(t *testing.T) {
+	app, _ := newPDFJobsApp()
+
+	req := newMultipartRequestWithFileName(t, []byte("hello"), "not-pdf.txt", "de", "en")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid file type, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreatePDFJob_InvalidLanguageCodes(t *testing.T) {
+	app, _ := newPDFJobsApp()
+
+	req := newMultipartPDFRequest(t, []byte("%PDF-1.4"), "auto", "en")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid target language, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreatePDFJob_ContentTypeSpoofRejected(t *testing.T) {
+	app, _ := newPDFJobsApp()
+
+	req := newMultipartPDFRequestWithPartContentType(t, []byte("hello"), "note.txt", "de", "en", "application/pdf")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for content-type spoof, got %d", resp.StatusCode)
 	}
 }

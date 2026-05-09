@@ -2,6 +2,9 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
+
+	"loklingo/backend/internal/observability"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,6 +13,13 @@ import (
 // OCRMetricsHandler serves lightweight OCR analytics from Postgres.
 type OCRMetricsHandler struct {
 	pool *pgxpool.Pool
+}
+
+type reliabilityEventCount struct {
+	Integration string `json:"integration"`
+	EventName   string `json:"event_name"`
+	Reason      string `json:"reason"`
+	Count       int64  `json:"count"`
 }
 
 func NewOCRMetricsHandler(pool *pgxpool.Pool) *OCRMetricsHandler {
@@ -92,6 +102,11 @@ func (h *OCRMetricsHandler) Summary(c *fiber.Ctx) error {
 		successRate = (float64(succeededTotal) * 100) / float64(eventsTotal)
 	}
 
+	reliabilityCounts, err := h.queryReliabilityCounts(c, pgInterval)
+	if err != nil {
+		return errResponse(c, fiber.StatusInternalServerError, "failed to query reliability metrics")
+	}
+
 	return c.JSON(fiber.Map{
 		"window": fiber.Map{
 			"name": windowLabel,
@@ -100,10 +115,43 @@ func (h *OCRMetricsHandler) Summary(c *fiber.Ctx) error {
 		"succeeded_total":  succeededTotal,
 		"success_rate_pct": successRate,
 		"outcomes":         outcomes,
+		"reliability":      observability.SnapshotReliability(),
+		"reliability_windowed": fiber.Map{
+			"events": reliabilityCounts,
+		},
 		"latency": fiber.Map{
 			"p50_total_ms": p50MS,
 			"p95_total_ms": p95MS,
 			"p99_total_ms": p99MS,
 		},
 	})
+}
+
+func (h *OCRMetricsHandler) queryReliabilityCounts(c *fiber.Ctx, pgInterval string) ([]reliabilityEventCount, error) {
+	q := fmt.Sprintf(`
+		SELECT integration, event_name, reason, COUNT(*)::bigint
+		FROM reliability_events
+		WHERE recorded_at >= now() - interval '%s'
+		GROUP BY integration, event_name, reason
+		ORDER BY integration, event_name, reason`, pgInterval)
+
+	rows, err := h.pool.Query(c.Context(), q)
+	if err != nil {
+		// Allow mixed-version deployments where migrations have not yet been applied.
+		if strings.Contains(strings.ToLower(err.Error()), "reliability_events") {
+			return []reliabilityEventCount{}, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make([]reliabilityEventCount, 0, 8)
+	for rows.Next() {
+		var row reliabilityEventCount
+		if err := rows.Scan(&row.Integration, &row.EventName, &row.Reason, &row.Count); err != nil {
+			continue
+		}
+		counts = append(counts, row)
+	}
+	return counts, rows.Err()
 }
