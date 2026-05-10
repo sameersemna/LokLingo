@@ -219,8 +219,8 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
     <section className="dead-ops-panel" aria-live="polite">
       <div className="dead-ops-header">
         <div>
-          <h2>Dead-letter ops</h2>
-          <p>Inspect failed jobs and replay safely from the queue.</p>
+          <h2>Recovery queue</h2>
+          <p>Inspect failed jobs and replay them safely.</p>
         </div>
         <div className="dead-ops-actions">
           <button

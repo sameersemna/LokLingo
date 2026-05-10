@@ -92,9 +92,9 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
           <span className="pdf-job-meta">
             {stored.source} → {stored.target} · {ts}
           </span>
-          {stored.mode === 'ocr_only' && (
-            <span className="pdf-mode-badge pdf-mode-ocr-only" title="Submitted in OCR-only mode">
-              OCR-only
+          {(stored.mode === 'extract' || stored.mode === 'ocr_only') && (
+            <span className="pdf-mode-badge pdf-mode-extract" title="Submitted in Extract mode">
+              Extract
             </span>
           )}
         </div>
@@ -110,9 +110,9 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
           {status === 'completed' && live?.processing_method && (
             <span
               className={`pdf-method-badge pdf-method-${live.processing_method}`}
-              title={live.processing_method === 'pdf_text' ? 'Extracted via embedded PDF text' : 'Extracted via OCR (image-based PDF)'}
+              title={live.processing_method === 'pdf_text' ? 'Extracted from embedded PDF text' : 'Extracted from scanned PDF pages'}
             >
-              {live.processing_method === 'pdf_text' ? 'PDF text' : 'OCR'}
+              {live.processing_method === 'pdf_text' ? 'Embedded text' : 'Scanned pages'}
             </span>
           )}
 
@@ -187,7 +187,7 @@ export function PdfJobsPanel({ onToast }: PdfJobsPanelProps) {
       </div>
 
       {jobs.length === 0 ? (
-        <p className="history-empty">No PDF jobs yet. Upload a PDF using the OCR / PDF button.</p>
+        <p className="history-empty">No PDF jobs yet. Upload a PDF using the PDF button.</p>
       ) : (
         <ul className="pdf-job-list">
           {jobs.map(j => (

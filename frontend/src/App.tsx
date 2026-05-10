@@ -23,10 +23,16 @@ const LANGUAGES = [
 ]
 
 const TARGET_LANGUAGES = LANGUAGES.filter(l => l.code !== "auto")
-const TRANSLATION_MODES = [
-  { value: "overlay", label: "Balanced" },
-  { value: "layout", label: "Keep layout" },
-  { value: "ocr_only", label: "Extract text" },
+type ProductMode = "fast" | "studio" | "extract"
+const PRODUCT_MODE_BACKEND_MAP: Record<ProductMode, "overlay" | "layout" | "ocr_only"> = {
+  fast: "overlay",
+  studio: "layout",
+  extract: "ocr_only",
+}
+const PRODUCT_MODES = [
+  { value: "fast", label: "Fast", detail: "Quick visual draft" },
+  { value: "studio", label: "Studio", detail: "Premium layout fidelity" },
+  { value: "extract", label: "Extract", detail: "Text-first output" },
 ] as const
 const WORKFLOWS = [
   { value: "image", label: "Image", detail: "Hero workflow for instant visual translation", icon: "🖼" },
@@ -70,6 +76,14 @@ interface UploadSelection {
 type ComparisonFocus = "original" | "overlay" | "layout"
 type ProgressStage = "detecting" | "layout" | "translating" | "typography" | "rendering"
 type OverlayStage = "idle" | "ocr" | "translated"
+
+const TRUST_SIGNALS = [
+  "Local processing",
+  "GPU acceleration",
+  "No cloud dependency",
+  "OCR confidence",
+  "Layout preservation",
+] as const
 
 const IMAGE_PROGRESS_STAGES: Array<{ key: ProgressStage; label: string }> = [
   { key: "detecting", label: "Detecting text" },
@@ -257,7 +271,7 @@ function App() {
   const [sourceText, setSourceText] = useState("")
   const [sourceLang, setSourceLang] = useState(() => loadLangs().source)
   const [targetLang, setTargetLang] = useState(() => loadLangs().target)
-  const [mode, setMode] = useState<string>("overlay")
+  const [mode, setMode] = useState<ProductMode>("fast")
   const [workflow, setWorkflow] = useState<InputWorkflow>("image")
   const [uploadSelection, setUploadSelection] = useState<UploadSelection | null>(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
@@ -270,8 +284,6 @@ function App() {
   const [compareView, setCompareView] = useState<"side" | "slider" | "flash">("side")
   const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("layout")
   const [sliderPercent, setSliderPercent] = useState(50)
-  const [flashTarget, setFlashTarget] = useState<"overlay" | "layout">("layout")
-  const [flashToggle, setFlashToggle] = useState(false)
   const [comparisonModalOpen, setComparisonModalOpen] = useState(false)
   const [comparisonModalFocus, setComparisonModalFocus] = useState<ComparisonFocus>("layout")
   const [comparisonModalView, setComparisonModalView] = useState<"gallery" | "slider" | "flash">("gallery")
@@ -368,28 +380,7 @@ function App() {
     setComparisonModalFocus("layout")
     setComparisonModalSliderTarget("layout")
     setComparisonModalFlashTarget("layout")
-    setComparisonModalView("slider")
-    setComparisonModalOpen(true)
   }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
-
-  useEffect(() => {
-    if (compareView !== "flash" || !compareOriginalUrl || !compareOverlayUrl || !compareLayoutUrl) {
-      if (compareFlashTimerRef.current !== null) {
-        window.clearInterval(compareFlashTimerRef.current)
-        compareFlashTimerRef.current = null
-      }
-      return
-    }
-    compareFlashTimerRef.current = window.setInterval(() => {
-      setFlashToggle(prev => !prev)
-    }, MOTION.flashIntervalMs)
-    return () => {
-      if (compareFlashTimerRef.current !== null) {
-        window.clearInterval(compareFlashTimerRef.current)
-        compareFlashTimerRef.current = null
-      }
-    }
-  }, [compareView, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
 
   useEffect(() => {
     const canFlash = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
@@ -541,8 +532,10 @@ function App() {
     setCompareLayoutUrl(null)
     setDetectedLang("")
     try {
-      const textMode = mode === "ocr_only" ? "overlay" : mode
-      const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode: textMode })
+      const requestMode = workflow === "text" && mode === "extract"
+        ? "overlay"
+        : PRODUCT_MODE_BACKEND_MAP[mode]
+      const res = await translate({ text: sourceText, source: sourceLang, target: targetLang, mode: requestMode })
       setResult(res.translated_text)
       setResultKind("translation")
       setResultImageUrl(res.image_url ?? null)
@@ -564,7 +557,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [sourceText, sourceLang, targetLang, mode, pushToast, compareOriginalUrl])
+  }, [sourceText, sourceLang, targetLang, mode, workflow, pushToast, compareOriginalUrl])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1073,8 +1066,10 @@ function App() {
       if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
       setCompareOriginalUrl(originalUrl)
 
-      if (mode === "ocr_only") {
-        const ocrRes = await translateImage(file, src, tgt, "ocr_only")
+      const requestMode = PRODUCT_MODE_BACKEND_MAP[mode]
+
+      if (requestMode === "ocr_only") {
+        const ocrRes = await translateImage(file, src, tgt, requestMode)
         translatedOverlayText = ocrRes.translated_text ?? ""
         if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
           revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
@@ -1101,7 +1096,7 @@ function App() {
         throw new Error("Image comparison requires both overlay and layout outputs")
       }
 
-      const activeRes = mode === "layout" ? layoutRes : overlayRes
+      const activeRes = mode === "studio" ? layoutRes : overlayRes
       translatedOverlayText = activeRes.translated_text ?? ""
       if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
         revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
@@ -1191,8 +1186,8 @@ function App() {
         setSliderTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
         setCompareView("slider")
       } else {
-        setFlashTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
-        setCompareView("flash")
+        setSliderTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
+        setCompareView("slider")
       }
       void handleDemoPreset(preset)
     }, 0)
@@ -1228,7 +1223,7 @@ function App() {
       })
       setPdfLoading(true)
       try {
-        const { job_id } = await uploadPDF(file, sourceLang, targetLang, mode)
+        const { job_id } = await uploadPDF(file, sourceLang, targetLang, PRODUCT_MODE_BACKEND_MAP[mode])
         saveStoredJob({
           job_id,
           filename: file.name,
@@ -1707,23 +1702,21 @@ function App() {
         </div>
 
         <div className="mode-row">
-          <label className="mode-label" htmlFor="translation-mode">Style</label>
+          <label className="mode-label" htmlFor="translation-mode">Mode</label>
           <select
             id="translation-mode"
             className="mode-select"
             aria-label="Translation mode"
             value={mode}
-            onChange={e => setMode(e.target.value)}
+            onChange={e => setMode(e.target.value as ProductMode)}
           >
-            {TRANSLATION_MODES.map(m => (
+            {PRODUCT_MODES.map(m => (
               <option key={m.value} value={m.value}>{m.label}</option>
             ))}
           </select>
         </div>
         <p className="mode-help" role="note" aria-live="polite">
-          {mode === "ocr_only"
-            ? "Extract text without generating a translated image."
-            : "Balanced is faster, while Keep layout preserves the original structure."}
+          {PRODUCT_MODES.find(m => m.value === mode)?.detail}
         </p>
 
         <input
@@ -1778,9 +1771,9 @@ function App() {
           aria-label="Upload image or PDF"
         >
           <div className="upload-hero-head">
-            <h2>Image Translation</h2>
+            <h2>Visual localization</h2>
             <div className="upload-hero-head-right">
-              <span className="upload-hero-pill">Primary workflow</span>
+              <span className="upload-hero-pill">Local by default</span>
               <button
                 type="button"
                 className={`upload-backend-chip upload-backend-${uploadBackendState}`}
@@ -1797,11 +1790,17 @@ function App() {
           </div>
           <p className="upload-hero-subtitle">{uploadHeroSubtitle}</p>
 
+          <div className="upload-trust-row" aria-label="Trust indicators">
+            {TRUST_SIGNALS.map(signal => (
+              <span key={signal} className="upload-trust-pill">{signal}</span>
+            ))}
+          </div>
+
           {uploadSelection?.kind === "image" && uploadSelection.previewUrl ? (
             <div className="upload-preview upload-preview-image">
               <div className="upload-preview-image-stage">
-                <div className="ocr-pipeline-legend" aria-label="OCR pipeline legend">
-                  <span className={`ocr-pipeline-step${overlayStage !== "idle" ? " is-done" : ""}${legendActiveStage === "ocr" ? " is-active" : ""}`}>OCR</span>
+                <div className="ocr-pipeline-legend" aria-label="Visual pipeline legend">
+                  <span className={`ocr-pipeline-step${overlayStage !== "idle" ? " is-done" : ""}${legendActiveStage === "ocr" ? " is-active" : ""}`}>Scan</span>
                   <span className={`ocr-pipeline-step${overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "translation" ? " is-active" : ""}`}>Translate</span>
                   <span className={`ocr-pipeline-step${!ocrLoading && overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "rendering" ? " is-active" : ""}`}>Render</span>
                 </div>
@@ -1843,7 +1842,7 @@ function App() {
                 )}
                 {showOCROverlay && overlayBlocks.length > 0 && overlayStage !== "idle" && (
                   <div className={`ocr-visualization-badge ocr-visualization-badge-${overlayStage}`}>
-                    {overlayStage === "ocr" ? `OCR detected ${overlayBlocks.length} boxes` : `Translated ${overlayBlocks.length} boxes`}
+                    {overlayStage === "ocr" ? `Detected ${overlayBlocks.length} regions` : `Translated ${overlayBlocks.length} regions`}
                   </div>
                 )}
               </div>
@@ -1851,13 +1850,13 @@ function App() {
                 <strong>{uploadSelection.name}</strong>
                 <span>{formatFileSize(uploadSelection.size)} · Image</span>
                 {overlayStage === "ocr" && (
-                  <span className="upload-preview-stage-note">Animating OCR boxes…</span>
+                  <span className="upload-preview-stage-note">Animating scan regions…</span>
                 )}
                 {overlayStage === "translated" && (
-                  <span className="upload-preview-stage-note">Boxes now show translated text.</span>
+                  <span className="upload-preview-stage-note">Regions now show translated text.</span>
                 )}
                 {!showOCROverlay && overlayStage !== "idle" && (
-                  <span className="upload-preview-stage-note">OCR overlay hidden.</span>
+                  <span className="upload-preview-stage-note">Visual overlay hidden.</span>
                 )}
               </div>
             </div>
@@ -1866,19 +1865,39 @@ function App() {
               <div className="upload-preview-file-icon" aria-hidden="true">PDF</div>
               <div className="upload-preview-meta">
                 <strong>{uploadSelection.name}</strong>
-                <span>{formatFileSize(uploadSelection.size)} · PDF queued for background translation</span>
+                <span>{formatFileSize(uploadSelection.size)} · queued for background translation</span>
               </div>
             </div>
           ) : (
-            <button
-              type="button"
-              className={`upload-preview upload-preview-empty upload-drop-target${uploadDragActive ? " is-drag-active" : ""}`}
-              disabled={ocrLoading || pdfLoading}
-              onClick={() => openUploadPicker(uploadBrowseAccept)}
-            >
-              <strong>{uploadDragActive ? "Release to upload" : uploadEmptyTitle}</strong>
-              <span>{uploadEmptySupport}</span>
-            </button>
+            <div className="upload-preview upload-preview-empty-panel">
+              <button
+                type="button"
+                className={`upload-preview upload-preview-empty upload-drop-target${uploadDragActive ? " is-drag-active" : ""}`}
+                disabled={ocrLoading || pdfLoading}
+                onClick={() => openUploadPicker(uploadBrowseAccept)}
+              >
+                <strong>{uploadDragActive ? "Release to upload" : uploadEmptyTitle}</strong>
+                <span>{uploadEmptySupport}</span>
+              </button>
+              <div className="upload-example-grid" aria-label="Example files">
+                {DEMO_PRESETS.map(preset => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className="upload-example-card"
+                    disabled={ocrLoading || demoModeActive}
+                    onClick={() => handleDemoPreset(preset)}
+                    title={`Load ${preset.label}`}
+                  >
+                    <img src={preset.src} alt="" aria-hidden="true" loading="lazy" />
+                    <span className="upload-example-meta">
+                      <strong>{preset.label}</strong>
+                      <span>{preset.source === "auto" ? "auto" : preset.source.toUpperCase()} → {preset.target.toUpperCase()}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
           <div className="upload-hero-actions">
@@ -1912,12 +1931,12 @@ function App() {
               className={`icon-btn${showOCROverlay ? " is-active" : ""}`}
               onClick={() => setShowOCROverlay(v => !v)}
               aria-pressed={showOCROverlay}
-              title="Show or hide OCR visualization"
+              title="Show or hide visual overlay"
             >
-              {showOCROverlay ? "Hide OCR boxes" : "Show OCR boxes"}
+              {showOCROverlay ? "Hide overlay" : "Show overlay"}
             </button>
             <label className="ocr-stagger-control">
-              OCR stagger
+              Region stagger
               <input
                 type="range"
                 min={20}
@@ -1928,7 +1947,7 @@ function App() {
               />
               <span>{ocrStaggerMs} ms</span>
             </label>
-            <div className="ocr-stagger-presets" role="group" aria-label="OCR stagger presets">
+            <div className="ocr-stagger-presets" role="group" aria-label="Region stagger presets">
               {OCR_STAGGER_PRESETS.map(preset => (
                 <button
                   key={preset.id}
@@ -1945,9 +1964,9 @@ function App() {
               className={`icon-btn ocr-demo-btn${overlayDemoRunning ? " is-active" : ""}`}
               onClick={runOverlayDemo}
               disabled={ocrLoading || overlayStage === "idle" || overlayBlocks.length === 0}
-              title="Replay OCR pipeline stages on current preview (Shift+D)"
+              title="Replay visual pipeline stages on the current preview (Shift+D)"
             >
-              {overlayDemoRunning ? "Replaying demo..." : "Auto demo"}
+              {overlayDemoRunning ? "Replaying demo..." : "Replay demo"}
             </button>
             <span className="ocr-demo-hint" aria-live="polite">Shortcut: Shift+D</span>
           </div>
@@ -2067,7 +2086,7 @@ function App() {
               ? "Rebuilding typography and styling..."
               : imageProgressStage === "rendering"
               ? "Rendering final image..."
-              : mode === "ocr_only"
+              : mode === "extract"
               ? "Extracting text..."
               : "Preparing visual comparison — overlay and layout are processing..."}
           </div>
@@ -2080,8 +2099,9 @@ function App() {
             aria-label="Image comparison"
           >
             <div className="comparison-intro">
-              <h3>Visual Quality Comparison</h3>
-              <p>Compare original, overlay, and layout outputs instantly.</p>
+              <div className="comparison-kicker">Comparison first</div>
+              <h3>Original, Fast, Studio</h3>
+              <p>See the source, the quick pass, and the premium layout result side by side.</p>
             </div>
             <div className="comparison-controls">
               <div className="comparison-segment" role="group" aria-label="Comparison layout">
@@ -2090,7 +2110,7 @@ function App() {
                   className={`icon-btn${compareView === "side" ? " is-active" : ""}`}
                   onClick={() => setCompareView("side")}
                 >
-                  Side-by-side
+                  Grid
                 </button>
                 <button
                   type="button"
@@ -2101,13 +2121,16 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  className={`icon-btn${compareView === "flash" ? " is-active" : ""}`}
+                  className="icon-btn"
                   onClick={() => {
-                    setFlashToggle(false)
-                    setCompareView("flash")
+                    setComparisonModalFocus("layout")
+                    setComparisonModalSliderTarget("layout")
+                    setComparisonModalFlashTarget("layout")
+                    setComparisonModalView("slider")
+                    setComparisonModalOpen(true)
                   }}
                 >
-                  Flash
+                  Fullscreen
                 </button>
               </div>
               {compareView === "slider" && (
@@ -2117,32 +2140,14 @@ function App() {
                     className={`icon-btn${sliderTarget === "overlay" ? " is-active" : ""}`}
                     onClick={() => setSliderTarget("overlay")}
                   >
-                    vs Overlay
+                    Fast
                   </button>
                   <button
                     type="button"
                     className={`icon-btn${sliderTarget === "layout" ? " is-active" : ""}`}
                     onClick={() => setSliderTarget("layout")}
                   >
-                    vs Layout
-                  </button>
-                </div>
-              )}
-              {compareView === "flash" && (
-                <div className="comparison-segment" role="group" aria-label="Flash target">
-                  <button
-                    type="button"
-                    className={`icon-btn${flashTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => setFlashTarget("overlay")}
-                  >
-                    Flash Overlay
-                  </button>
-                  <button
-                    type="button"
-                    className={`icon-btn${flashTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => setFlashTarget("layout")}
-                  >
-                    Flash Layout
+                    Studio
                   </button>
                 </div>
               )}
@@ -2162,11 +2167,11 @@ function App() {
                 </figure>
                 <figure className="compare-card">
                   <div className="compare-card-header">
-                    <figcaption>Overlay result</figcaption>
+                    <figcaption>Fast</figcaption>
                     <button
                       type="button"
                       className="icon-btn compare-dl-btn"
-                      title="Download overlay result"
+                      title="Download fast result"
                       onClick={() => handleDownload(compareOverlayUrl, "overlay-translation")}
                     >
                       ⬇ Download
@@ -2174,7 +2179,7 @@ function App() {
                   </div>
                   <img
                     src={compareOverlayUrl}
-                    alt="Overlay translation result"
+                    alt="Fast translation result"
                     loading="lazy"
                     className="compare-clickable"
                     onClick={() => openComparisonModal("overlay")}
@@ -2182,11 +2187,11 @@ function App() {
                 </figure>
                 <figure className="compare-card">
                   <div className="compare-card-header">
-                    <figcaption>Layout result</figcaption>
+                    <figcaption>Studio</figcaption>
                     <button
                       type="button"
                       className="icon-btn compare-dl-btn"
-                      title="Download layout result"
+                      title="Download studio result"
                       onClick={() => handleDownload(compareLayoutUrl, "layout-translation")}
                     >
                       ⬇ Download
@@ -2194,7 +2199,7 @@ function App() {
                   </div>
                   <img
                     src={compareLayoutUrl}
-                    alt="Layout translation result"
+                    alt="Studio translation result"
                     loading="lazy"
                     className="compare-clickable"
                     onClick={() => openComparisonModal("layout")}
@@ -2224,7 +2229,7 @@ function App() {
                   <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
                 </div>
                 <label className="compare-slider-label">
-                  Original vs {sliderTarget === "overlay" ? "overlay" : "layout"} — drag to reveal
+                  Original vs {sliderTarget === "overlay" ? "Fast" : "Studio"} — drag to reveal
                   <input
                     type="range"
                     min={0}
@@ -2239,35 +2244,38 @@ function App() {
                     className="icon-btn"
                     onClick={() => handleDownload(compareOverlayUrl, "overlay-translation")}
                   >
-                    ⬇ Download Overlay
+                    ⬇ Download Fast
                   </button>
                   <button
                     type="button"
                     className="icon-btn"
                     onClick={() => handleDownload(compareLayoutUrl, "layout-translation")}
                   >
-                    ⬇ Download Layout
+                    ⬇ Download Studio
                   </button>
                 </div>
               </div>
             ) : (
-              <div className="compare-flash-wrap" aria-live="polite">
-                <div className="compare-flash-frame compare-clickable" onClick={() => openComparisonModal(flashTarget)}>
+              <div className="compare-slider-wrap compare-slider-wrap--compact">
+                <div className="compare-slider-frame compare-slider-frame--compact" aria-live="polite">
                   <img
-                    className="compare-flash-image compare-flash-base"
+                    className="compare-slider-base"
                     src={compareOriginalUrl}
                     alt="Original image"
                     loading="lazy"
                   />
-                  <img
-                    className={`compare-flash-image compare-flash-top${flashToggle ? " is-visible" : ""}`}
-                    src={flashTarget === "overlay" ? compareOverlayUrl : compareLayoutUrl}
-                    alt={`${flashTarget} comparison image`}
-                    loading="lazy"
-                  />
-                  <div className="compare-flash-badge">
-                    {flashToggle ? `Showing ${flashTarget}` : "Showing original"}
+                  <div
+                    className="compare-slider-overlay"
+                    style={{ width: `${sliderPercent}%` }}
+                    aria-hidden="true"
+                  >
+                    <img
+                      src={compareOverlayUrl}
+                      alt="Fast comparison image"
+                      loading="lazy"
+                    />
                   </div>
+                  <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
                 </div>
               </div>
             )}
@@ -2377,7 +2385,7 @@ function App() {
                 <>
                   {result && (
                     <div className={`result-kind-badge result-kind-${resultKind}`}>
-                      {resultKind === "ocr" ? "OCR extraction only" : "Translated text"}
+                      {resultKind === "ocr" ? "Extracted text" : "Translated text"}
                     </div>
                   )}
                   <div className="result-text">{result}</div>
