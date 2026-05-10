@@ -68,13 +68,15 @@ interface UploadSelection {
 }
 
 type ComparisonFocus = "original" | "overlay" | "layout"
-type ProgressStage = "ocr" | "translation" | "rendering"
+type ProgressStage = "detecting" | "layout" | "translating" | "typography" | "rendering"
 type OverlayStage = "idle" | "ocr" | "translated"
 
 const IMAGE_PROGRESS_STAGES: Array<{ key: ProgressStage; label: string }> = [
-  { key: "ocr", label: "OCR" },
-  { key: "translation", label: "Translation" },
-  { key: "rendering", label: "Rendering" },
+  { key: "detecting", label: "Detecting text" },
+  { key: "layout", label: "Understanding layout" },
+  { key: "translating", label: "Translating content" },
+  { key: "typography", label: "Rebuilding typography" },
+  { key: "rendering", label: "Rendering final image" },
 ]
 
 const OCR_STAGGER_PRESETS = [
@@ -82,6 +84,29 @@ const OCR_STAGGER_PRESETS = [
   { id: "default", label: "Default", ms: 70 },
   { id: "slow", label: "Slow", ms: 140 },
 ] as const
+
+const MOTION = {
+  animatedCounterMs: 520,
+  toastMs: 3500,
+  flashIntervalMs: 1100,
+  modalFlashIntervalMs: 950,
+  overlaySwapLabelMs: 420,
+  overlayDemo: {
+    toTranslationMs: 550,
+    clearSwapMs: 900,
+    toRenderingMs: 1020,
+    settleMs: 1520,
+  },
+  imageProgress: {
+    toLayoutMs: 620,
+    toTranslationMs: 1280,
+    toTypographyMs: 2120,
+    toRenderingMs: 2960,
+    successSettleMs: 3600,
+    errorSettleMs: 4200,
+  },
+  demoCycleMs: 5200,
+} as const
 
 function isRenderableOCRBlock(block: TextBlock): boolean {
   const [x1, y1, x2, y2] = block.bbox
@@ -157,6 +182,72 @@ function formatFileSize(bytes: number): string {
   return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`
 }
 
+function hasRTLText(text: string): boolean {
+  return /[\u0590-\u08FF]/.test(text)
+}
+
+function hasVerticalTypography(blocks: TextBlock[]): boolean {
+  return blocks.some(block => {
+    const [x1, y1, x2, y2] = block.bbox
+    const width = Math.abs(x2 - x1)
+    const height = Math.abs(y2 - y1)
+    return height > width * 1.35
+  })
+}
+
+function getPipelineHelpMessage(err: unknown): string | null {
+  const raw = err instanceof Error ? err.message : String(err ?? "")
+  const message = raw.toLowerCase()
+
+  if (message.includes("unsupported api version")) {
+    return "Backend API version mismatch. Update the frontend/backend pair or restart services with matching versions."
+  }
+  if (message.includes("failed to fetch") || message.includes("networkerror") || message.includes("network error")) {
+    return "Cannot reach translation services right now. Check backend containers and network connectivity."
+  }
+  if (message.includes("http 5")) {
+    return "Translation backend returned a server error. Retry in a moment or inspect backend logs."
+  }
+
+  return null
+}
+
+function useAnimatedCount(target: number, durationMs = MOTION.animatedCounterMs): number {
+  const [value, setValue] = useState(target)
+  const valueRef = useRef(target)
+
+  useEffect(() => {
+    valueRef.current = value
+  }, [value])
+
+  useEffect(() => {
+    let frame = 0
+    const start = performance.now()
+    const initial = valueRef.current
+    const delta = target - initial
+    if (delta === 0) return
+
+    const tick = (now: number) => {
+      const elapsed = now - start
+      const progress = Math.min(1, elapsed / durationMs)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      setValue(Math.round(initial + delta * eased))
+      if (progress < 1) {
+        frame = window.requestAnimationFrame(tick)
+      }
+    }
+
+    frame = window.requestAnimationFrame(tick)
+    return () => {
+      if (frame) {
+        window.cancelAnimationFrame(frame)
+      }
+    }
+  }, [target, durationMs])
+
+  return value
+}
+
 function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("loklingo-theme")
@@ -176,19 +267,25 @@ function App() {
   const [compareOriginalUrl, setCompareOriginalUrl] = useState<string | null>(null)
   const [compareOverlayUrl, setCompareOverlayUrl] = useState<string | null>(null)
   const [compareLayoutUrl, setCompareLayoutUrl] = useState<string | null>(null)
-  const [compareView, setCompareView] = useState<"side" | "slider">("side")
+  const [compareView, setCompareView] = useState<"side" | "slider" | "flash">("side")
   const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("layout")
   const [sliderPercent, setSliderPercent] = useState(50)
+  const [flashTarget, setFlashTarget] = useState<"overlay" | "layout">("layout")
+  const [flashToggle, setFlashToggle] = useState(false)
   const [comparisonModalOpen, setComparisonModalOpen] = useState(false)
   const [comparisonModalFocus, setComparisonModalFocus] = useState<ComparisonFocus>("layout")
-  const [comparisonModalView, setComparisonModalView] = useState<"gallery" | "slider">("gallery")
+  const [comparisonModalView, setComparisonModalView] = useState<"gallery" | "slider" | "flash">("gallery")
   const [comparisonModalSliderTarget, setComparisonModalSliderTarget] = useState<"overlay" | "layout">("layout")
   const [comparisonModalSliderPercent, setComparisonModalSliderPercent] = useState(50)
+  const [comparisonModalFlashTarget, setComparisonModalFlashTarget] = useState<"overlay" | "layout">("layout")
+  const [comparisonModalFlashToggle, setComparisonModalFlashToggle] = useState(false)
+  const [comparisonQuickToggle, setComparisonQuickToggle] = useState(false)
   const [comparisonModalZoom, setComparisonModalZoom] = useState(1)
   const [comparisonModalPan, setComparisonModalPan] = useState({ x: 0, y: 0 })
   const [comparisonModalPanning, setComparisonModalPanning] = useState(false)
   const [imageProgressStage, setImageProgressStage] = useState<ProgressStage | null>(null)
   const [imageProgressCompleted, setImageProgressCompleted] = useState<ProgressStage[]>([])
+  const [imageProgressFailedStage, setImageProgressFailedStage] = useState<ProgressStage | null>(null)
   const [imageProgressStatus, setImageProgressStatus] = useState<"idle" | "running" | "done" | "error">("idle")
   const [overlayBlocks, setOverlayBlocks] = useState<TextBlock[]>([])
   const [overlayTexts, setOverlayTexts] = useState<string[]>([])
@@ -199,7 +296,10 @@ function App() {
   const [overlayDemoPhase, setOverlayDemoPhase] = useState<"ocr" | "translation" | "rendering" | null>(null)
   const [showOCROverlay, setShowOCROverlay] = useState(() => loadOCRVisualizationControls().show)
   const [ocrStaggerMs, setOcrStaggerMs] = useState(() => loadOCRVisualizationControls().staggerMs)
+  const [demoModeActive, setDemoModeActive] = useState(false)
+  const [demoModeIndex, setDemoModeIndex] = useState(0)
   const [detectedLang, setDetectedLang] = useState("")
+  const [pipelineWarning, setPipelineWarning] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
   const [pdfLoading, setPdfLoading] = useState(false)
@@ -231,9 +331,13 @@ function App() {
   const chipRef = useRef<HTMLDivElement>(null)
   const compareSectionRef = useRef<HTMLElement>(null)
   const modalPanOriginRef = useRef<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>(null)
+  const autoCompareKeyRef = useRef<string | null>(null)
   const imageProgressTimersRef = useRef<number[]>([])
   const overlaySwapTimerRef = useRef<number | null>(null)
   const overlayDemoTimersRef = useRef<number[]>([])
+  const compareFlashTimerRef = useRef<number | null>(null)
+  const modalFlashTimerRef = useRef<number | null>(null)
+  const demoModeTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     return () => {
@@ -254,6 +358,58 @@ function App() {
     if (!compareOriginalUrl || !compareOverlayUrl || !compareLayoutUrl) return
     compareSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
+
+  useEffect(() => {
+    if (ocrLoading) return
+    if (!compareOriginalUrl || !compareOverlayUrl || !compareLayoutUrl) return
+    const key = `${compareOriginalUrl}|${compareOverlayUrl}|${compareLayoutUrl}`
+    if (autoCompareKeyRef.current === key) return
+    autoCompareKeyRef.current = key
+    setComparisonModalFocus("layout")
+    setComparisonModalSliderTarget("layout")
+    setComparisonModalFlashTarget("layout")
+    setComparisonModalView("slider")
+    setComparisonModalOpen(true)
+  }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
+
+  useEffect(() => {
+    if (compareView !== "flash" || !compareOriginalUrl || !compareOverlayUrl || !compareLayoutUrl) {
+      if (compareFlashTimerRef.current !== null) {
+        window.clearInterval(compareFlashTimerRef.current)
+        compareFlashTimerRef.current = null
+      }
+      return
+    }
+    compareFlashTimerRef.current = window.setInterval(() => {
+      setFlashToggle(prev => !prev)
+    }, MOTION.flashIntervalMs)
+    return () => {
+      if (compareFlashTimerRef.current !== null) {
+        window.clearInterval(compareFlashTimerRef.current)
+        compareFlashTimerRef.current = null
+      }
+    }
+  }, [compareView, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
+
+  useEffect(() => {
+    const canFlash = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
+    if (!comparisonModalOpen || comparisonModalView !== "flash" || !canFlash) {
+      if (modalFlashTimerRef.current !== null) {
+        window.clearInterval(modalFlashTimerRef.current)
+        modalFlashTimerRef.current = null
+      }
+      return
+    }
+    modalFlashTimerRef.current = window.setInterval(() => {
+      setComparisonModalFlashToggle(prev => !prev)
+    }, MOTION.modalFlashIntervalMs)
+    return () => {
+      if (modalFlashTimerRef.current !== null) {
+        window.clearInterval(modalFlashTimerRef.current)
+        modalFlashTimerRef.current = null
+      }
+    }
+  }, [comparisonModalOpen, comparisonModalView, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme)
@@ -368,7 +524,7 @@ function App() {
   const pushToast = useCallback((msg: string, type: "success" | "error") => {
     const id = ++toastId.current
     setToasts(t => [...t, { id, msg, type }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3500)
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), MOTION.toastMs)
   }, [])
 
   const handleTranslate = useCallback(async () => {
@@ -412,15 +568,93 @@ function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const inEditable = Boolean(
+        target && (
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable
+        )
+      )
       if (e.key === "Escape" && comparisonModalOpen) {
         setComparisonModalOpen(false)
         return
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") handleTranslate()
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        if (!inEditable || workflow === "text") {
+          handleTranslate()
+        }
+        return
+      }
+      if (!comparisonModalOpen || inEditable) return
+
+      if (e.key === "+" || e.key === "=") {
+        e.preventDefault()
+        setComparisonModalZoom(prev => Math.max(0.6, Math.min(3, Number((prev + 0.16).toFixed(2)))))
+        return
+      }
+      if (e.key === "-") {
+        e.preventDefault()
+        setComparisonModalZoom(prev => Math.max(0.6, Math.min(3, Number((prev - 0.16).toFixed(2)))))
+        return
+      }
+      if (e.key === "0") {
+        e.preventDefault()
+        setComparisonModalZoom(1)
+        setComparisonModalPan({ x: 0, y: 0 })
+        setComparisonModalPanning(false)
+        modalPanOriginRef.current = null
+        return
+      }
+
+      if (comparisonModalView === "slider") {
+        if (e.key === "ArrowLeft") {
+          e.preventDefault()
+          setComparisonModalSliderPercent(prev => Math.max(0, prev - 4))
+          return
+        }
+        if (e.key === "ArrowRight") {
+          e.preventDefault()
+          setComparisonModalSliderPercent(prev => Math.min(100, prev + 4))
+          return
+        }
+      }
+
+      if (e.key.toLowerCase() === "f") {
+        e.preventDefault()
+        setComparisonModalView(prev => (prev === "flash" ? "slider" : "flash"))
+        return
+      }
+
+      if (e.key === " ") {
+        e.preventDefault()
+        setComparisonQuickToggle(true)
+      }
     }
     window.addEventListener("keydown", handler)
     return () => window.removeEventListener("keydown", handler)
-  }, [handleTranslate, comparisonModalOpen])
+  }, [comparisonModalOpen, comparisonModalView, handleTranslate, workflow])
+
+  useEffect(() => {
+    if (!comparisonModalOpen) return
+    const release = (e: KeyboardEvent) => {
+      if (e.key === " ") {
+        setComparisonQuickToggle(false)
+      }
+    }
+    window.addEventListener("keyup", release)
+    return () => window.removeEventListener("keyup", release)
+  }, [comparisonModalOpen])
+
+  useEffect(() => {
+    if (!comparisonModalOpen) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [comparisonModalOpen])
 
   const handleCopy = async () => {
     if (!result) return
@@ -454,6 +688,48 @@ function App() {
     }
   }, [pushToast])
 
+  const handleDownloadPDF = useCallback(async () => {
+    if (!resultImageUrl && !result.trim()) {
+      pushToast("Nothing to export", "error")
+      return
+    }
+
+    try {
+      const { jsPDF } = await import("jspdf")
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" })
+
+      if (resultImageUrl) {
+        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const img = new Image()
+          img.crossOrigin = "anonymous"
+          img.onload = () => resolve(img)
+          img.onerror = () => reject(new Error("Failed to prepare image for PDF export"))
+          img.src = resultImageUrl
+        })
+
+        const pageWidth = pdf.internal.pageSize.getWidth()
+        const pageHeight = pdf.internal.pageSize.getHeight()
+        const scale = Math.min((pageWidth - 48) / image.width, (pageHeight - 70) / image.height)
+        const drawWidth = image.width * scale
+        const drawHeight = image.height * scale
+        const x = (pageWidth - drawWidth) / 2
+        const y = (pageHeight - drawHeight) / 2
+        pdf.addImage(image, "PNG", x, y, drawWidth, drawHeight)
+      } else {
+        const pageWidth = pdf.internal.pageSize.getWidth()
+        const lines = pdf.splitTextToSize(result, pageWidth - 60)
+        pdf.setFont("helvetica", "normal")
+        pdf.setFontSize(11)
+        pdf.text(lines, 30, 40)
+      }
+
+      pdf.save("loklingo-export.pdf")
+      pushToast("PDF exported", "success")
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "PDF export failed", "error")
+    }
+  }, [pushToast, result, resultImageUrl])
+
   const handleSwap = () => {
     if (sourceLang === "auto") return
     setSourceLang(targetLang)
@@ -476,8 +752,10 @@ function App() {
     if (!hasComparison && !resultImageUrl) return
     setComparisonModalFocus(hasComparison ? focus : "layout")
     setComparisonModalSliderTarget(focus === "overlay" ? "overlay" : "layout")
+    setComparisonModalFlashTarget(focus === "overlay" ? "overlay" : "layout")
     setComparisonModalSliderPercent(50)
     setComparisonModalView(hasComparison ? "slider" : "gallery")
+    setComparisonQuickToggle(false)
     setComparisonModalZoom(1)
     setComparisonModalPan({ x: 0, y: 0 })
     setComparisonModalPanning(false)
@@ -486,6 +764,7 @@ function App() {
 
   const closeComparisonModal = () => {
     setComparisonModalPanning(false)
+    setComparisonQuickToggle(false)
     setComparisonModalOpen(false)
   }
 
@@ -540,7 +819,7 @@ function App() {
       overlaySwapTimerRef.current = window.setTimeout(() => {
         setOverlayLabelSwapActive(false)
         overlaySwapTimerRef.current = null
-      }, 420)
+      }, MOTION.overlaySwapLabelMs)
     }
     setOverlayDemoRunning(false)
     setOverlayDemoPhase(null)
@@ -567,22 +846,22 @@ function App() {
         setOverlayStage("translated")
         setOverlayLabelSwapActive(true)
       }
-    }, 550)
+    }, MOTION.overlayDemo.toTranslationMs)
 
     const clearSwap = window.setTimeout(() => {
       setOverlayLabelSwapActive(false)
-    }, 900)
+    }, MOTION.overlayDemo.clearSwapMs)
 
     const toRendering = window.setTimeout(() => {
       setOverlayDemoPhase("rendering")
-    }, 1020)
+    }, MOTION.overlayDemo.toRenderingMs)
 
     const settle = window.setTimeout(() => {
       setOverlayDemoRunning(false)
       setOverlayDemoPhase(null)
       setOverlayLabelSwapActive(false)
       setOverlayStage(hasTranslatedLabels ? "translated" : "ocr")
-    }, 1520)
+    }, MOTION.overlayDemo.settleMs)
 
     overlayDemoTimersRef.current = [toTranslation, clearSwap, toRendering, settle]
   }, [clearOverlayDemoTimers, clearOverlaySwapTimer, ocrLoading, overlayBlocks, overlayStage, overlayTexts])
@@ -590,48 +869,62 @@ function App() {
   const startImageProgress = useCallback(() => {
     clearImageProgressTimers()
     setImageProgressStatus("running")
-    setImageProgressStage("ocr")
+    setImageProgressFailedStage(null)
+    setImageProgressStage("detecting")
     setImageProgressCompleted([])
 
+    const toLayout = window.setTimeout(() => {
+      setImageProgressCompleted(["detecting"])
+      setImageProgressStage("layout")
+    }, MOTION.imageProgress.toLayoutMs)
+
     const toTranslation = window.setTimeout(() => {
-      setImageProgressCompleted(["ocr"])
-      setImageProgressStage("translation")
-    }, 900)
+      setImageProgressCompleted(["detecting", "layout"])
+      setImageProgressStage("translating")
+    }, MOTION.imageProgress.toTranslationMs)
+
+    const toTypography = window.setTimeout(() => {
+      setImageProgressCompleted(["detecting", "layout", "translating"])
+      setImageProgressStage("typography")
+    }, MOTION.imageProgress.toTypographyMs)
 
     const toRendering = window.setTimeout(() => {
-      setImageProgressCompleted(["ocr", "translation"])
+      setImageProgressCompleted(["detecting", "layout", "translating", "typography"])
       setImageProgressStage("rendering")
-    }, 2200)
+    }, MOTION.imageProgress.toRenderingMs)
 
-    imageProgressTimersRef.current = [toTranslation, toRendering]
+    imageProgressTimersRef.current = [toLayout, toTranslation, toTypography, toRendering]
   }, [clearImageProgressTimers])
 
   const completeImageProgress = useCallback(() => {
     clearImageProgressTimers()
     setImageProgressStatus("done")
-    setImageProgressCompleted(["ocr", "translation", "rendering"])
+    setImageProgressFailedStage(null)
+    setImageProgressCompleted(["detecting", "layout", "translating", "typography", "rendering"])
     setImageProgressStage(null)
 
     const settle = window.setTimeout(() => {
       setImageProgressStatus("idle")
+      setImageProgressFailedStage(null)
       setImageProgressCompleted([])
       setImageProgressStage(null)
-    }, 3600)
+    }, MOTION.imageProgress.successSettleMs)
     imageProgressTimersRef.current = [settle]
   }, [clearImageProgressTimers])
 
   const failImageProgress = useCallback(() => {
     clearImageProgressTimers()
     setImageProgressStatus("error")
-    setImageProgressStage(null)
+    setImageProgressFailedStage(imageProgressStage)
 
     const settle = window.setTimeout(() => {
       setImageProgressStatus("idle")
+      setImageProgressFailedStage(null)
       setImageProgressCompleted([])
       setImageProgressStage(null)
-    }, 4200)
+    }, MOTION.imageProgress.errorSettleMs)
     imageProgressTimersRef.current = [settle]
-  }, [clearImageProgressTimers])
+  }, [clearImageProgressTimers, imageProgressStage])
 
   useEffect(() => {
     return () => {
@@ -650,6 +943,20 @@ function App() {
       clearOverlayDemoTimers()
     }
   }, [clearOverlayDemoTimers])
+
+  useEffect(() => {
+    return () => {
+      if (compareFlashTimerRef.current !== null) {
+        window.clearInterval(compareFlashTimerRef.current)
+      }
+      if (modalFlashTimerRef.current !== null) {
+        window.clearInterval(modalFlashTimerRef.current)
+      }
+      if (demoModeTimerRef.current !== null) {
+        window.clearTimeout(demoModeTimerRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -673,10 +980,11 @@ function App() {
   }, [runOverlayDemo])
 
   const hasModalComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
+  const effectiveModalFocus: ComparisonFocus = comparisonQuickToggle ? "original" : comparisonModalFocus
   const modalImageSrc =
-    comparisonModalFocus === "original"
+    effectiveModalFocus === "original"
       ? compareOriginalUrl
-      : comparisonModalFocus === "overlay"
+      : effectiveModalFocus === "overlay"
       ? compareOverlayUrl
       : compareLayoutUrl ?? resultImageUrl
   const clampModalZoom = (value: number) => Math.max(0.6, Math.min(3, Number(value.toFixed(2))))
@@ -734,8 +1042,9 @@ function App() {
     setComparisonModalPanning(false)
   }
 
-  const runImageFile = async (file: File, src: string, tgt: string) => {
+  const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
+    setPipelineWarning(null)
     startImageProgress()
     resetOCRVisualization()
 
@@ -779,6 +1088,7 @@ function App() {
         if (src === "auto" && ocrRes.source && ocrRes.source !== "auto") {
           setDetectedLang(ocrRes.source)
         }
+        setPipelineWarning(null)
         completeImageProgress()
         pushToast("OCR extracted", "success")
         return
@@ -811,9 +1121,11 @@ function App() {
           : ""
         if (resolved) setDetectedLang(resolved)
       }
+      setPipelineWarning(null)
       completeImageProgress()
       pushToast("Image translated", "success")
     } catch (err) {
+      setPipelineWarning(getPipelineHelpMessage(err))
       failImageProgress()
       pushToast(err instanceof Error ? err.message : "Image translation failed", "error")
     } finally {
@@ -824,9 +1136,19 @@ function App() {
         fileRef.current.accept = "image/*,application/pdf"
       }
     }
-  }
+  }, [
+    compareOriginalUrl,
+    completeImageProgress,
+    failImageProgress,
+    mode,
+    pushToast,
+    resetOCRVisualization,
+    revealOCRVisualization,
+    revealTranslatedVisualization,
+    startImageProgress,
+  ])
 
-  const handleDemoPreset = async (preset: typeof DEMO_PRESETS[number]) => {
+  const handleDemoPreset = useCallback(async (preset: typeof DEMO_PRESETS[number]) => {
     if (ocrLoading) return
     setSourceLang(preset.source)
     setTargetLang(preset.target)
@@ -849,9 +1171,49 @@ function App() {
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Demo preset failed", "error")
     }
-  }
+  }, [compareOriginalUrl, ocrLoading, pushToast, runImageFile])
+
+  useEffect(() => {
+    if (!demoModeActive || ocrLoading || pdfLoading || loading) {
+      if (demoModeTimerRef.current !== null) {
+        window.clearTimeout(demoModeTimerRef.current)
+        demoModeTimerRef.current = null
+      }
+      return
+    }
+
+    const preset = DEMO_PRESETS[demoModeIndex % DEMO_PRESETS.length]
+    const kickoff = window.setTimeout(() => {
+      const cycle = demoModeIndex % 3
+      if (cycle === 0) {
+        setCompareView("side")
+      } else if (cycle === 1) {
+        setSliderTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
+        setCompareView("slider")
+      } else {
+        setFlashTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
+        setCompareView("flash")
+      }
+      void handleDemoPreset(preset)
+    }, 0)
+    demoModeTimerRef.current = window.setTimeout(() => {
+      setDemoModeIndex(prev => (prev + 1) % DEMO_PRESETS.length)
+    }, MOTION.demoCycleMs)
+
+    return () => {
+      window.clearTimeout(kickoff)
+      if (demoModeTimerRef.current !== null) {
+        window.clearTimeout(demoModeTimerRef.current)
+        demoModeTimerRef.current = null
+      }
+    }
+  }, [demoModeActive, demoModeIndex, handleDemoPreset, loading, ocrLoading, pdfLoading])
 
   const handleOCRFile = async (file: File) => {
+    setPipelineWarning(null)
+    if (demoModeActive) {
+      setDemoModeActive(false)
+    }
     // PDF files → async translate_pdf job (enqueue + track in PDF Jobs panel)
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       resetOCRVisualization()
@@ -953,6 +1315,33 @@ function App() {
     readinessState === "ok" ? "System healthy" :
     readinessState === "degraded" ? "System degraded" :
     "Checking system"
+  const failedDependencyNames = readiness
+    ? Object.entries(readiness.dependencies)
+        .filter(([, dep]) => dep.status === "error")
+        .map(([name]) => name)
+    : []
+  const uploadBackendState: "checking" | "online" | "degraded" | "offline" =
+    readinessState === "checking"
+      ? "checking"
+      : failedDependencyNames.length === 0
+      ? "online"
+      : failedDependencyNames.length >= 2
+      ? "offline"
+      : "degraded"
+  const uploadBackendLabel =
+    uploadBackendState === "online"
+      ? "Backend online"
+      : uploadBackendState === "offline"
+      ? "Backend unavailable"
+      : uploadBackendState === "degraded"
+      ? "Partial service"
+      : "Checking backend"
+  const uploadBackendHint =
+    uploadBackendState === "checking"
+      ? "Waiting for readiness check"
+      : failedDependencyNames.length > 0
+      ? `Issue: ${failedDependencyNames.slice(0, 2).join(", ")}${failedDependencyNames.length > 2 ? " +more" : ""}`
+      : "All translation services responsive"
   const miniSparklinePoints = (() => {
     if (readinessPressureSeries.length === 0) {
       return ""
@@ -977,6 +1366,16 @@ function App() {
     : readinessPressureLevel === "warn"
     ? "Warn"
     : "Normal"
+  const intelligenceLanguageCodes = Array.from(new Set([
+    detectedLang || (sourceLang !== "auto" ? sourceLang : ""),
+    targetLang,
+  ].filter(Boolean)))
+  const verticalDetected = hasVerticalTypography(overlayBlocks)
+  const rtlDetected = overlayBlocks.some(block => hasRTLText(block.text))
+  const animatedRegionCount = useAnimatedCount(overlayBlocks.length)
+  const animatedLanguageCount = useAnimatedCount(intelligenceLanguageCodes.length)
+  const animatedVerticalCount = useAnimatedCount(verticalDetected ? 1 : 0)
+  const animatedRTLCount = useAnimatedCount(rtlDetected ? 1 : 0)
   const legendActiveStage: "ocr" | "translation" | "rendering" | null =
     overlayDemoRunning && overlayDemoPhase
       ? overlayDemoPhase
@@ -1380,7 +1779,21 @@ function App() {
         >
           <div className="upload-hero-head">
             <h2>Image Translation</h2>
-            <span className="upload-hero-pill">Primary workflow</span>
+            <div className="upload-hero-head-right">
+              <span className="upload-hero-pill">Primary workflow</span>
+              <button
+                type="button"
+                className={`upload-backend-chip upload-backend-${uploadBackendState}`}
+                onClick={() => {
+                  setShowReliability(true)
+                  setShowStatusDetail(false)
+                }}
+                title={uploadBackendHint}
+              >
+                <span className="upload-backend-dot" aria-hidden="true" />
+                <span>{uploadBackendLabel}</span>
+              </button>
+            </div>
           </div>
           <p className="upload-hero-subtitle">{uploadHeroSubtitle}</p>
 
@@ -1417,7 +1830,12 @@ function App() {
                           className={`ocr-visualization-box${overlayStage === "translated" ? " is-translated" : ""}`}
                           style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, animationDelay: `${idx * ocrStaggerMs}ms` }}
                         >
-                          <span className="ocr-visualization-label">{label}</span>
+                          <span
+                            className={`ocr-visualization-label${overlayStage === "translated" ? " is-translated" : ""}`}
+                            style={{ animationDelay: `${idx * ocrStaggerMs + 120}ms` }}
+                          >
+                            {label}
+                          </span>
                         </div>
                       )
                     })}
@@ -1547,7 +1965,7 @@ function App() {
               </strong>
               <span className="image-progress-summary">
                 {imageProgressStatus === "running"
-                  ? `Active stage: ${IMAGE_PROGRESS_STAGES.find(stage => stage.key === imageProgressStage)?.label ?? "OCR"}`
+                  ? `Active stage: ${IMAGE_PROGRESS_STAGES.find(stage => stage.key === imageProgressStage)?.label ?? "Detecting text"}`
                   : imageProgressStatus === "done"
                   ? "All stages finished"
                   : "Job stopped before completion"}
@@ -1557,7 +1975,7 @@ function App() {
               {IMAGE_PROGRESS_STAGES.map(stage => {
                 const done = imageProgressCompleted.includes(stage.key)
                 const active = imageProgressStatus === "running" && imageProgressStage === stage.key
-                const failed = imageProgressStatus === "error" && !done
+                const failed = imageProgressStatus === "error" && imageProgressFailedStage === stage.key
                 return (
                   <li
                     key={stage.key}
@@ -1567,7 +1985,7 @@ function App() {
                     <span>{stage.label}</span>
                     {done && <span className="image-progress-state">Done</span>}
                     {active && <span className="image-progress-state">Running</span>}
-                    {failed && <span className="image-progress-state">Waiting</span>}
+                    {failed && <span className="image-progress-state">Failed</span>}
                   </li>
                 )
               })}
@@ -1575,16 +1993,80 @@ function App() {
           </section>
         )}
 
+        {(overlayBlocks.length > 0 || imageProgressStatus === "running") && (
+          <section className="intelligence-panel" aria-live="polite">
+            <div className="intelligence-header">
+              <strong>Live intelligence</strong>
+              <span>{imageProgressStatus === "running" ? "Analyzing in real time" : "Analysis complete"}</span>
+            </div>
+            <div className="intelligence-grid">
+              <article className="intelligence-card">
+                <span className="intelligence-label">Text regions detected</span>
+                <strong>{animatedRegionCount}</strong>
+              </article>
+              <article className="intelligence-card">
+                <span className="intelligence-label">Languages</span>
+                <strong>{animatedLanguageCount}</strong>
+                <div className="intelligence-tags">
+                  {intelligenceLanguageCodes.length === 0 ? (
+                    <span className="intelligence-tag">Waiting…</span>
+                  ) : (
+                    intelligenceLanguageCodes.map(code => (
+                      <span key={code} className="intelligence-tag">{langLabel(code)}</span>
+                    ))
+                  )}
+                </div>
+              </article>
+              <article className="intelligence-card">
+                <span className="intelligence-label">Vertical typography</span>
+                <strong>{animatedVerticalCount ? "Detected" : "None"}</strong>
+              </article>
+              <article className="intelligence-card">
+                <span className="intelligence-label">RTL text</span>
+                <strong>{animatedRTLCount ? "Detected" : "None"}</strong>
+              </article>
+            </div>
+          </section>
+        )}
+
+        {pipelineWarning && (
+          <section className="status-banner" role="status" aria-live="polite">
+            <span className="status-banner-icon" aria-hidden="true">⚠</span>
+            <span>{pipelineWarning}</span>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => {
+                setShowReliability(true)
+                setShowStatusDetail(false)
+              }}
+            >
+              Open reliability
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setPipelineWarning(null)}
+            >
+              Dismiss
+            </button>
+          </section>
+        )}
+
         {/* Comparison spotlight */}
         {ocrLoading && compareOriginalUrl && (
           <div className="comparison-loading comparison-loading-spotlight">
             <span className="spinner" aria-hidden="true" />
-            {imageProgressStage === "ocr"
-              ? "Running OCR..."
-              : imageProgressStage === "translation"
-              ? "Running translation..."
+            {imageProgressStage === "detecting"
+              ? "Detecting text regions..."
+              : imageProgressStage === "layout"
+              ? "Understanding layout and reading order..."
+              : imageProgressStage === "translating"
+              ? "Translating content..."
+              : imageProgressStage === "typography"
+              ? "Rebuilding typography and styling..."
               : imageProgressStage === "rendering"
-              ? "Rendering results..."
+              ? "Rendering final image..."
               : mode === "ocr_only"
               ? "Extracting text..."
               : "Preparing visual comparison — overlay and layout are processing..."}
@@ -1617,6 +2099,16 @@ function App() {
                 >
                   Slider
                 </button>
+                <button
+                  type="button"
+                  className={`icon-btn${compareView === "flash" ? " is-active" : ""}`}
+                  onClick={() => {
+                    setFlashToggle(false)
+                    setCompareView("flash")
+                  }}
+                >
+                  Flash
+                </button>
               </div>
               {compareView === "slider" && (
                 <div className="comparison-segment" role="group" aria-label="Slider target">
@@ -1633,6 +2125,24 @@ function App() {
                     onClick={() => setSliderTarget("layout")}
                   >
                     vs Layout
+                  </button>
+                </div>
+              )}
+              {compareView === "flash" && (
+                <div className="comparison-segment" role="group" aria-label="Flash target">
+                  <button
+                    type="button"
+                    className={`icon-btn${flashTarget === "overlay" ? " is-active" : ""}`}
+                    onClick={() => setFlashTarget("overlay")}
+                  >
+                    Flash Overlay
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${flashTarget === "layout" ? " is-active" : ""}`}
+                    onClick={() => setFlashTarget("layout")}
+                  >
+                    Flash Layout
                   </button>
                 </div>
               )}
@@ -1691,7 +2201,7 @@ function App() {
                   />
                 </figure>
               </div>
-            ) : (
+            ) : compareView === "slider" ? (
               <div className="compare-slider-wrap">
                 <div className="compare-slider-frame" aria-live="polite">
                   <img
@@ -1740,6 +2250,26 @@ function App() {
                   </button>
                 </div>
               </div>
+            ) : (
+              <div className="compare-flash-wrap" aria-live="polite">
+                <div className="compare-flash-frame compare-clickable" onClick={() => openComparisonModal(flashTarget)}>
+                  <img
+                    className="compare-flash-image compare-flash-base"
+                    src={compareOriginalUrl}
+                    alt="Original image"
+                    loading="lazy"
+                  />
+                  <img
+                    className={`compare-flash-image compare-flash-top${flashToggle ? " is-visible" : ""}`}
+                    src={flashTarget === "overlay" ? compareOverlayUrl : compareLayoutUrl}
+                    alt={`${flashTarget} comparison image`}
+                    loading="lazy"
+                  />
+                  <div className="compare-flash-badge">
+                    {flashToggle ? `Showing ${flashTarget}` : "Showing original"}
+                  </div>
+                </div>
+              </div>
             )}
           </section>
         )}
@@ -1747,12 +2277,20 @@ function App() {
         {/* Demo presets */}
         <div className="demo-presets" role="group" aria-label="Demo presets">
           <span className="demo-presets-label">Sample images:</span>
+          <button
+            type="button"
+            className={`icon-btn demo-mode-btn${demoModeActive ? " is-active" : ""}`}
+            onClick={() => setDemoModeActive(prev => !prev)}
+            title="Cycle sample images automatically"
+          >
+            {demoModeActive ? "⏹ Stop demo" : "▶ Demo mode"}
+          </button>
           {DEMO_PRESETS.map(preset => (
             <button
               key={preset.id}
               type="button"
               className="demo-preset-btn"
-              disabled={ocrLoading}
+              disabled={ocrLoading || demoModeActive}
               onClick={() => handleDemoPreset(preset)}
               title={`${preset.label} — ${preset.source === "auto" ? "auto" : preset.source} → ${preset.target}`}
             >
@@ -1858,11 +2396,32 @@ function App() {
               )}
             </div>
             {result && !loading && (
-              <div className="panel-footer">
+              <div className="panel-footer panel-footer-export">
                 <span className="char-count">{result.length} chars</span>
-                <button className="icon-btn" title="Copy translation" onClick={handleCopy}>
-                  ⎘ Copy
-                </button>
+                <div className="export-action-bar" role="group" aria-label="Export actions">
+                  <button
+                    className="icon-btn"
+                    title="Download PNG"
+                    disabled={!resultImageUrl}
+                    onClick={() => resultImageUrl && handleDownload(resultImageUrl, "loklingo-output")}
+                  >
+                    🖼 PNG
+                  </button>
+                  <button className="icon-btn" title="Download PDF" onClick={handleDownloadPDF}>
+                    📄 PDF
+                  </button>
+                  <button className="icon-btn" title="Copy translation" onClick={handleCopy}>
+                    ⎘ Copy text
+                  </button>
+                  <button
+                    className="icon-btn"
+                    title="Open comparison workspace"
+                    disabled={!(compareOriginalUrl || resultImageUrl)}
+                    onClick={() => openComparisonModal("layout")}
+                  >
+                    ⟲ Open compare
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1967,6 +2526,16 @@ function App() {
                   >
                     Slider
                   </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalView === "flash" ? " is-active" : ""}`}
+                    onClick={() => {
+                      setComparisonModalFlashToggle(false)
+                      setComparisonModalView("flash")
+                    }}
+                  >
+                    Flash
+                  </button>
                 </div>
                 <div className="comparison-segment" role="group" aria-label="Focused image">
                   <button
@@ -1991,6 +2560,21 @@ function App() {
                     Layout
                   </button>
                 </div>
+                <button
+                  type="button"
+                  className={`icon-btn${comparisonQuickToggle ? " is-active" : ""}`}
+                  onMouseDown={() => setComparisonQuickToggle(true)}
+                  onMouseUp={() => setComparisonQuickToggle(false)}
+                  onMouseLeave={() => setComparisonQuickToggle(false)}
+                  onTouchStart={() => setComparisonQuickToggle(true)}
+                  onTouchEnd={() => setComparisonQuickToggle(false)}
+                  title="Press and hold for before/after quick toggle (Space)"
+                >
+                  Before / After
+                </button>
+                <span className="comparison-shortcuts-hint" aria-hidden="true">
+                  Shortcuts: + / - / 0, F, Space
+                </span>
               </div>
             )}
 
@@ -2051,6 +2635,51 @@ function App() {
                     onClick={() => setComparisonModalSliderTarget("layout")}
                   >
                     Compare Layout
+                  </button>
+                </div>
+              </div>
+            ) : hasModalComparison && comparisonModalView === "flash" ? (
+              <div className="comparison-modal-body">
+                <div
+                  className={`comparison-modal-stage${comparisonModalZoom > 1 ? " is-pannable" : ""}${comparisonModalPanning ? " is-panning" : ""}`}
+                  onWheel={handleComparisonModalWheel}
+                  onPointerDown={handleComparisonModalPointerDown}
+                  onPointerMove={handleComparisonModalPointerMove}
+                  onPointerUp={handleComparisonModalPointerUp}
+                  onPointerLeave={handleComparisonModalPointerUp}
+                >
+                  <div className="compare-flash-frame comparison-modal-flash-frame">
+                    <img
+                      className="compare-flash-image compare-flash-base"
+                      src={compareOriginalUrl ?? ""}
+                      alt="Original image"
+                      style={{ transform: modalTransform, transformOrigin: "center" }}
+                    />
+                    <img
+                      className={`compare-flash-image compare-flash-top${comparisonModalFlashToggle ? " is-visible" : ""}`}
+                      src={comparisonModalFlashTarget === "overlay" ? compareOverlayUrl ?? "" : compareLayoutUrl ?? ""}
+                      alt="Flash comparison"
+                      style={{ transform: modalTransform, transformOrigin: "center" }}
+                    />
+                    <div className="compare-flash-badge">
+                      {comparisonModalFlashToggle ? `Showing ${comparisonModalFlashTarget}` : "Showing original"}
+                    </div>
+                  </div>
+                </div>
+                <div className="comparison-segment" role="group" aria-label="Modal flash target">
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalFlashTarget === "overlay" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalFlashTarget("overlay")}
+                  >
+                    Flash Overlay
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn${comparisonModalFlashTarget === "layout" ? " is-active" : ""}`}
+                    onClick={() => setComparisonModalFlashTarget("layout")}
+                  >
+                    Flash Layout
                   </button>
                 </div>
               </div>
