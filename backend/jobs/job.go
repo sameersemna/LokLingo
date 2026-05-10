@@ -18,6 +18,7 @@ const (
 const (
 	StageDetectingText       = "detecting_text"
 	StageUnderstandingLayout = "understanding_layout"
+	StageDetectingLanguages  = "detecting_languages"
 	StageTranslating         = "translating"
 	StageRebuildingLayout    = "rebuilding_layout"
 	StageRendering           = "rendering"

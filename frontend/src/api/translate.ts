@@ -31,10 +31,23 @@ export interface JobResponse {
   processing_method?: 'pdf_text' | 'ocr'
 }
 
+export interface JobProgressUpdate {
+  job_id: string
+  status: JobResponse['status']
+  stage?: string
+  stage_message?: string
+  stage_progress?: number
+  total_pages?: number
+  processed_pages?: number
+  source?: string
+  target?: string
+}
+
 const POLL_INTERVAL_MS = 600
 const MAX_POLLS = 100 // 60 s timeout
 const REQUEST_TIMEOUT_MS = 30_000
 const IMAGE_REQUEST_TIMEOUT_MS = 120_000
+const IMAGE_MAX_POLLS = Math.ceil(IMAGE_REQUEST_TIMEOUT_MS / POLL_INTERVAL_MS)
 
 // ---------- shared helpers ----------
 
@@ -117,11 +130,14 @@ async function pollJob(
   fallbackSource: string,
   fallbackTarget: string,
   failMsg = 'Translation job failed',
+  onProgress?: (job: JobProgressUpdate) => void,
+  maxPolls = MAX_POLLS,
 ): Promise<TranslateResponse> {
-  for (let i = 0; i < MAX_POLLS; i++) {
+  for (let i = 0; i < maxPolls; i++) {
     await sleep(POLL_INTERVAL_MS)
 
     const job = await fetchJob(jobId)
+    onProgress?.(job)
 
     if (job.status === 'completed') {
       return {
@@ -199,14 +215,14 @@ export async function translatePDF(
 }
 
 /**
- * Uploads an image and returns rendered output metadata.
- * Endpoint: POST /api/v1/translate/image
+ * Uploads an image as an async image job and polls real backend stage updates.
  */
 export async function translateImage(
   file: File,
   source: string,
   target: string,
   mode = 'overlay',
+  onProgress?: (job: JobProgressUpdate) => void,
 ): Promise<TranslateResponse> {
   const form = new FormData()
   form.append('file', file)
@@ -214,19 +230,10 @@ export async function translateImage(
   form.append('target', target)
   form.append('mode', mode)
 
-  const data = await fetchJsonOrThrow<{
-    image_url?: string
-    translated_text?: string
-    source?: string
-    target?: string
-  }>('/api/v1/translate/image', {
+  const enqueue = await fetchJsonOrThrow<{ job_id: string }>('/api/v1/jobs/image', {
     method: 'POST',
     body: form,
   }, IMAGE_REQUEST_TIMEOUT_MS)
-  return {
-    translated_text: data.translated_text ?? '',
-    source: data.source ?? source,
-    target: data.target ?? target,
-    image_url: data.image_url,
-  }
+
+  return pollJob(enqueue.job_id, source, target, 'Image translation job failed', onProgress, IMAGE_MAX_POLLS)
 }

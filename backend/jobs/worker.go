@@ -1036,6 +1036,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			return
 		}
 
+		w.setJobStage(ctx, job, StageUnderstandingLayout, "Understanding layout geometry…", 0.14)
+
 		translatedTexts := make([]string, len(blocks))
 		segmentText := make([]string, 0, len(blocks))
 		segmentBlockIdx := make([]int, 0, len(blocks))
@@ -1073,6 +1075,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			slog.Warn("image_no_translatable_text_passthrough", "job_id", job.ID, "mode", effectiveJobMode)
 			return
 		}
+
+		w.setJobStage(ctx, job, StageDetectingLanguages, "Detecting languages and script direction…", 0.24)
 
 		if effectiveJobMode == ModeOCROnly {
 			job.Text = strings.Join(segmentText, "\n")
