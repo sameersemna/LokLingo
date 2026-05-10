@@ -12,11 +12,18 @@ services:
       LITELLM_BASE_URL: "${LITELLM_BASE_URL}"
       LITELLM_API_KEY: "${LITELLM_API_KEY}"
       LITELLM_MODEL: "${LITELLM_MODEL:-gpt-4o-mini}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-}"
+      OPENAI_COMPAT_BASE_URL: "${OPENAI_COMPAT_BASE_URL:-}"
+      OPENAI_COMPAT_API_KEY: "${OPENAI_COMPAT_API_KEY:-}"
+      OPENAI_COMPAT_MODEL: "${OPENAI_COMPAT_MODEL:-}"
       OCR_SERVICE_URL: "http://loklingo-ocr:8000"
       OCR_SHARED_STORAGE_DIR: "${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}"
       REDIS_URL: "${REDIS_URL:-}"
       POSTGRES_DSN: "${POSTGRES_DSN}"
       INTERNAL_TOKEN: "${INTERNAL_TOKEN:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - pdf_uploads:${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}
     depends_on:

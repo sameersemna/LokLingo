@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { translate, translateImage, uploadPDF } from "./api/translate"
+import { extractTextFromImage, type TextBlock } from "./api/ocr"
 import { getReadiness, type ReadinessResponse } from "./api/health"
 import { getOCRMetrics, type MetricsWindow, type OCRMetricsResponse } from "./api/metrics"
 import { PdfJobsPanel } from "./PdfJobsPanel"
@@ -35,6 +36,7 @@ const WORKFLOWS = [
 const MAX_CHARS = 2000
 const HISTORY_KEY = "loklingo-history"
 const MAX_HISTORY = 10
+const OCR_VIS_KEY = "loklingo-ocr-visual-controls"
 const RELIABILITY_WINDOWS: MetricsWindow[] = ["1h", "6h", "24h", "7d", "30d"]
 const PRESSURE_WARN_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_WARN ?? 8)
 const PRESSURE_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_CRITICAL ?? 20)
@@ -67,12 +69,46 @@ interface UploadSelection {
 
 type ComparisonFocus = "original" | "overlay" | "layout"
 type ProgressStage = "ocr" | "translation" | "rendering"
+type OverlayStage = "idle" | "ocr" | "translated"
 
 const IMAGE_PROGRESS_STAGES: Array<{ key: ProgressStage; label: string }> = [
   { key: "ocr", label: "OCR" },
   { key: "translation", label: "Translation" },
   { key: "rendering", label: "Rendering" },
 ]
+
+const OCR_STAGGER_PRESETS = [
+  { id: "fast", label: "Fast", ms: 30 },
+  { id: "default", label: "Default", ms: 70 },
+  { id: "slow", label: "Slow", ms: 140 },
+] as const
+
+function isRenderableOCRBlock(block: TextBlock): boolean {
+  const [x1, y1, x2, y2] = block.bbox
+  return Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(x2) && Number.isFinite(y2) && Math.abs(x2 - x1) >= 4 && Math.abs(y2 - y1) >= 4
+}
+
+function mapTranslatedLinesToBlocks(blocks: TextBlock[], translatedText: string): string[] {
+  const translatedLines = translatedText
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean)
+
+  const mapped = new Array<string>(blocks.length).fill("")
+  let lineIdx = 0
+
+  for (let i = 0; i < blocks.length; i++) {
+    const source = blocks[i].text.trim()
+    if (!source) {
+      mapped[i] = ""
+      continue
+    }
+    mapped[i] = translatedLines[lineIdx] ?? source
+    lineIdx += 1
+  }
+
+  return mapped
+}
 
 function loadHistory(): HistoryEntry[] {
   try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]") } catch { return [] }
@@ -90,6 +126,20 @@ function loadLangs() {
     const tgt = TARGET_LANGUAGES.find(l => l.code === saved.target)?.code ?? "de"
     return { source: src, target: tgt }
   } catch { return { source: "auto", target: "de" } }
+}
+
+function loadOCRVisualizationControls(): { show: boolean; staggerMs: number } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OCR_VIS_KEY) ?? "{}") as { show?: unknown; staggerMs?: unknown }
+    const show = typeof raw.show === "boolean" ? raw.show : true
+    const parsedStagger = Number(raw.staggerMs)
+    const staggerMs = Number.isFinite(parsedStagger)
+      ? Math.max(20, Math.min(220, Math.round(parsedStagger)))
+      : 70
+    return { show, staggerMs }
+  } catch {
+    return { show: true, staggerMs: 70 }
+  }
 }
 
 function pressureLevel(score: number): "normal" | "warn" | "critical" {
@@ -140,6 +190,15 @@ function App() {
   const [imageProgressStage, setImageProgressStage] = useState<ProgressStage | null>(null)
   const [imageProgressCompleted, setImageProgressCompleted] = useState<ProgressStage[]>([])
   const [imageProgressStatus, setImageProgressStatus] = useState<"idle" | "running" | "done" | "error">("idle")
+  const [overlayBlocks, setOverlayBlocks] = useState<TextBlock[]>([])
+  const [overlayTexts, setOverlayTexts] = useState<string[]>([])
+  const [overlayStage, setOverlayStage] = useState<OverlayStage>("idle")
+  const [overlayImageSize, setOverlayImageSize] = useState<{ width: number; height: number } | null>(null)
+  const [overlayLabelSwapActive, setOverlayLabelSwapActive] = useState(false)
+  const [overlayDemoRunning, setOverlayDemoRunning] = useState(false)
+  const [overlayDemoPhase, setOverlayDemoPhase] = useState<"ocr" | "translation" | "rendering" | null>(null)
+  const [showOCROverlay, setShowOCROverlay] = useState(() => loadOCRVisualizationControls().show)
+  const [ocrStaggerMs, setOcrStaggerMs] = useState(() => loadOCRVisualizationControls().staggerMs)
   const [detectedLang, setDetectedLang] = useState("")
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -173,6 +232,8 @@ function App() {
   const compareSectionRef = useRef<HTMLElement>(null)
   const modalPanOriginRef = useRef<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>(null)
   const imageProgressTimersRef = useRef<number[]>([])
+  const overlaySwapTimerRef = useRef<number | null>(null)
+  const overlayDemoTimersRef = useRef<number[]>([])
 
   useEffect(() => {
     return () => {
@@ -202,6 +263,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(LANG_KEY, JSON.stringify({ source: sourceLang, target: targetLang }))
   }, [sourceLang, targetLang])
+
+  useEffect(() => {
+    localStorage.setItem(OCR_VIS_KEY, JSON.stringify({ show: showOCROverlay, staggerMs: ocrStaggerMs }))
+  }, [showOCROverlay, ocrStaggerMs])
 
   useEffect(() => {
     let cancelled = false
@@ -429,6 +494,99 @@ function App() {
     imageProgressTimersRef.current = []
   }, [])
 
+  const clearOverlaySwapTimer = useCallback(() => {
+    if (overlaySwapTimerRef.current !== null) {
+      window.clearTimeout(overlaySwapTimerRef.current)
+      overlaySwapTimerRef.current = null
+    }
+  }, [])
+
+  const clearOverlayDemoTimers = useCallback(() => {
+    overlayDemoTimersRef.current.forEach(timer => window.clearTimeout(timer))
+    overlayDemoTimersRef.current = []
+  }, [])
+
+  const resetOCRVisualization = useCallback(() => {
+    clearOverlayDemoTimers()
+    clearOverlaySwapTimer()
+    setOverlayBlocks([])
+    setOverlayTexts([])
+    setOverlayStage("idle")
+    setOverlayImageSize(null)
+    setOverlayLabelSwapActive(false)
+    setOverlayDemoRunning(false)
+    setOverlayDemoPhase(null)
+  }, [clearOverlayDemoTimers, clearOverlaySwapTimer])
+
+  const revealOCRVisualization = useCallback((blocks: TextBlock[]) => {
+    clearOverlayDemoTimers()
+    clearOverlaySwapTimer()
+    setOverlayBlocks(blocks)
+    setOverlayTexts([])
+    setOverlayStage(blocks.length > 0 ? "ocr" : "idle")
+    setOverlayLabelSwapActive(false)
+    setOverlayDemoRunning(false)
+    setOverlayDemoPhase(null)
+  }, [clearOverlayDemoTimers, clearOverlaySwapTimer])
+
+  const revealTranslatedVisualization = useCallback((blocks: TextBlock[], translatedText: string) => {
+    clearOverlayDemoTimers()
+    clearOverlaySwapTimer()
+    setOverlayBlocks(blocks)
+    setOverlayTexts(mapTranslatedLinesToBlocks(blocks, translatedText))
+    setOverlayStage(blocks.length > 0 ? "translated" : "idle")
+    if (blocks.length > 0) {
+      setOverlayLabelSwapActive(true)
+      overlaySwapTimerRef.current = window.setTimeout(() => {
+        setOverlayLabelSwapActive(false)
+        overlaySwapTimerRef.current = null
+      }, 420)
+    }
+    setOverlayDemoRunning(false)
+    setOverlayDemoPhase(null)
+  }, [clearOverlayDemoTimers, clearOverlaySwapTimer])
+
+  const runOverlayDemo = useCallback(() => {
+    if (ocrLoading || overlayBlocks.length === 0 || overlayStage === "idle") {
+      return
+    }
+
+    clearOverlayDemoTimers()
+    clearOverlaySwapTimer()
+
+    const hasTranslatedLabels = overlayTexts.some(text => text.trim() !== "")
+
+    setOverlayDemoRunning(true)
+    setOverlayDemoPhase("ocr")
+    setOverlayStage("ocr")
+    setOverlayLabelSwapActive(false)
+
+    const toTranslation = window.setTimeout(() => {
+      setOverlayDemoPhase("translation")
+      if (hasTranslatedLabels) {
+        setOverlayStage("translated")
+        setOverlayLabelSwapActive(true)
+      }
+    }, 550)
+
+    const clearSwap = window.setTimeout(() => {
+      setOverlayLabelSwapActive(false)
+    }, 900)
+
+    const toRendering = window.setTimeout(() => {
+      setOverlayDemoPhase("rendering")
+    }, 1020)
+
+    const settle = window.setTimeout(() => {
+      setOverlayDemoRunning(false)
+      setOverlayDemoPhase(null)
+      setOverlayLabelSwapActive(false)
+      setOverlayStage(hasTranslatedLabels ? "translated" : "ocr")
+    }, 1520)
+
+    overlayDemoTimersRef.current = [toTranslation, clearSwap, toRendering, settle]
+  }, [clearOverlayDemoTimers, clearOverlaySwapTimer, ocrLoading, overlayBlocks, overlayStage, overlayTexts])
+
   const startImageProgress = useCallback(() => {
     clearImageProgressTimers()
     setImageProgressStatus("running")
@@ -480,6 +638,39 @@ function App() {
       clearImageProgressTimers()
     }
   }, [clearImageProgressTimers])
+
+  useEffect(() => {
+    return () => {
+      clearOverlaySwapTimer()
+    }
+  }, [clearOverlaySwapTimer])
+
+  useEffect(() => {
+    return () => {
+      clearOverlayDemoTimers()
+    }
+  }, [clearOverlayDemoTimers])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const inEditable = Boolean(
+        target && (
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable
+        )
+      )
+      if (inEditable) return
+      if (event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "d") {
+        event.preventDefault()
+        runOverlayDemo()
+      }
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [runOverlayDemo])
 
   const hasModalComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
   const modalImageSrc =
@@ -546,6 +737,28 @@ function App() {
   const runImageFile = async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
     startImageProgress()
+    resetOCRVisualization()
+
+    let ocrBlocks: TextBlock[] = []
+    let translatedOverlayText = ""
+    const ocrExtractionPromise = extractTextFromImage(file, src)
+      .then(ocrRes => {
+        ocrBlocks = ocrRes.blocks.filter(isRenderableOCRBlock)
+        if (ocrBlocks.length === 0) {
+          return
+        }
+
+        if (translatedOverlayText.trim()) {
+          revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
+          return
+        }
+
+        revealOCRVisualization(ocrBlocks)
+      })
+      .catch(() => {
+        // Keep the main image pipeline running even if OCR visualization is unavailable.
+      })
+
     try {
       const originalUrl = URL.createObjectURL(file)
       if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
@@ -553,6 +766,11 @@ function App() {
 
       if (mode === "ocr_only") {
         const ocrRes = await translateImage(file, src, tgt, "ocr_only")
+        translatedOverlayText = ocrRes.translated_text ?? ""
+        if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
+          revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
+        }
+
         setResult(ocrRes.translated_text)
         setResultKind("ocr")
         setResultImageUrl(ocrRes.image_url ?? null)
@@ -574,6 +792,11 @@ function App() {
       }
 
       const activeRes = mode === "layout" ? layoutRes : overlayRes
+      translatedOverlayText = activeRes.translated_text ?? ""
+      if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
+        revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
+      }
+
       setResult(activeRes.translated_text)
       setResultKind("translation")
       setResultImageUrl(activeRes.image_url ?? null)
@@ -594,6 +817,7 @@ function App() {
       failImageProgress()
       pushToast(err instanceof Error ? err.message : "Image translation failed", "error")
     } finally {
+      void ocrExtractionPromise
       setOcrLoading(false)
       if (fileRef.current) {
         fileRef.current.value = ""
@@ -630,6 +854,7 @@ function App() {
   const handleOCRFile = async (file: File) => {
     // PDF files → async translate_pdf job (enqueue + track in PDF Jobs panel)
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      resetOCRVisualization()
       if (uploadSelection?.previewUrl) {
         URL.revokeObjectURL(uploadSelection.previewUrl)
       }
@@ -752,6 +977,16 @@ function App() {
     : readinessPressureLevel === "warn"
     ? "Warn"
     : "Normal"
+  const legendActiveStage: "ocr" | "translation" | "rendering" | null =
+    overlayDemoRunning && overlayDemoPhase
+      ? overlayDemoPhase
+      : overlayStage === "translated"
+      ? (ocrLoading ? "rendering" : null)
+      : overlayStage === "ocr"
+      ? "translation"
+      : ocrLoading
+      ? "ocr"
+      : null
 
   return (
     <div className="app">
@@ -1151,10 +1386,61 @@ function App() {
 
           {uploadSelection?.kind === "image" && uploadSelection.previewUrl ? (
             <div className="upload-preview upload-preview-image">
-              <img src={uploadSelection.previewUrl} alt="Selected upload preview" />
+              <div className="upload-preview-image-stage">
+                <div className="ocr-pipeline-legend" aria-label="OCR pipeline legend">
+                  <span className={`ocr-pipeline-step${overlayStage !== "idle" ? " is-done" : ""}${legendActiveStage === "ocr" ? " is-active" : ""}`}>OCR</span>
+                  <span className={`ocr-pipeline-step${overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "translation" ? " is-active" : ""}`}>Translate</span>
+                  <span className={`ocr-pipeline-step${!ocrLoading && overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "rendering" ? " is-active" : ""}`}>Render</span>
+                </div>
+                <img
+                  src={uploadSelection.previewUrl}
+                  alt="Selected upload preview"
+                  onLoad={event => {
+                    const img = event.currentTarget
+                    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                      setOverlayImageSize({ width: img.naturalWidth, height: img.naturalHeight })
+                    }
+                  }}
+                />
+                {showOCROverlay && overlayImageSize && overlayBlocks.length > 0 && overlayStage !== "idle" && (
+                  <div className={`ocr-visualization-overlay ocr-visualization-${overlayStage}${overlayLabelSwapActive ? " is-switching" : ""}`} aria-hidden="true">
+                    {overlayBlocks.map((block, idx) => {
+                      const [bx1, by1, bx2, by2] = block.bbox
+                      const left = (Math.min(bx1, bx2) / overlayImageSize.width) * 100
+                      const top = (Math.min(by1, by2) / overlayImageSize.height) * 100
+                      const width = (Math.abs(bx2 - bx1) / overlayImageSize.width) * 100
+                      const height = (Math.abs(by2 - by1) / overlayImageSize.height) * 100
+                      const label = overlayStage === "translated" ? (overlayTexts[idx] || block.text) : block.text
+                      return (
+                        <div
+                          key={`${idx}-${block.bbox.join("-")}`}
+                          className={`ocr-visualization-box${overlayStage === "translated" ? " is-translated" : ""}`}
+                          style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, animationDelay: `${idx * ocrStaggerMs}ms` }}
+                        >
+                          <span className="ocr-visualization-label">{label}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+                {showOCROverlay && overlayBlocks.length > 0 && overlayStage !== "idle" && (
+                  <div className={`ocr-visualization-badge ocr-visualization-badge-${overlayStage}`}>
+                    {overlayStage === "ocr" ? `OCR detected ${overlayBlocks.length} boxes` : `Translated ${overlayBlocks.length} boxes`}
+                  </div>
+                )}
+              </div>
               <div className="upload-preview-meta">
                 <strong>{uploadSelection.name}</strong>
                 <span>{formatFileSize(uploadSelection.size)} · Image</span>
+                {overlayStage === "ocr" && (
+                  <span className="upload-preview-stage-note">Animating OCR boxes…</span>
+                )}
+                {overlayStage === "translated" && (
+                  <span className="upload-preview-stage-note">Boxes now show translated text.</span>
+                )}
+                {!showOCROverlay && overlayStage !== "idle" && (
+                  <span className="upload-preview-stage-note">OCR overlay hidden.</span>
+                )}
               </div>
             </div>
           ) : uploadSelection?.kind === "pdf" ? (
@@ -1203,6 +1489,49 @@ function App() {
             >
               Use text input
             </button>
+            <button
+              type="button"
+              className={`icon-btn${showOCROverlay ? " is-active" : ""}`}
+              onClick={() => setShowOCROverlay(v => !v)}
+              aria-pressed={showOCROverlay}
+              title="Show or hide OCR visualization"
+            >
+              {showOCROverlay ? "Hide OCR boxes" : "Show OCR boxes"}
+            </button>
+            <label className="ocr-stagger-control">
+              OCR stagger
+              <input
+                type="range"
+                min={20}
+                max={220}
+                step={10}
+                value={ocrStaggerMs}
+                onChange={event => setOcrStaggerMs(Number(event.target.value))}
+              />
+              <span>{ocrStaggerMs} ms</span>
+            </label>
+            <div className="ocr-stagger-presets" role="group" aria-label="OCR stagger presets">
+              {OCR_STAGGER_PRESETS.map(preset => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={`icon-btn${ocrStaggerMs === preset.ms ? " is-active" : ""}`}
+                  onClick={() => setOcrStaggerMs(preset.ms)}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className={`icon-btn ocr-demo-btn${overlayDemoRunning ? " is-active" : ""}`}
+              onClick={runOverlayDemo}
+              disabled={ocrLoading || overlayStage === "idle" || overlayBlocks.length === 0}
+              title="Replay OCR pipeline stages on current preview (Shift+D)"
+            >
+              {overlayDemoRunning ? "Replaying demo..." : "Auto demo"}
+            </button>
+            <span className="ocr-demo-hint" aria-live="polite">Shortcut: Shift+D</span>
           </div>
         </section>
 

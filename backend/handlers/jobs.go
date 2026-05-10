@@ -120,6 +120,11 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 		resp["total_pages"] = job.TotalPages
 		resp["processed_pages"] = job.ProcessedPages
 	}
+	if job.Stage != "" {
+		resp["stage"] = job.Stage
+		resp["stage_message"] = job.StageMessage
+		resp["stage_progress"] = job.StageProgress
+	}
 	if job.Status == jobs.StatusCompleted {
 		resp["translated_text"] = job.TranslatedText
 		if job.OutputFilePath != "" {

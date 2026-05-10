@@ -23,6 +23,11 @@ export interface JobResponse {
   source?: string
   target?: string
   error?: string
+  stage?: string
+  stage_message?: string
+  stage_progress?: number
+  total_pages?: number
+  processed_pages?: number
   processing_method?: 'pdf_text' | 'ocr'
 }
 

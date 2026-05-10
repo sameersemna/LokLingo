@@ -13,6 +13,11 @@ type Config struct {
 	LiteLLMBaseURL               string
 	LiteLLMAPIKey                string
 	LiteLLMModel                 string
+	OllamaBaseURL                string
+	OllamaModel                  string
+	OpenAICompatBaseURL          string
+	OpenAICompatAPIKey           string
+	OpenAICompatModel            string
 	OCRServiceURL                string
 	OCRSharedStorageDir          string
 	RedisURL                     string
@@ -41,6 +46,11 @@ func Load() *Config {
 		LiteLLMBaseURL:               getEnv("LITELLM_BASE_URL", ""),
 		LiteLLMAPIKey:                getEnv("LITELLM_API_KEY", ""),
 		LiteLLMModel:                 getEnv("LITELLM_MODEL", ""),
+		OllamaBaseURL:                getEnv("OLLAMA_BASE_URL", ""),
+		OllamaModel:                  getEnv("OLLAMA_MODEL", ""),
+		OpenAICompatBaseURL:          getEnv("OPENAI_COMPAT_BASE_URL", ""),
+		OpenAICompatAPIKey:           getEnv("OPENAI_COMPAT_API_KEY", ""),
+		OpenAICompatModel:            getEnv("OPENAI_COMPAT_MODEL", ""),
 		OCRServiceURL:                getEnv("OCR_SERVICE_URL", ""),
 		OCRSharedStorageDir:          getEnv("OCR_SHARED_STORAGE_DIR", ""),
 		RedisURL:                     resolveRedisURL(appEnv),

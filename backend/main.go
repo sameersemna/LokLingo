@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -18,6 +19,7 @@ import (
 	"loklingo/backend/jobs"
 	"loklingo/backend/middleware"
 	"loklingo/backend/services"
+	"loklingo/backend/services/providers"
 
 	"loklingo/backend/internal/pglog"
 
@@ -65,7 +67,16 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	translationService := services.NewTranslationService(cfg)
+	providerRegistry := providers.NewRegistry()
+	providerTimeout := time.Duration(cfg.LiteLLMRequestTimeoutSeconds) * time.Second
+	providerRegistry.Register(providers.NewOpenAIChatProvider("litellm", cfg.LiteLLMBaseURL, cfg.LiteLLMAPIKey, cfg.LiteLLMModel, providerTimeout))
+	if cfg.OllamaBaseURL != "" && cfg.OllamaModel != "" {
+		providerRegistry.Register(providers.NewOpenAIChatProvider("ollama", cfg.OllamaBaseURL, "ollama", cfg.OllamaModel, providerTimeout))
+	}
+	if cfg.OpenAICompatBaseURL != "" && cfg.OpenAICompatModel != "" {
+		providerRegistry.Register(providers.NewOpenAIChatProvider("openai", cfg.OpenAICompatBaseURL, cfg.OpenAICompatAPIKey, cfg.OpenAICompatModel, providerTimeout))
+	}
+	translationService := services.NewOrchestrator(providerRegistry, services.DefaultOrchestratorConfig)
 	pdfService := internalservices.NewPDFService()
 	ocrClient := internalservices.NewOCRClient(cfg.OCRServiceURL, cfg.OCRSharedStorageDir)
 	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient, cfg.MaxPDFPages,

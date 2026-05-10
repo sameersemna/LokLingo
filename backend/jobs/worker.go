@@ -918,6 +918,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			return
 		}
 
+		w.setJobStage(ctx, job, StageDetectingText, "Detecting text in document...", 0.05)
 		extractStart := time.Now()
 		pdfPages, err := w.pdfService.ExtractPages(job.FilePath)
 		extractMS = time.Since(extractStart).Milliseconds()
@@ -1023,9 +1024,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 
 		job.Status = StatusProcessing
-		if err := w.store.Update(ctx, job); err != nil {
-			slog.Error("update image job to processing", "job_id", job.ID, "err", err)
-		}
+		w.setJobStage(ctx, job, StageDetectingText, "Detecting text in image…", 0.05)
 
 		blocks, err := w.ocrClient.ExtractImageBlocks(job.FilePath, job.Lang)
 		if err != nil {
@@ -1121,6 +1120,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		if maxParallel <= 0 {
 			maxParallel = 1
 		}
+		// Attach stage notifier so orchestrator retry/failover events surface in real-time.
+		var imgStageMu sync.Mutex
+		imgNotifyCtx := services.WithStageNotifier(ctx, w.stageNotifierFor(ctx, job, &imgStageMu))
+		w.setJobStage(ctx, job, StageTranslating, "Translating image text…", 0.3)
+
 		sem := make(chan struct{}, maxParallel)
 		var wg sync.WaitGroup
 		for i, chunk := range chunks {
@@ -1129,12 +1133,12 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				defer wg.Done()
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
-					errByChunk[idx] = ctx.Err()
+				case <-imgNotifyCtx.Done():
+					errByChunk[idx] = imgNotifyCtx.Err()
 					return
 				}
 				defer func() { <-sem }()
-				translatedUnits, terr := w.translateChunk(ctx, c, job.Source, job.Target, metrics)
+				translatedUnits, terr := w.translateChunk(imgNotifyCtx, c, job.Source, job.Target, metrics)
 				if terr != nil {
 					errByChunk[idx] = terr
 					return
@@ -1145,7 +1149,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		wg.Wait()
 
 		translatedPartsBySegment := make([][]string, len(segmentText))
-		for i := range results {
+		for i, res := range results {
 			if errByChunk[i] != nil {
 				job.Status = StatusFailed
 				job.ErrorMsg = errByChunk[i].Error()
@@ -1154,7 +1158,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				}
 				return
 			}
-			for _, u := range results[i] {
+			for _, u := range res {
 				if u.pageIndex >= 0 && u.pageIndex < len(translatedPartsBySegment) {
 					translatedPartsBySegment[u.pageIndex] = append(translatedPartsBySegment[u.pageIndex], strings.TrimSpace(u.text))
 				}
@@ -1214,6 +1218,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		if job.TextPadding >= 0 && effectiveJobMode != ModeLayout {
 			renderOpts.TextPadding = job.TextPadding
 		}
+		if effectiveJobMode == ModeLayout {
+			w.setJobStage(ctx, job, StageRebuildingLayout, "Rebuilding image layout…", 0.85)
+		} else {
+			w.setJobStage(ctx, job, StageRendering, "Rendering translated image…", 0.85)
+		}
 		outPath, renderStats, err := internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, renderOpts)
 		if err != nil && effectiveJobMode == ModeLayout {
 			// If layout rendering fails, fall back to the regular overlay render path.
@@ -1265,6 +1274,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		if err := w.store.SetCached(ctx, job.Text, job.Source, job.Target, job.TranslatedText); err != nil {
 			slog.Warn("failed to cache image translation", "job_id", job.ID, "err", err)
 		}
+		job.Stage = StageCompleted
+		job.StageMessage = "Translation complete"
+		job.StageProgress = 1.0
 		if err := w.store.Update(ctx, job); err != nil {
 			slog.Error("update image job result", "job_id", job.ID, "err", err)
 		}
@@ -1308,9 +1320,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 
 	job.Status = StatusProcessing
-	if err := w.store.Update(ctx, job); err != nil {
-		slog.Error("update job to processing", "job_id", job.ID, "err", err)
-	}
+	var pdfStageMu sync.Mutex
+	pdfNotifyCtx := services.WithStageNotifier(ctx, w.stageNotifierFor(ctx, job, &pdfStageMu))
+	w.setJobStage(ctx, job, StageTranslating, "Translating content...", 0.2)
 
 	translateStart := time.Now()
 	type pageResult struct {
@@ -1354,13 +1366,13 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				defer wg.Done()
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
-					results[idx] = pageResult{err: ctx.Err()}
+				case <-pdfNotifyCtx.Done():
+					results[idx] = pageResult{err: pdfNotifyCtx.Err()}
 					return
 				}
 				defer func() { <-sem }()
 				chunkStart := time.Now()
-				translatedUnits, err := w.translateChunk(ctx, c, job.Source, job.Target, metrics)
+				translatedUnits, err := w.translateChunk(pdfNotifyCtx, c, job.Source, job.Target, metrics)
 				chunkEnd := time.Now()
 				chunkDur := chunkEnd.Sub(chunkStart)
 				chunkDurMs := chunkDur.Milliseconds()
@@ -1409,7 +1421,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 						unitDoneByPage[u.pageIndex]++
 						if unitDoneByPage[u.pageIndex] == unitTargetsByPage[u.pageIndex] {
 							job.ProcessedPages++
-							if uerr := w.store.Update(ctx, job); uerr != nil {
+							if uerr := w.store.Update(pdfNotifyCtx, job); uerr != nil {
 								slog.Error("update pdf progress", "job_id", job.ID, "processed_pages", job.ProcessedPages, "err", uerr)
 							}
 						}
@@ -1484,6 +1496,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			ocrOutcome = "translation_failed"
 		}
 	} else {
+		job.Stage = StageCompleted
+		job.StageMessage = "Translation complete"
+		job.StageProgress = 1.0
 		job.Status = StatusCompleted
 		job.TranslatedText = translated
 		if ocrTriggered {
@@ -1527,6 +1542,35 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 }
 
 // effectiveMode returns job.Mode, defaulting to ModeOverlay for empty values.
+// setJobStage updates the job's Stage, StageMessage, and StageProgress and
+// persists the change to the store. Errors are logged but not propagated since
+// stage updates are best-effort and must not abort a job.
+func (w *Worker) setJobStage(ctx context.Context, job *Job, stage, message string, progress float64) {
+	job.Stage = stage
+	job.StageMessage = message
+	job.StageProgress = progress
+	if err := w.store.Update(ctx, job); err != nil {
+		slog.Warn("set_job_stage_update_failed", "job_id", job.ID, "stage", stage, "err", err)
+	}
+}
+
+// stageNotifierFor returns a services.StageNotifyFn that updates job stage in
+// memory and persists it. A mutex prevents concurrent goroutines from racing on
+// the job struct fields. The persist is best-effort; errors are silently dropped.
+func (w *Worker) stageNotifierFor(ctx context.Context, job *Job, mu *sync.Mutex) services.StageNotifyFn {
+	return func(stage, message string, progress float64) {
+		mu.Lock()
+		job.Stage = stage
+		job.StageMessage = message
+		if progress > 0 {
+			job.StageProgress = progress
+		}
+		mu.Unlock()
+		// Best-effort persist so the UI sees "retrying" / "fallback_provider" in real-time.
+		_ = w.store.Update(ctx, job)
+	}
+}
+
 // This covers legacy jobs that were enqueued before the mode field was introduced.
 func effectiveMode(m Mode) Mode {
 	if m == "" {

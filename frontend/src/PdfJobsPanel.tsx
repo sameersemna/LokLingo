@@ -11,7 +11,7 @@ import {
 
 const STATUS_LABEL: Record<JobResponse['status'], string> = {
   pending: 'Queued',
-  processing: 'Translating…',
+  processing: 'Translating...',
   completed: 'Done',
   failed: 'Failed',
 }
@@ -62,6 +62,10 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
   const status = live?.status ?? 'pending'
   const isTerminal = status === 'completed' || status === 'failed'
   const text = live?.translated_text ?? ''
+  const statusLabel = status === 'processing' ? (live?.stage_message ?? STATUS_LABEL.processing) : STATUS_LABEL[status]
+  const stageProgress = status === 'processing' && typeof live?.stage_progress === 'number'
+    ? Math.max(0, Math.min(1, live.stage_progress))
+    : null
 
   const handleCopy = async () => {
     if (!text) return
@@ -97,7 +101,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
 
         <div className="pdf-job-actions">
           <span className={`pdf-job-badge ${STATUS_CLASS[status]}`}>
-            {STATUS_LABEL[status]}
+            {statusLabel}
             {(status === 'pending' || status === 'processing') && (
               <span className="spinner spinner-sm pdf-spinner" aria-hidden="true" />
             )}
@@ -133,6 +137,15 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
           )}
         </div>
       </div>
+
+      {stageProgress !== null && stageProgress > 0 && (
+    <div className="pdf-job-progress" aria-label={`Progress ${Math.round(stageProgress * 100)} percent`}>
+      <div className="pdf-job-progress-bar">
+      <div className="pdf-job-progress-fill" style={{ width: `${stageProgress * 100}%` }} />
+      </div>
+      <span className="pdf-job-progress-value">{Math.round(stageProgress * 100)}%</span>
+    </div>
+    )}
 
       {expanded && text && (
         <div className="pdf-job-result">{text}</div>

@@ -12,6 +12,20 @@ const (
 	StatusFailed     Status = "failed"
 )
 
+// Stage is a fine-grained processing state for in-progress jobs, surfaced in
+// the GET /jobs/:id response so the UI can display meaningful progress messages
+// rather than a generic "processing" spinner.
+const (
+	StageDetectingText       = "detecting_text"
+	StageUnderstandingLayout = "understanding_layout"
+	StageTranslating         = "translating"
+	StageRebuildingLayout    = "rebuilding_layout"
+	StageRendering           = "rendering"
+	StageRetrying            = "retrying"
+	StageFallbackProvider    = "fallback_provider"
+	StageCompleted           = "completed"
+)
+
 // JobType distinguishes the kind of work a job represents.
 type JobType = string
 
@@ -52,6 +66,12 @@ type Job struct {
 	DeadLetteredAt time.Time `json:"dead_lettered_at,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+
+	// Stage tracks the fine-grained processing phase for in-progress jobs.
+	// Values are one of the Stage* constants (e.g. StageTranslating).
+	Stage         string  `json:"stage,omitempty"`
+	StageMessage  string  `json:"stage_message,omitempty"`
+	StageProgress float64 `json:"stage_progress,omitempty"`
 
 	// File-job-specific fields (PDF and image jobs).
 	FilePath         string `json:"file_path,omitempty"`         // path to the uploaded file on the worker's filesystem

@@ -62,6 +62,9 @@ func TestGetJob_PDFProgressFieldsIncluded(t *testing.T) {
 		ID:             "job-123",
 		Type:           jobs.TypePDF,
 		Status:         jobs.StatusProcessing,
+		Stage:          jobs.StageTranslating,
+		StageMessage:   "Translating content...",
+		StageProgress:  0.42,
 		Source:         "en",
 		Target:         "de",
 		TotalPages:     12,
@@ -93,6 +96,15 @@ func TestGetJob_PDFProgressFieldsIncluded(t *testing.T) {
 	}
 	if body["processed_pages"] != float64(5) {
 		t.Fatalf("expected processed_pages=5, got %#v", body["processed_pages"])
+	}
+	if body["stage"] != jobs.StageTranslating {
+		t.Fatalf("expected stage=%q, got %#v", jobs.StageTranslating, body["stage"])
+	}
+	if body["stage_message"] != "Translating content..." {
+		t.Fatalf("expected stage_message to be included, got %#v", body["stage_message"])
+	}
+	if body["stage_progress"] != 0.42 {
+		t.Fatalf("expected stage_progress=0.42, got %#v", body["stage_progress"])
 	}
 }
 

@@ -155,6 +155,31 @@ func TestLoadReadsLiteLLMRequestTimeoutSeconds(t *testing.T) {
 	}
 }
 
+func TestLoadReadsOptionalProviderEnvValues(t *testing.T) {
+	t.Setenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
+	t.Setenv("OLLAMA_MODEL", "llama3.2")
+	t.Setenv("OPENAI_COMPAT_BASE_URL", "https://example.test/v1")
+	t.Setenv("OPENAI_COMPAT_API_KEY", "secret")
+	t.Setenv("OPENAI_COMPAT_MODEL", "gpt-4o-mini")
+
+	cfg := Load()
+	if cfg.OllamaBaseURL != "http://ollama:11434/v1" {
+		t.Fatalf("expected OllamaBaseURL to be loaded, got %q", cfg.OllamaBaseURL)
+	}
+	if cfg.OllamaModel != "llama3.2" {
+		t.Fatalf("expected OllamaModel to be loaded, got %q", cfg.OllamaModel)
+	}
+	if cfg.OpenAICompatBaseURL != "https://example.test/v1" {
+		t.Fatalf("expected OpenAICompatBaseURL to be loaded, got %q", cfg.OpenAICompatBaseURL)
+	}
+	if cfg.OpenAICompatAPIKey != "secret" {
+		t.Fatalf("expected OpenAICompatAPIKey to be loaded, got %q", cfg.OpenAICompatAPIKey)
+	}
+	if cfg.OpenAICompatModel != "gpt-4o-mini" {
+		t.Fatalf("expected OpenAICompatModel to be loaded, got %q", cfg.OpenAICompatModel)
+	}
+}
+
 func TestConfigValidateRejectsZeroRequestTimeout(t *testing.T) {
 	cfg := &Config{
 		LiteLLMBaseURL:               "http://latitude:11435",
