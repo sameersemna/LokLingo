@@ -59,6 +59,40 @@ type redisStore struct {
 	rdb *redis.Client
 }
 
+// QueueStats returns current queue health counters from Redis.
+func (s *redisStore) QueueStats(ctx context.Context) (QueueStats, error) {
+	queueDepth, err := s.rdb.LLen(ctx, queueKey).Result()
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("queue depth: %w", err)
+	}
+	inflightDepth, err := s.rdb.LLen(ctx, inflightQueueKey).Result()
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("inflight depth: %w", err)
+	}
+	retryBacklog, err := s.rdb.ZCard(ctx, retryZSetKey).Result()
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("retry backlog: %w", err)
+	}
+	deadLetterCount, err := s.rdb.LLen(ctx, deadLetterQueueKey).Result()
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("dead-letter volume: %w", err)
+	}
+
+	threshold := time.Now().Add(-defaultRecoverTTL).Unix()
+	stuckJobs, err := s.rdb.ZCount(ctx, inflightZSetKey, "-inf", strconv.FormatInt(threshold, 10)).Result()
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("stuck jobs: %w", err)
+	}
+
+	return QueueStats{
+		QueueDepth:      queueDepth,
+		InflightDepth:   inflightDepth,
+		StuckJobs:       stuckJobs,
+		RetryBacklog:    retryBacklog,
+		DeadLetterCount: deadLetterCount,
+	}, nil
+}
+
 type chunkCheckpointUnit struct {
 	PageIndex int    `json:"page_index"`
 	Text      string `json:"text"`

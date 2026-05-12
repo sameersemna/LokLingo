@@ -114,6 +114,12 @@ Development overlay:
 * `docker-compose.dev.yml` adds a local Redis container
 * It wires the backend to `redis://loklingo-redis:6379`
 
+Observability overlay:
+
+* `docker-compose.observability.yml` adds Prometheus and Grafana with auto-provisioned datasource and dashboards
+* It scrapes backend metrics through a token-aware metrics proxy that injects `X-Internal-Token` and loads dashboards from `guide/governance/dashboards`
+* The metrics proxy is exposed on `${METRICS_PROXY_HOST_PORT:-18081}` for smoke validation and local troubleshooting
+
 Development command:
 
 ```bash
@@ -124,6 +130,26 @@ Production command:
 
 ```bash
 docker compose up -d
+```
+
+Development with observability:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.observability.yml up -d --build
+```
+
+Observability endpoints:
+
+```text
+Prometheus: http://localhost:19090
+Grafana: http://localhost:13030
+Metrics proxy: http://localhost:18081
+```
+
+Bundled smoke test:
+
+```bash
+sh guide/smoke-observability.sh
 ```
 
 In production, `REDIS_URL` must point to an external Redis instance.
@@ -198,6 +224,7 @@ Quick access:
 * Incident templates: [guide/governance/incident-templates.md](guide/governance/incident-templates.md)
 * SLO/SLA definitions: [guide/governance/slo-sla.md](guide/governance/slo-sla.md)
 * Dashboard spec: [guide/governance/dashboard-spec.md](guide/governance/dashboard-spec.md)
+* Observability instrumentation spec: [guide/governance/observability-reliability-spec.md](guide/governance/observability-reliability-spec.md)
 * Golden-path smoke tests: [guide/governance/golden-path-smoke-tests.md](guide/governance/golden-path-smoke-tests.md)
 * Lifecycle events standard: [guide/governance/lifecycle-events.md](guide/governance/lifecycle-events.md)
 * On-call first response playbook: [guide/governance/oncall-first-response-playbook.md](guide/governance/oncall-first-response-playbook.md)

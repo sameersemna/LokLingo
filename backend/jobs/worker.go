@@ -458,6 +458,7 @@ func (w *Worker) translateWithRetry(ctx context.Context, text, source, target st
 			return "", err
 		}
 		metrics.incTranslateRetry()
+		observability.EmitLifecycleEventFromContext(ctx, "chunk_retry", observability.LifecycleEvent{Provider: "translation", RetryCount: int64(attempt + 1)})
 		errKind := "rate_limit"
 		if isNetTimeout {
 			errKind = "network_timeout"
@@ -876,6 +877,18 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}()
 
 	startedAt := time.Now()
+	queueDepth := int64(0)
+	if statsProvider, ok := w.store.(interface{ QueueStats(context.Context) (QueueStats, error) }); ok {
+		if stats, err := statsProvider.QueueStats(ctx); err == nil {
+			queueDepth = stats.QueueDepth
+		}
+	}
+	queueWaitMS := startedAt.Sub(job.CreatedAt).Milliseconds()
+	observability.RecordQueueWaitLatency(queueWaitMS)
+	if job.CorrelationID == "" {
+		job.CorrelationID = job.ID
+	}
+	ctx = observability.WithLifecycleContext(ctx, job.ID, job.CorrelationID)
 	var extractMS int64
 	var ocrMS int64
 	var translateMS int64
@@ -884,6 +897,15 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	var ocrOutcome string
 	metrics := &retryMetrics{}
 	var chunkCount int
+	defer func() {
+		durationMS := time.Since(startedAt).Milliseconds()
+		switch job.Status {
+		case StatusFailed:
+			observability.EmitLifecycleEventFromContext(ctx, "job_failed", observability.LifecycleEvent{Provider: "pipeline", DurationMS: durationMS, RetryCount: metrics.totalRetryEvents(), QueueDepth: queueDepth})
+		case StatusCompleted:
+			observability.EmitLifecycleEventFromContext(ctx, "job_completed", observability.LifecycleEvent{Provider: "pipeline", DurationMS: durationMS, RetryCount: metrics.totalRetryEvents(), QueueDepth: queueDepth})
+		}
+	}()
 
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "mode", job.Mode, "source", job.Source, "target", job.Target)
 
@@ -929,9 +951,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				}
 				return
 			}
+			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
 			ocrPages, ocrErr := w.ocrClient.ExtractPages(job.FilePath, job.Lang)
 			ocrMS = time.Since(ocrStart).Milliseconds()
+			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
 				slog.Error("pdf OCR-only extraction failed", "job_id", job.ID, "file", job.FilePath, "err", ocrErr)
 				job.Status = StatusFailed
@@ -990,9 +1014,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			slog.Warn("pdf text extraction failed, falling back to OCR", "job_id", job.ID, "file", job.FilePath, "reason", reason)
 			ocrTriggered = true
+			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
 			ocrPages, ocrErr := w.ocrClient.ExtractPages(job.FilePath, job.Lang)
 			ocrMS = time.Since(ocrStart).Milliseconds()
+			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
 				slog.Error("OCR fallback also failed", "job_id", job.ID, "file", job.FilePath, "err", ocrErr)
 				job.Status = StatusFailed
@@ -1075,8 +1101,12 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 		job.Status = StatusProcessing
 		w.setJobStage(ctx, job, StageDetectingText, "Detecting text in image…", 0.05)
+		observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 
+		ocrStart := time.Now()
 		blocks, err := w.ocrClient.ExtractImageBlocks(job.FilePath, job.Lang)
+		ocrMS = time.Since(ocrStart).Milliseconds()
+		observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 		if err != nil {
 			job.Status = StatusFailed
 			job.ErrorMsg = fmt.Sprintf("image OCR failed: %v", err)
@@ -1178,6 +1208,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		var imgStageMu sync.Mutex
 		imgNotifyCtx := services.WithStageNotifier(ctx, w.stageNotifierFor(ctx, job, &imgStageMu))
 		w.setJobStage(ctx, job, StageTranslating, "Translating image text…", 0.3)
+		observability.EmitLifecycleEventFromContext(ctx, "translation_started", observability.LifecycleEvent{Provider: "pipeline", QueueDepth: queueDepth})
 
 		sem := make(chan struct{}, maxParallel)
 		var wg sync.WaitGroup
@@ -1192,7 +1223,10 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 					return
 				}
 				defer func() { <-sem }()
+				observability.EmitLifecycleEventFromContext(imgNotifyCtx, "chunk_started", observability.LifecycleEvent{Provider: "translation", QueueDepth: queueDepth})
+				chunkStarted := time.Now()
 				translatedUnits, terr := w.translateChunk(imgNotifyCtx, c, job.Source, job.Target, metrics)
+				observability.EmitLifecycleEventFromContext(imgNotifyCtx, "chunk_completed", observability.LifecycleEvent{Provider: "translation", DurationMS: time.Since(chunkStarted).Milliseconds(), RetryCount: metrics.totalRetryEvents(), QueueDepth: queueDepth})
 				if terr != nil {
 					errByChunk[idx] = terr
 					return
@@ -1288,6 +1322,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		} else {
 			w.setJobStage(ctx, job, StageRendering, "Rendering translated image…", 0.85)
 		}
+		observability.EmitLifecycleEventFromContext(ctx, "render_started", observability.LifecycleEvent{Provider: "render", QueueDepth: queueDepth})
+		renderStart := time.Now()
 		outPath, renderStats, err := internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, renderOpts)
 		if err != nil && effectiveJobMode == ModeLayout {
 			// If layout rendering fails, fall back to the regular overlay render path.
@@ -1330,6 +1366,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			outPath = passthroughPath
 		}
+		observability.EmitLifecycleEventFromContext(ctx, "render_completed", observability.LifecycleEvent{Provider: "render", DurationMS: time.Since(renderStart).Milliseconds(), QueueDepth: queueDepth})
 
 		renderEvent := "image_overlay_rendered"
 		if effectiveJobMode == ModeLayout {
@@ -1349,6 +1386,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		job.Text = strings.Join(fullSource, "\n")
 		job.TranslatedText = strings.Join(fullTarget, "\n")
 		job.OutputFilePath = outPath
+		observability.EmitLifecycleEventFromContext(ctx, "export_started", observability.LifecycleEvent{Provider: "render", QueueDepth: queueDepth})
+		observability.EmitLifecycleEventFromContext(ctx, "export_completed", observability.LifecycleEvent{Provider: "render", QueueDepth: queueDepth})
 		job.Status = StatusCompleted
 		if err := w.store.SetCached(ctx, job.Text, job.Source, job.Target, job.TranslatedText); err != nil {
 			slog.Warn("failed to cache image translation", "job_id", job.ID, "err", err)
@@ -1399,6 +1438,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 
 	job.Status = StatusProcessing
+	observability.EmitLifecycleEventFromContext(ctx, "translation_started", observability.LifecycleEvent{Provider: "pipeline", QueueDepth: queueDepth})
 	var pdfStageMu sync.Mutex
 	pdfNotifyCtx := services.WithStageNotifier(ctx, w.stageNotifierFor(ctx, job, &pdfStageMu))
 	w.setJobStage(ctx, job, StageTranslating, "Translating content...", 0.2)
@@ -1468,6 +1508,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				}
 				defer func() { <-sem }()
 				chunkStart := time.Now()
+				observability.EmitLifecycleEventFromContext(pdfNotifyCtx, "chunk_started", observability.LifecycleEvent{Provider: "translation", QueueDepth: queueDepth})
 				translatedUnits, err := w.translateChunk(pdfNotifyCtx, c, job.Source, job.Target, metrics)
 				chunkEnd := time.Now()
 				chunkDur := chunkEnd.Sub(chunkStart)
@@ -1475,6 +1516,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				chunkStartTS := chunkStart.UTC().Format(time.RFC3339Nano)
 				chunkEndTS := chunkEnd.UTC().Format(time.RFC3339Nano)
 				chunkIdx := chunkIdxOffset + idx
+				observability.EmitLifecycleEventFromContext(pdfNotifyCtx, "chunk_completed", observability.LifecycleEvent{Provider: "translation", DurationMS: chunkDurMs, RetryCount: metrics.totalRetryEvents(), QueueDepth: queueDepth})
 				if chunkDur > slowChunkThreshold {
 					slog.Warn("slow_chunk_translation",
 						"job_id", job.ID,
@@ -1603,6 +1645,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 	translated := strings.Join(translatedPages, "\n\n")
 	translateMS = time.Since(translateStart).Milliseconds()
+	observability.RecordTranslationLatency(translateMS)
 	if translateErr != nil {
 		slog.Error("translation failed", "job_id", job.ID, "err", translateErr)
 		job.Status = StatusFailed
@@ -1619,7 +1662,9 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 		job.StageProgress = 1.0
 		job.Status = StatusCompleted
+		observability.EmitLifecycleEventFromContext(ctx, "export_started", observability.LifecycleEvent{Provider: "pipeline", QueueDepth: queueDepth})
 		job.TranslatedText = translated
+		observability.EmitLifecycleEventFromContext(ctx, "export_completed", observability.LifecycleEvent{Provider: "pipeline", QueueDepth: queueDepth})
 		if ocrTriggered {
 			ocrOutcome = "succeeded"
 		}

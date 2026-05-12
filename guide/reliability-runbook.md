@@ -22,6 +22,7 @@ Operational governance framework docs:
 * [Incident Management Templates](governance/incident-templates.md)
 * [SLO and SLA Definitions](governance/slo-sla.md)
 * [Reliability Dashboard Specification](governance/dashboard-spec.md)
+* [Observability and Reliability Instrumentation Specification](governance/observability-reliability-spec.md)
 * [Golden-Path Reliability Smoke Tests](governance/golden-path-smoke-tests.md)
 * [Operational Lifecycle Events Standard](governance/lifecycle-events.md)
 * [On-Call First Response Playbook](governance/oncall-first-response-playbook.md)
@@ -63,6 +64,52 @@ Runbook quick links:
 * [Governance ownership RACI](#governance-ownership-raci)
 * [Reliability review meeting agenda](#reliability-review-meeting-agenda-template)
 * [Severity-to-channel communication policy](#severity-to-channel-communication-policy)
+
+### Observability Stack Quickstart (Prometheus + Grafana)
+
+Start LokLingo with auto-provisioned observability stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.observability.yml up -d --build
+```
+
+Access services:
+
+- Prometheus: `http://localhost:${PROMETHEUS_HOST_PORT:-19090}`
+- Grafana: `http://localhost:${GRAFANA_HOST_PORT:-13030}`
+- Metrics proxy: `http://localhost:${METRICS_PROXY_HOST_PORT:-18081}`
+
+Grafana defaults:
+
+- Username: `${GRAFANA_ADMIN_USER:-admin}`
+- Password: `${GRAFANA_ADMIN_PASSWORD:-admin}`
+
+Auto-provisioned assets:
+
+- Datasource: `LokLingo Prometheus`
+- Dashboard: `LokLingo Reliability Overview`
+- Dashboard: `LokLingo Incident Timeline Companion`
+
+Smoke validation:
+
+- `sh guide/smoke-observability.sh`
+
+Prometheus scrape source:
+
+- `GET /api/v1/metrics/prometheus`
+
+Incident lineage query workflow:
+
+```bash
+curl -s "http://localhost:28080/api/v1/metrics/lifecycle/events?correlation_id=<id>&limit=200" \
+    -H "X-Internal-Token: $INTERNAL_TOKEN" | jq .
+```
+
+Important auth note:
+
+- Internal token middleware currently accepts `X-Internal-Token` only.
+- The observability compose overlay includes `loklingo-metrics-proxy`, which injects `X-Internal-Token` into scrape requests.
+- Keep `INTERNAL_TOKEN` set consistently for backend and observability stack so secured scraping continues to work.
 
 ### 1) Apply analytics migrations
 

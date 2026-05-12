@@ -102,6 +102,35 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.yml down -v
 
+  observability-artifacts-check:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate observability compose overlay
+        run: |
+          cp .env.development .env
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.observability.yml config
+      - name: Validate observability smoke script syntax
+        run: sh -n guide/smoke-observability.sh
+      - name: Validate dashboard JSON
+        run: |
+          python3 -m json.tool guide/governance/dashboards/loklingo-reliability-dashboard.json >/dev/null
+          python3 -m json.tool guide/governance/dashboards/loklingo-incident-timeline-dashboard.json >/dev/null
+      - name: Validate provisioning YAML
+        run: |
+          python3 - <<'PYEOF'
+          import yaml
+
+          for path in [
+            "guide/governance/prometheus/prometheus.yml",
+            "guide/governance/grafana/provisioning/datasources/prometheus.yml",
+            "guide/governance/grafana/provisioning/dashboards/dashboards.yml",
+          ]:
+            with open(path, "r", encoding="utf-8") as handle:
+              yaml.safe_load(handle)
+          PYEOF
+
   governance-maintenance-scheduled:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest

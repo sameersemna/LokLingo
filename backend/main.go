@@ -109,6 +109,9 @@ func main() {
 	jobsHandler := handlers.NewJobsHandler(jobStore, cfg.MaxPDFUploadBytes)
 	ocrMetricsHandler := handlers.NewOCRMetricsHandler(pgPool)
 	providerMetricsHandler := handlers.NewProviderMetricsHandler()
+	reliabilityMetricsHandler := handlers.NewReliabilityMetricsHandler(jobStore)
+	lifecycleEventsHandler := handlers.NewLifecycleEventsHandler()
+	prometheusMetricsHandler := handlers.NewPrometheusMetricsHandler(jobStore)
 
 	api := app.Group("/api/v1")
 	writeAPI := api.Group("", middleware.WriteAPIAuth(cfg.AppEnv, cfg.WriteAPIToken), middleware.WriteRateLimiter(cfg.WriteRateLimitPerMinute), middleware.UploadRateLimiter(cfg.UploadRateLimitPerMinute))
@@ -124,6 +127,9 @@ func main() {
 	api.Get("/jobs/:id/output", jobsHandler.DownloadJobOutput)
 	api.Get("/metrics/ocr", middleware.InternalToken(cfg.InternalToken), ocrMetricsHandler.Summary)
 	api.Get("/metrics/providers", middleware.InternalToken(cfg.InternalToken), providerMetricsHandler.Summary)
+	api.Get("/metrics/reliability", middleware.InternalToken(cfg.InternalToken), reliabilityMetricsHandler.Summary)
+	api.Get("/metrics/lifecycle/events", middleware.InternalToken(cfg.InternalToken), lifecycleEventsHandler.List)
+	api.Get("/metrics/prometheus", middleware.InternalToken(cfg.InternalToken), prometheusMetricsHandler.Expose)
 
 	slog.Info("LokLingo backend starting", "port", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {

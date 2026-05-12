@@ -13,6 +13,7 @@ Operational Scope: Internal reliability observability for queueing, provider beh
 3. Provider and Retry Health
 4. Error and Timeout Trends
 5. Failover and Degradation Signals
+6. Incident Timeline and Correlation Views
 
 ## Required Metrics and Visualizations
 
@@ -34,6 +35,13 @@ Operational Scope: Internal reliability observability for queueing, provider beh
 - Every reliability-critical panel must include direct links to runbook triage steps.
 - Severity colors must align with the severity matrix definitions.
 
+## Required Operational Views
+
+- Incident view: correlation-aware timeline (OCR -> translation -> render -> export) keyed by `correlation_id` and `job_id`.
+- Provider health view: success/failure rates, retry/failover rates, timeout rate, and latency distribution buckets.
+- Queue health view: queue depth, processing concurrency, stuck jobs, retry backlog, dead-letter volume.
+- Export reliability view: export success rate and terminal failure trend.
+
 ## Alert Routing
 
 - Warn alerts route to service owner channels.
@@ -43,5 +51,13 @@ Operational Scope: Internal reliability observability for queueing, provider beh
 ## Data Sources
 
 - Backend metrics endpoints (`/api/v1/metrics/providers`, `/api/v1/metrics/ocr`).
+- Backend reliability endpoint (`/api/v1/metrics/reliability`).
+- Lifecycle event query endpoint (`/api/v1/metrics/lifecycle/events`).
+- Prometheus scrape endpoint (`/api/v1/metrics/prometheus`).
 - Reliability event tables and dashboard SQL.
 - Worker queue telemetry and provider integration counters.
+
+## Reference Artifact
+
+- Ready-to-import Grafana dashboard JSON: `guide/governance/dashboards/loklingo-reliability-dashboard.json`
+- Incident timeline companion dashboard JSON: `guide/governance/dashboards/loklingo-incident-timeline-dashboard.json`

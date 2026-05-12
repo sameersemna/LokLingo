@@ -15,6 +15,11 @@ type providerCounters struct {
 	timeouts       atomic.Int64
 	latencyTotalMS atomic.Int64
 	latencyCount   atomic.Int64
+	latencyLE250   atomic.Int64
+	latencyLE500   atomic.Int64
+	latencyLE1000  atomic.Int64
+	latencyLE2000  atomic.Int64
+	latencyGT2000  atomic.Int64
 }
 
 type timeoutReasonCounters struct {
@@ -106,6 +111,18 @@ func RecordProviderLatency(provider string, ms int64) {
 	c := getProviderCounters(provider)
 	c.latencyTotalMS.Add(ms)
 	c.latencyCount.Add(1)
+	switch {
+	case ms <= 250:
+		c.latencyLE250.Add(1)
+	case ms <= 500:
+		c.latencyLE500.Add(1)
+	case ms <= 1000:
+		c.latencyLE1000.Add(1)
+	case ms <= 2000:
+		c.latencyLE2000.Add(1)
+	default:
+		c.latencyGT2000.Add(1)
+	}
 }
 
 // ProviderSnapshot captures per-provider counters at a point in time.
@@ -118,6 +135,16 @@ type ProviderSnapshot struct {
 	FailoverTotal  int64   `json:"failover_total"`
 	TimeoutTotal   int64   `json:"timeout_total"`
 	AvgLatencyMS   float64 `json:"avg_latency_ms"`
+	LatencyBuckets ProviderLatencyBuckets `json:"latency_buckets"`
+}
+
+// ProviderLatencyBuckets is a compact latency distribution for provider health views.
+type ProviderLatencyBuckets struct {
+	LE250MS  int64 `json:"le_250_ms"`
+	LE500MS  int64 `json:"le_500_ms"`
+	LE1000MS int64 `json:"le_1000_ms"`
+	LE2000MS int64 `json:"le_2000_ms"`
+	GT2000MS int64 `json:"gt_2000_ms"`
 }
 
 // TimeoutReasonSnapshot captures timeout frequencies grouped by reason.
@@ -162,6 +189,13 @@ func SnapshotProviderMetrics() []ProviderSnapshot {
 			FailoverTotal:  c.failovers.Load(),
 			TimeoutTotal:   c.timeouts.Load(),
 			AvgLatencyMS:   avg,
+			LatencyBuckets: ProviderLatencyBuckets{
+				LE250MS:  c.latencyLE250.Load(),
+				LE500MS:  c.latencyLE500.Load(),
+				LE1000MS: c.latencyLE1000.Load(),
+				LE2000MS: c.latencyLE2000.Load(),
+				GT2000MS: c.latencyGT2000.Load(),
+			},
 		})
 		return true
 	})

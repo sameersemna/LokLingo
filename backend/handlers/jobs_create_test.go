@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -58,6 +59,14 @@ func TestCreateJob_TrimmedInputsAccepted(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", resp.StatusCode)
+	}
+	var respBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	v, ok := respBody["correlation_id"].(string)
+	if !ok || strings.TrimSpace(v) == "" {
+		t.Fatalf("expected non-empty correlation_id, got %v", respBody["correlation_id"])
 	}
 }
 

@@ -1,0 +1,73 @@
+groups:
+  - name: loklingo-reliability
+    interval: 30s
+    rules:
+      - alert: LokLingoQueueDepthHigh
+        expr: loklingo_queue_depth >= 500
+        for: 10m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo queue depth is elevated
+          description: Queue depth has stayed above 500 for 10 minutes.
+
+      - alert: LokLingoQueueDepthCritical
+        expr: loklingo_queue_depth >= 1000
+        for: 5m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: LokLingo queue depth is critical
+          description: Queue depth has stayed above 1000 for 5 minutes.
+
+      - alert: LokLingoStuckJobsDetected
+        expr: loklingo_queue_stuck_jobs >= 1
+        for: 10m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo has stuck inflight jobs
+          description: At least one job has been stuck in inflight for 10 minutes.
+
+      - alert: LokLingoDeadLetterGrowth
+        expr: loklingo_queue_dead_letter_volume >= 10
+        for: 5m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: LokLingo dead-letter volume is growing
+          description: Dead-letter queue exceeded 10 items for 5 minutes.
+
+      - alert: LokLingoChunkSuccessDrop
+        expr: loklingo_pipeline_chunk_success_ratio < 0.95
+        for: 10m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo chunk success ratio dropped
+          description: Chunk success ratio is below 95 percent for 10 minutes.
+
+      - alert: LokLingoExportSuccessDrop
+        expr: loklingo_pipeline_export_success_ratio < 0.98
+        for: 10m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo export success ratio dropped
+          description: Export success ratio is below 98 percent for 10 minutes.
+
+      - alert: LokLingoProviderTimeoutSpike
+        expr: sum(increase(loklingo_provider_timeout_total[5m])) by (provider) > 20
+        for: 5m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: Provider timeout spike detected
+          description: Provider {{ $labels.provider }} exceeded 20 timeouts over 5 minutes.

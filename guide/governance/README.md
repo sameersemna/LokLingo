@@ -21,6 +21,12 @@ This folder holds the production governance baseline for reliability operations.
 - [Incident Management Templates](incident-templates.md)
 - [SLO and SLA Definitions](slo-sla.md)
 - [Reliability Dashboard Specification](dashboard-spec.md)
+- Grafana Dashboard JSON: `dashboards/loklingo-reliability-dashboard.json`
+- Incident Timeline Dashboard JSON: `dashboards/loklingo-incident-timeline-dashboard.json`
+- Prometheus Scrape Config: `prometheus/prometheus.yml`
+- Metrics Proxy Config: `metrics-proxy/default.conf.template`
+- Grafana Provisioning (datasource/dashboard providers): `grafana/provisioning/`
+- [Observability and Reliability Instrumentation Specification](observability-reliability-spec.md)
 - [Golden-Path Smoke Tests](golden-path-smoke-tests.md)
 - [Operational Lifecycle Events](lifecycle-events.md)
 - [On-Call First Response Playbook](oncall-first-response-playbook.md)
@@ -42,6 +48,9 @@ This folder holds the production governance baseline for reliability operations.
 - [Governance Current Pointers](current-pointers.md)
 - [Governance Release Checklist](governance-release-checklist.md)
 - [Governance Drift Dashboard Template](governance-drift-dashboard-template.md)
+- Prometheus Alert Rules: `alerts/reliability-alerts.prometheus.yml`
+- Observability Compose Overlay: `docker-compose.observability.yml`
+- Observability Smoke Script: `../smoke-observability.sh`
 - [Governance Maintainer Quickstart](MAINTAINER-QUICKSTART.md)
 - [Monthly Governance Signoff Template](reviews/monthly-governance-signoff-template.md)
 - [Quarterly Governance Review Template](reviews/quarterly-governance-review-template.md)

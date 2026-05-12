@@ -14,10 +14,14 @@ ocr_health="$(curl -fsS "${ocr_url}/health")"
 echo "$ocr_health" | grep '"status":"ok"' >/dev/null
 
 echo "Checking frontend translate path: ${frontend_url}/translate"
+translate_t0="$(date +%s)"
 translation="$(curl -fsS "${frontend_url}/translate" \
   -H 'Content-Type: application/json' \
   --data-raw '{"text":"hello world","source":"en","target":"de"}')"
+translate_t1="$(date +%s)"
+translate_elapsed_s=$(( translate_t1 - translate_t0 ))
 echo "$translation" | grep '"translated_text"' >/dev/null
+echo "  translate latency: ${translate_elapsed_s}s"
 
 echo "Checking PDF job endpoint: POST ${backend_url}/api/v1/jobs/pdf"
 pdf_tmp="$(mktemp /tmp/loklingo-smoke-XXXX.pdf)"
@@ -219,3 +223,21 @@ submit_and_time "large"  50  900
 
 echo ""
 echo "Smoke test passed"
+
+if [ -n "${INTERNAL_TOKEN:-}" ]; then
+  echo "Collecting reliability instrumentation snapshots"
+  reliability_json="$(curl -fsS "${backend_url}/api/v1/metrics/reliability" -H "X-Internal-Token: ${INTERNAL_TOKEN}")"
+  providers_json="$(curl -fsS "${backend_url}/api/v1/metrics/providers" -H "X-Internal-Token: ${INTERNAL_TOKEN}")"
+
+  echo "$reliability_json" | grep '"pipeline"' >/dev/null
+  echo "$reliability_json" | grep '"queue"' >/dev/null
+  echo "$providers_json" | grep '"health"' >/dev/null
+
+  retries_total="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('retries_total',0))")"
+  failovers_total="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('failovers_total',0))")"
+  chunk_success="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('chunk_success_rate',0))")"
+  export_success="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('export_success_rate',0))")"
+  echo "  retries_total=${retries_total} failovers_total=${failovers_total} chunk_success_rate=${chunk_success} export_success_rate=${export_success}"
+else
+  echo "INTERNAL_TOKEN not set; skipping internal reliability metrics validation"
+fi

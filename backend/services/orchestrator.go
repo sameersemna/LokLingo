@@ -85,6 +85,7 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 		if err == nil {
 			if pi > 0 {
 				observability.IncProviderFailover(p.Name())
+				observability.EmitLifecycleEventFromContext(ctx, "provider_failover", observability.LifecycleEvent{Provider: p.Name(), RetryCount: int64(retries)})
 				slog.Info("provider_failover_success",
 					"provider", p.Name(),
 					"failed_provider", providerList[pi-1].Name(),
@@ -99,6 +100,7 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 		timeoutReason := classifyTimeoutReason(err)
 		if timeoutReason != "" {
 			observability.RecordProviderTimeout(p.Name(), timeoutReason)
+			observability.IncTimeoutsTotal()
 		}
 		if pi < len(providerList)-1 {
 			failoverReason := "provider_error"
@@ -156,9 +158,11 @@ func (o *Orchestrator) tryProviderWithRetry(
 		}
 
 		observability.RecordProviderRetry(p.Name())
+		observability.IncRetriesTotal()
 		timeoutReason := classifyTimeoutReason(err)
 		if timeoutReason != "" {
 			observability.RecordProviderTimeout(p.Name(), timeoutReason)
+			observability.IncTimeoutsTotal()
 		}
 
 		if !isOrchestratorTransientError(err) {

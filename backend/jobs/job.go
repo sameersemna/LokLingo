@@ -51,6 +51,7 @@ const DefaultMode Mode = ModeOverlay
 // Job holds all state for one async translation request.
 type Job struct {
 	ID             string    `json:"id"`
+	CorrelationID  string    `json:"correlation_id,omitempty"`
 	Status         Status    `json:"status"`
 	Type           JobType   `json:"type,omitempty"`
 	Mode           Mode      `json:"mode"`
@@ -85,4 +86,13 @@ type Job struct {
 	JPEGQuality int `json:"jpeg_quality,omitempty"` // output JPEG quality [1,100]; 0 → default (90)
 	BgAlpha     int `json:"bg_alpha"`               // background opacity [0,255]; -1 → default (220)
 	TextPadding int `json:"text_padding"`           // padding between box edge and text (px); -1 → default (6), 0 → flush to edge
+}
+
+// QueueStats captures queue-health counters for operational visibility.
+type QueueStats struct {
+	QueueDepth      int64 `json:"queue_depth"`
+	InflightDepth   int64 `json:"processing_concurrency"`
+	StuckJobs       int64 `json:"stuck_jobs"`
+	RetryBacklog    int64 `json:"retry_backlog"`
+	DeadLetterCount int64 `json:"dead_letter_volume"`
 }

@@ -16,8 +16,13 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
+	"loklingo/backend/internal/observability"
 	"loklingo/backend/jobs"
 )
+
+type queueStatsProvider interface {
+	QueueStats(ctx context.Context) (jobs.QueueStats, error)
+}
 
 // JobsHandler holds dependencies for the async job endpoints.
 type JobsHandler struct {
@@ -71,24 +76,43 @@ func (h *JobsHandler) CreateJob(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
+	correlationID, _ := c.Locals("requestID").(string)
+	if correlationID == "" {
+		correlationID = uuid.NewString()
+	}
 	job := &jobs.Job{
-		ID:        uuid.NewString(),
-		Status:    jobs.StatusPending,
-		Mode:      mode,
-		Text:      text,
-		Source:    source,
-		Target:    target,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            uuid.NewString(),
+		CorrelationID: correlationID,
+		Status:        jobs.StatusPending,
+		Mode:          mode,
+		Text:          text,
+		Source:        source,
+		Target:        target,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := h.store.Enqueue(c.Context(), job); err != nil {
 		slog.Error("failed to enqueue job", "request_id", c.Locals("requestID"), "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
 	}
 
+	queueDepth := int64(0)
+	if provider, ok := h.store.(queueStatsProvider); ok {
+		if stats, err := provider.QueueStats(c.Context()); err == nil {
+			queueDepth = stats.QueueDepth
+		}
+	}
+	observability.EmitLifecycleEvent("job_created", observability.LifecycleEvent{
+		JobID:         job.ID,
+		CorrelationID: job.CorrelationID,
+		Provider:      "queue",
+		QueueDepth:    queueDepth,
+	})
+
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-		"job_id": job.ID,
-		"status": job.Status,
+		"job_id":         job.ID,
+		"correlation_id": job.CorrelationID,
+		"status":         job.Status,
 	})
 }
 
@@ -194,13 +218,14 @@ func (h *JobsHandler) StreamJobEvents(c *fiber.Ctx) error {
 
 func buildJobResponse(job *jobs.Job) fiber.Map {
 	resp := fiber.Map{
-		"job_id":     job.ID,
-		"status":     job.Status,
-		"mode":       job.Mode,
-		"source":     job.Source,
-		"target":     job.Target,
-		"created_at": job.CreatedAt,
-		"updated_at": job.UpdatedAt,
+		"job_id":         job.ID,
+		"correlation_id": job.CorrelationID,
+		"status":         job.Status,
+		"mode":           job.Mode,
+		"source":         job.Source,
+		"target":         job.Target,
+		"created_at":     job.CreatedAt,
+		"updated_at":     job.UpdatedAt,
 	}
 	if job.Type == jobs.TypePDF {
 		resp["total_pages"] = job.TotalPages
@@ -293,25 +318,50 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
+	correlationID, _ := c.Locals("requestID").(string)
+	if correlationID == "" {
+		correlationID = uuid.NewString()
+	}
 	job := &jobs.Job{
-		ID:        uuid.NewString(),
-		Type:      jobs.TypePDF,
-		Status:    jobs.StatusPending,
-		Mode:      mode,
-		FilePath:  filePath,
-		Lang:      lang,
-		Source:    source,
-		Target:    target,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            uuid.NewString(),
+		CorrelationID: correlationID,
+		Type:          jobs.TypePDF,
+		Status:        jobs.StatusPending,
+		Mode:          mode,
+		FilePath:      filePath,
+		Lang:          lang,
+		Source:        source,
+		Target:        target,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := h.store.Enqueue(c.Context(), job); err != nil {
 		slog.Error("failed to enqueue pdf job", "request_id", c.Locals("requestID"), "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
 	}
 
+	queueDepth := int64(0)
+	if provider, ok := h.store.(queueStatsProvider); ok {
+		if stats, err := provider.QueueStats(c.Context()); err == nil {
+			queueDepth = stats.QueueDepth
+		}
+	}
+	observability.EmitLifecycleEvent("upload_received", observability.LifecycleEvent{
+		JobID:         job.ID,
+		CorrelationID: job.CorrelationID,
+		Provider:      "pdf",
+		QueueDepth:    queueDepth,
+	})
+	observability.EmitLifecycleEvent("job_created", observability.LifecycleEvent{
+		JobID:         job.ID,
+		CorrelationID: job.CorrelationID,
+		Provider:      "queue",
+		QueueDepth:    queueDepth,
+	})
+
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-		"job_id": job.ID,
+		"job_id":         job.ID,
+		"correlation_id": job.CorrelationID,
 	})
 }
 
@@ -385,28 +435,53 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
+	correlationID, _ := c.Locals("requestID").(string)
+	if correlationID == "" {
+		correlationID = uuid.NewString()
+	}
 	job := &jobs.Job{
-		ID:          uuid.NewString(),
-		Type:        jobs.TypeImage,
-		Status:      jobs.StatusPending,
-		Mode:        mode,
-		FilePath:    filePath,
-		Lang:        lang,
-		Source:      source,
-		Target:      target,
-		JPEGQuality: jpegQuality,
-		BgAlpha:     bgAlpha,
-		TextPadding: textPadding,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:            uuid.NewString(),
+		CorrelationID: correlationID,
+		Type:          jobs.TypeImage,
+		Status:        jobs.StatusPending,
+		Mode:          mode,
+		FilePath:      filePath,
+		Lang:          lang,
+		Source:        source,
+		Target:        target,
+		JPEGQuality:   jpegQuality,
+		BgAlpha:       bgAlpha,
+		TextPadding:   textPadding,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := h.store.Enqueue(c.Context(), job); err != nil {
 		slog.Error("failed to enqueue image job", "request_id", c.Locals("requestID"), "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to enqueue job")
 	}
 
+	queueDepth := int64(0)
+	if provider, ok := h.store.(queueStatsProvider); ok {
+		if stats, err := provider.QueueStats(c.Context()); err == nil {
+			queueDepth = stats.QueueDepth
+		}
+	}
+	observability.EmitLifecycleEvent("upload_received", observability.LifecycleEvent{
+		JobID:         job.ID,
+		CorrelationID: job.CorrelationID,
+		Provider:      "image",
+		QueueDepth:    queueDepth,
+	})
+	observability.EmitLifecycleEvent("job_created", observability.LifecycleEvent{
+		JobID:         job.ID,
+		CorrelationID: job.CorrelationID,
+		Provider:      "queue",
+		QueueDepth:    queueDepth,
+	})
+
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-		"job_id": job.ID,
+		"job_id":         job.ID,
+		"correlation_id": job.CorrelationID,
 	})
 }
 

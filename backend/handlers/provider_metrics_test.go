@@ -43,6 +43,9 @@ func TestProviderMetricsSummary_ReturnsPayload(t *testing.T) {
 	if _, ok := body["providers"]; !ok {
 		t.Fatal("expected providers key in response")
 	}
+	if _, ok := body["health"]; !ok {
+		t.Fatal("expected health key in response")
+	}
 	if _, ok := body["timeouts"]; !ok {
 		t.Fatal("expected timeouts key in response")
 	}
