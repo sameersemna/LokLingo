@@ -1,0 +1,2 @@
+action_id,summary,impact_addressed,owner,due_date_utc,status,dependency,evidence_link,last_update_utc
+A-001,<action>,<risk_or_gap>,<owner>,<YYYY-MM-DD>,open,<dependency>,<url_or_path>,<YYYY-MM-DDTHH:MM:SSZ>

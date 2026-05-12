@@ -1,5 +1,11 @@
 # Reliability Runbook
 
+Governance Version: 1.0
+Review Owner: Reliability Lead (Platform)
+Last Review: 2026-05-12
+Next Review: 2026-08-12
+Operational Scope: Reliability telemetry, incident operations, escalation, and governance controls
+
 This document is the source of truth for LokLingo reliability operations.
 It centralizes telemetry interpretation, threshold guidance, incident handling,
 handoff standards, and closure criteria.
@@ -9,101 +15,54 @@ handoff standards, and closure criteria.
 LokLingo can persist OCR and LiteLLM reliability events into Postgres for
 time-windowed operations dashboards.
 
-Reliability quick links:
+Operational governance framework docs:
+
+* [Governance index](governance/README.md)
+* [Reliability Severity Matrix](governance/severity-matrix.md)
+* [Incident Management Templates](governance/incident-templates.md)
+* [SLO and SLA Definitions](governance/slo-sla.md)
+* [Reliability Dashboard Specification](governance/dashboard-spec.md)
+* [Golden-Path Reliability Smoke Tests](governance/golden-path-smoke-tests.md)
+* [Operational Lifecycle Events Standard](governance/lifecycle-events.md)
+* [On-Call First Response Playbook](governance/oncall-first-response-playbook.md)
+* [Incident Artifact Template Bundle](governance/incidents-template/README.md)
+* [Governance Archive Bootstrap Script](governance/create-governance-archive-structure.sh)
+* [Governance Archive Index Generator](governance/generate-governance-archive-index.sh)
+* [Governance Current Pointers Updater](governance/update-governance-current-pointers.sh)
+* [Governance Drift Snapshot Generator](governance/generate-governance-drift-snapshot.sh)
+* [Governance Drift Summary Generator](governance/generate-governance-drift-summary.sh)
+* [Governance Drift Trend Updater](governance/update-governance-drift-trend.sh)
+* [Governance Maintenance Runner](governance/run-governance-maintenance.sh)
+* [Governance Metadata Check Script](governance/check-governance-metadata.sh)
+* [Governance Freshness Check Script](governance/check-governance-freshness.sh)
+* [Governance Changelog Discipline Script](governance/check-governance-changelog-discipline.sh)
+* [Governance Change Log](governance/governance-change-log.md)
+* [Governance Archive Layout](governance/governance-archive-layout.md)
+* [Governance Operating Calendar](governance/governance-operating-calendar.md)
+* [Governance Current Pointers](governance/current-pointers.md)
+* [Governance Release Checklist](governance/governance-release-checklist.md)
+* [Governance Drift Dashboard Template](governance/governance-drift-dashboard-template.md)
+* [Governance Maintainer Quickstart](governance/MAINTAINER-QUICKSTART.md)
+* [Monthly Governance Signoff Template](governance/reviews/monthly-governance-signoff-template.md)
+* [Quarterly Governance Review Template](governance/reviews/quarterly-governance-review-template.md)
+* [Annual Governance Summary Template](governance/reviews/annual-governance-summary-template.md)
+* [Incident Example Index](governance/examples/README.md)
+* [Example Sev 1 OCR Outage Packet](governance/examples/sev1-ocr-outage/summary.md)
+* [Example Sev 2 Translation Failover Packet](governance/examples/sev2-translation-failover/summary.md)
+* [Example Sev 2 Queue Backlog Packet](governance/examples/sev2-queue-backlog/summary.md)
+* [Example Sev 3 Export Failure Packet](governance/examples/sev3-export-failure/summary.md)
+
+Runbook quick links:
 
 * [Checkpoint counters and thresholds](#5-checkpoint-reliability-counters-and-thresholds)
 * [On-call runbook order](#on-call-runbook-order-checkpoint-reliability)
-* [Release checklist](#reliability-release-checklist-before-mergedeploy)
-* [Post-deploy verification](#post-deploy-verification-first-30-minutes)
 * [Incident handoff template](#incident-handoff-template-unresolved-reliability-issues)
-* [Incident evidence checklist](#incident-evidence-checklist)
-* [Incident artifact bundle template](#incident-artifact-bundle-template)
 * [Incident closure definition of done](#incident-closure-definition-of-done-reliability)
-* [Closure signoff checklist](#closure-signoff-checklist)
-* [Closure quality scorecard](#closure-quality-scorecard)
-* [Post-incident follow-up SLA defaults](#post-incident-follow-up-sla-defaults)
 * [Follow-up tracking template](#follow-up-tracking-template)
-* [Follow-up review cadence](#follow-up-review-cadence)
-* [Follow-up completion evidence checklist](#follow-up-completion-evidence-checklist)
-* [Follow-up status taxonomy](#follow-up-status-taxonomy)
-* [Blocked-item escalation playbook](#blocked-item-escalation-playbook)
-* [Blocked escalation exception matrix](#blocked-escalation-exception-matrix)
-* [Exception expiry sweep checklist](#exception-expiry-sweep-checklist)
-* [Weekly exception audit checklist](#weekly-exception-audit-checklist)
-* [Monthly exception trend review](#monthly-exception-trend-review)
-* [Exception reduction action plan template](#exception-reduction-action-plan-template)
-* [Action plan outcome review block](#action-plan-outcome-review-block)
 * [Monthly governance signoff checklist](#monthly-governance-signoff-checklist)
-* [Quarter-end exception governance snapshot](#quarter-end-exception-governance-snapshot)
-* [Annual exception governance summary](#annual-exception-governance-summary)
-* [Annual leadership review checklist](#annual-leadership-review-checklist)
-* [Governance archive and retrieval checklist](#governance-archive-and-retrieval-checklist)
-* [Governance artifact retention policy](#governance-artifact-retention-policy)
-* [Governance index template](#governance-index-template)
-* [Governance index maintenance cadence](#governance-index-maintenance-cadence)
 * [Governance ownership RACI](#governance-ownership-raci)
-* [Governance change log entry template](#governance-change-log-entry-template)
-* [Weekly reliability KPI scorecard](#weekly-reliability-kpi-scorecard)
 * [Reliability review meeting agenda](#reliability-review-meeting-agenda-template)
 * [Severity-to-channel communication policy](#severity-to-channel-communication-policy)
-* [Communication escalation exception policy](#communication-escalation-exception-policy)
-* [Escalation decision log template](#escalation-decision-log-template)
-* [Escalation decision quality checklist](#escalation-decision-quality-checklist)
-* [Decision outcome review block](#decision-outcome-review-block)
-* [Stability confirmation checklist](#stability-confirmation-checklist)
-* [Post-closure watchback checklist](#post-closure-watchback-checklist)
-* [Reopen readiness checklist](#reopen-readiness-checklist)
-* [Incident severity matrix](#incident-severity-matrix-response-and-escalation)
-* [First 60 minutes timeline](#first-60-minutes-incident-timeline)
-* [New on-call quick start](#new-on-call-quick-start-reliability)
-* [Common pitfalls](#common-pitfalls-on-call-reliability)
-
-Ownership and escalation quick links:
-
-* [Reliability ownership model](#reliability-ownership-model)
-* [Approval expectations](#approval-expectations)
-* [Reliability incident communication template](#reliability-incident-communication-template)
-* [Communication cadence guidance](#communication-cadence-guidance)
-* [Incident severity matrix](#incident-severity-matrix-response-and-escalation)
-* [First 60 minutes timeline](#first-60-minutes-incident-timeline)
-* [Incident handoff template](#incident-handoff-template-unresolved-reliability-issues)
-* [Incident evidence checklist](#incident-evidence-checklist)
-* [Incident artifact bundle template](#incident-artifact-bundle-template)
-* [Incident closure definition of done](#incident-closure-definition-of-done-reliability)
-* [Closure signoff checklist](#closure-signoff-checklist)
-* [Closure quality scorecard](#closure-quality-scorecard)
-* [Post-incident follow-up SLA defaults](#post-incident-follow-up-sla-defaults)
-* [Follow-up tracking template](#follow-up-tracking-template)
-* [Follow-up review cadence](#follow-up-review-cadence)
-* [Follow-up completion evidence checklist](#follow-up-completion-evidence-checklist)
-* [Follow-up status taxonomy](#follow-up-status-taxonomy)
-* [Blocked-item escalation playbook](#blocked-item-escalation-playbook)
-* [Blocked escalation exception matrix](#blocked-escalation-exception-matrix)
-* [Exception expiry sweep checklist](#exception-expiry-sweep-checklist)
-* [Weekly exception audit checklist](#weekly-exception-audit-checklist)
-* [Monthly exception trend review](#monthly-exception-trend-review)
-* [Exception reduction action plan template](#exception-reduction-action-plan-template)
-* [Action plan outcome review block](#action-plan-outcome-review-block)
-* [Monthly governance signoff checklist](#monthly-governance-signoff-checklist)
-* [Quarter-end exception governance snapshot](#quarter-end-exception-governance-snapshot)
-* [Annual exception governance summary](#annual-exception-governance-summary)
-* [Annual leadership review checklist](#annual-leadership-review-checklist)
-* [Governance archive and retrieval checklist](#governance-archive-and-retrieval-checklist)
-* [Governance artifact retention policy](#governance-artifact-retention-policy)
-* [Governance index template](#governance-index-template)
-* [Governance index maintenance cadence](#governance-index-maintenance-cadence)
-* [Governance ownership RACI](#governance-ownership-raci)
-* [Governance change log entry template](#governance-change-log-entry-template)
-* [Weekly reliability KPI scorecard](#weekly-reliability-kpi-scorecard)
-* [Reliability review meeting agenda](#reliability-review-meeting-agenda-template)
-* [Severity-to-channel communication policy](#severity-to-channel-communication-policy)
-* [Communication escalation exception policy](#communication-escalation-exception-policy)
-* [Escalation decision log template](#escalation-decision-log-template)
-* [Escalation decision quality checklist](#escalation-decision-quality-checklist)
-* [Decision outcome review block](#decision-outcome-review-block)
-* [Stability confirmation checklist](#stability-confirmation-checklist)
-* [Post-closure watchback checklist](#post-closure-watchback-checklist)
-* [Reopen readiness checklist](#reopen-readiness-checklist)
 
 ### 1) Apply analytics migrations
 
@@ -469,7 +428,7 @@ curl "http://localhost:28080/api/v1/metrics/ocr?window=7d" \
 Use this handoff block between shifts to avoid context loss:
 
 * Incident title / ID:
-* Current severity (`warn`/`critical`) and user impact summary:
+* Current severity (`Sev 1`/`Sev 2`/`Sev 3`/`Sev 4`) and user impact summary:
 * Detection time and latest update time:
 * Key metric deltas observed:
     * `hit_rate`
@@ -1272,16 +1231,20 @@ Next update: <time>
 
 ### Communication cadence guidance
 
-* `critical`: update internal channel every 15-30 minutes until stable.
-* `warn`: update internal channel every 30-60 minutes while active mitigation is in progress.
+* `Sev 1`: update internal channel every 15 minutes until stable.
+* `Sev 2`: update internal channel every 30 minutes while active mitigation is in progress.
+* `Sev 3`: update internal channel every 60 minutes while mitigation is in progress.
+* `Sev 4`: include in daily operations update unless promoted.
 * Post-resolution: send closure note with root-cause summary and follow-up action owners.
 
 ### Severity-to-channel communication policy
 
 | Severity/state | Internal ops channel | Stakeholder/status channel | Trigger to post |
 | --- | --- | --- | --- |
-| `warn` (investigating/mitigating) | Required | Optional | Post internal updates on normal cadence; post stakeholder update if user-visible impact is confirmed or expected to persist beyond one update cycle |
-| `critical` (investigating/mitigating) | Required | Required | Post both channels at incident open and on every scheduled update interval |
+| `Sev 4` (triage/planned) | Required | Optional | Post internal summary in normal ops cadence; stakeholder note only if risk is increasing |
+| `Sev 3` (investigating/mitigating) | Required | Optional | Post internal updates on cadence; post stakeholder update if user-visible impact is confirmed or likely to persist |
+| `Sev 2` (investigating/mitigating) | Required | Required when external impact is confirmed | Post internal updates every 30 minutes and stakeholder updates on scheduled interval |
+| `Sev 1` (active incident) | Required | Required | Post both channels at incident open and on every scheduled update interval |
 | `monitoring` after mitigation | Required | Required if external impact occurred | Post internal monitoring updates until stability criteria are met; post stakeholder monitoring notice when external impact previously existed |
 | `resolved` | Required | Required if stakeholder channel was used | Post closure summary with root-cause status and follow-up owners |
 
@@ -1294,7 +1257,7 @@ Channel policy notes:
 
 Pre-send update checklist:
 
-1. Severity label matches current matrix row (`warn`/`critical`/`monitoring`/`resolved`).
+1. Severity label matches current matrix row (`Sev 1`/`Sev 2`/`Sev 3`/`Sev 4`/`monitoring`/`resolved`).
 2. Time window and latest metric deltas are explicitly stated.
 3. Mitigation actions since last update are listed in ordered sequence.
 4. Next update time and owner are explicit.
@@ -1510,22 +1473,33 @@ Next update by: <time>
 
 ### Incident severity matrix (response and escalation)
 
-| Severity | Initial acknowledgment target | Internal update cadence | Escalation trigger | Escalation action |
-| --- | --- | --- | --- | --- |
-| `warn` | <= 15 minutes from detection | Every 30-60 minutes while mitigation is active | Two consecutive windows with worsening checkpoint failure deltas, or visible user impact growth | Page service owner; assign incident commander if cross-team action is required |
-| `critical` | <= 5 minutes from detection | Every 15-30 minutes until stable | Any sustained customer impact, repeated threshold breach across consecutive windows, or mitigation failure in first response window | Page service owner + SRE/platform immediately; incident commander leads go/rollback decision |
+| Severity | Impact | User effect | Operational urgency | Response expectations | Escalation expectations |
+| --- | --- | --- | --- | --- | --- |
+| `Sev 1` | Critical service outage in a core workflow or severe data-path failure. | Broad inability to complete OCR, translation, rendering, or export workflows. | Immediate and highest priority. | Acknowledge <= 5 min. Assign incident commander immediately. Update every 15 min. | Page service owner, SRE/platform, and leadership on-call immediately. |
+| `Sev 2` | Major degradation in a critical workflow with clear user impact. | High error rate or severe latency, but partial path may remain. | Urgent same-hour response. | Acknowledge <= 15 min. Mitigation owner assigned. Update every 30 min. | Escalate to service owner and SRE/platform. Escalate leadership if unresolved after 60 min. |
+| `Sev 3` | Moderate degradation with workaround available or constrained blast radius. | Some users affected with reduced reliability/performance. | Prompt active-shift response. | Acknowledge <= 30 min. Mitigation in current shift. Update every 60 min while active. | Escalate to service owner if trend worsens or exceeds 1 business day. |
+| `Sev 4` | Minor issue, localized defect, or non-critical operational warning. | Limited or no immediate customer impact. | Planned response and tracking. | Triage <= 1 business day. Add to reliability backlog. | Escalate only on recurrence, trend growth, or promotion to Sev 3+. |
 
 Escalation notes:
 
-1. Use the latest two comparable windows (same length and cadence) before changing severity.
+1. Use the latest two comparable windows (same length and cadence) before demoting severity.
 2. Attach dashboard links, logs, and deploy SHA in every escalation update.
-3. Downgrade severity only after metrics stabilize across consecutive windows and user impact is no longer increasing.
+3. Promote severity immediately if user impact scope expands.
+4. Downgrade severity only after metrics stabilize across consecutive windows and user impact is no longer increasing.
+
+Common classification examples:
+
+* OCR outage (no fallback): `Sev 1`
+* Translation provider outage with working failover: `Sev 2`
+* Rendering degradation with stable completions: `Sev 3`
+* Queue backlog rising beyond threshold with SLO risk: `Sev 2`
+* Export failures that are intermittent and recoverable: `Sev 3`
 
 ### First 60 minutes incident timeline
 
 Use this timeline with the severity matrix above. If severity changes, switch to the stricter timing immediately.
 
-| Time window | `warn` actions | `critical` actions |
+| Time window | `Sev 3`-`Sev 4` actions | `Sev 1`-`Sev 2` actions |
 | --- | --- | --- |
 | 0-5 min | Acknowledge alert, start metric pull, open incident note | Acknowledge immediately, page service owner + SRE/platform, open incident channel |
 | 5-15 min | Validate scope (impact + deltas), start mitigation, send first internal update | Confirm user impact scope, assign incident commander, start mitigation and send first internal update |
