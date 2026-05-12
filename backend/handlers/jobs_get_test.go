@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,39 @@ func TestGetJob_PDFProgressFieldsIncluded(t *testing.T) {
 	}
 	if body["stage_progress"] != 0.42 {
 		t.Fatalf("expected stage_progress=0.42, got %#v", body["stage_progress"])
+	}
+}
+
+func TestStreamJobEvents_EmitsTerminalProgressEvent(t *testing.T) {
+	now := time.Now()
+	store := &getJobStore{job: &jobs.Job{
+		ID:             "job-stream-1",
+		Type:           jobs.TypePDF,
+		Status:         jobs.StatusCompleted,
+		Stage:          jobs.StageCompleted,
+		StageMessage:   "Translation complete",
+		StageProgress:  1,
+		Source:         "en",
+		Target:         "de",
+		TranslatedText: "Hallo Welt",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}}
+
+	h := NewJobsHandler(store, 1024)
+	app := fiber.New()
+	app.Get("/jobs/:id/events", h.StreamJobEvents)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/job-stream-1/events", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected text/event-stream content type, got %q", ct)
 	}
 }
 

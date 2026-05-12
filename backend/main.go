@@ -69,12 +69,14 @@ func main() {
 
 	providerRegistry := providers.NewRegistry()
 	providerTimeout := time.Duration(cfg.LiteLLMRequestTimeoutSeconds) * time.Second
-	providerRegistry.Register(providers.NewOpenAIChatProvider("litellm", cfg.LiteLLMBaseURL, cfg.LiteLLMAPIKey, cfg.LiteLLMModel, providerTimeout))
+	if cfg.LiteLLMBaseURL != "" && cfg.LiteLLMModel != "" {
+		providerRegistry.Register(providers.NewLiteLLMProvider(cfg.LiteLLMBaseURL, cfg.LiteLLMAPIKey, cfg.LiteLLMModel, providerTimeout))
+	}
 	if cfg.OllamaBaseURL != "" && cfg.OllamaModel != "" {
-		providerRegistry.Register(providers.NewOpenAIChatProvider("ollama", cfg.OllamaBaseURL, "ollama", cfg.OllamaModel, providerTimeout))
+		providerRegistry.Register(providers.NewOllamaProvider(cfg.OllamaBaseURL, cfg.OllamaModel, providerTimeout))
 	}
 	if cfg.OpenAICompatBaseURL != "" && cfg.OpenAICompatModel != "" {
-		providerRegistry.Register(providers.NewOpenAIChatProvider("openai", cfg.OpenAICompatBaseURL, cfg.OpenAICompatAPIKey, cfg.OpenAICompatModel, providerTimeout))
+		providerRegistry.Register(providers.NewOpenAICompatProvider(cfg.OpenAICompatBaseURL, cfg.OpenAICompatAPIKey, cfg.OpenAICompatModel, providerTimeout))
 	}
 	translationService := services.NewOrchestrator(providerRegistry, services.DefaultOrchestratorConfig)
 	pdfService := internalservices.NewPDFService()
@@ -106,6 +108,7 @@ func main() {
 	translateHandler := handlers.NewTranslateHandler(translationService, jobStore)
 	jobsHandler := handlers.NewJobsHandler(jobStore, cfg.MaxPDFUploadBytes)
 	ocrMetricsHandler := handlers.NewOCRMetricsHandler(pgPool)
+	providerMetricsHandler := handlers.NewProviderMetricsHandler()
 
 	api := app.Group("/api/v1")
 	writeAPI := api.Group("", middleware.WriteAPIAuth(cfg.AppEnv, cfg.WriteAPIToken), middleware.WriteRateLimiter(cfg.WriteRateLimitPerMinute), middleware.UploadRateLimiter(cfg.UploadRateLimitPerMinute))
@@ -117,8 +120,10 @@ func main() {
 	api.Get("/jobs/dead", middleware.InternalToken(cfg.InternalToken), jobsHandler.ListDeadJobs)
 	api.Post("/jobs/:id/replay", middleware.InternalToken(cfg.InternalToken), jobsHandler.ReplayDeadJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)
+	api.Get("/jobs/:id/events", jobsHandler.StreamJobEvents)
 	api.Get("/jobs/:id/output", jobsHandler.DownloadJobOutput)
 	api.Get("/metrics/ocr", middleware.InternalToken(cfg.InternalToken), ocrMetricsHandler.Summary)
+	api.Get("/metrics/providers", middleware.InternalToken(cfg.InternalToken), providerMetricsHandler.Summary)
 
 	slog.Info("LokLingo backend starting", "port", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {

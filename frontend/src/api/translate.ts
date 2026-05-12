@@ -43,6 +43,11 @@ export interface JobProgressUpdate {
   target?: string
 }
 
+export interface JobEventResponse extends JobResponse {
+  event_type?: string
+  timestamp?: string
+}
+
 const POLL_INTERVAL_MS = 600
 const MAX_POLLS = 100 // 60 s timeout
 const REQUEST_TIMEOUT_MS = 30_000
@@ -118,6 +123,41 @@ export async function fetchJob(jobId: string): Promise<JobResponse> {
 }
 
 /**
+ * Subscribes to live job progress events via SSE.
+ * Returns an unsubscribe function that closes the connection.
+ */
+export function subscribeJobEvents(
+  jobId: string,
+  onEvent: (event: JobEventResponse) => void,
+  onError?: () => void,
+): () => void {
+  if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+    onError?.()
+    return () => {}
+  }
+
+  const es = new window.EventSource(`/api/v1/jobs/${jobId}/events`)
+  const handler = (evt: MessageEvent<string>) => {
+    try {
+      const parsed = JSON.parse(evt.data) as JobEventResponse
+      onEvent(parsed)
+    } catch {
+      // Ignore malformed event payloads.
+    }
+  }
+
+  es.addEventListener('progress', handler as EventListener)
+  es.onerror = () => {
+    onError?.()
+  }
+
+  return () => {
+    es.removeEventListener('progress', handler as EventListener)
+    es.close()
+  }
+}
+
+/**
  * Polls GET /api/v1/jobs/:id until the job reaches a terminal state.
  * Resolves with the completed TranslateResponse or rejects on failure/timeout.
  *
@@ -170,7 +210,17 @@ export async function translate(req: TranslateRequest): Promise<TranslateRespons
     body: JSON.stringify({ ...req, mode: req.mode ?? 'overlay' }),
   })
   const { job_id } = enqueue
-  return pollJob(job_id, req.source, req.target, 'Translation job failed')
+
+  const unsubscribe = subscribeJobEvents(job_id, () => {
+    // Text workflow currently doesn't expose per-stage UI, but subscribing keeps
+    // the transport path consistent with image/pdf jobs and allows easy future wiring.
+  })
+
+  try {
+    return await pollJob(job_id, req.source, req.target, 'Translation job failed')
+  } finally {
+    unsubscribe()
+  }
 }
 
 export interface UploadPDFResponse {
@@ -235,5 +285,16 @@ export async function translateImage(
     body: form,
   }, IMAGE_REQUEST_TIMEOUT_MS)
 
-  return pollJob(enqueue.job_id, source, target, 'Image translation job failed', onProgress, IMAGE_MAX_POLLS)
+  const unsubscribe = subscribeJobEvents(
+    enqueue.job_id,
+    (event) => {
+      onProgress?.(event)
+    },
+  )
+
+  try {
+    return await pollJob(enqueue.job_id, source, target, 'Image translation job failed', onProgress, IMAGE_MAX_POLLS)
+  } finally {
+    unsubscribe()
+  }
 }

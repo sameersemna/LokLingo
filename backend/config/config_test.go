@@ -27,17 +27,74 @@ func TestLoadFallsBackToGenericRedisURL(t *testing.T) {
 }
 
 func TestConfigValidateRequiresRuntimeDependencies(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
 	}
 
 	msg := err.Error()
-	for _, key := range []string{"LITELLM_BASE_URL", "LITELLM_MODEL", "OCR_SERVICE_URL", "REDIS_URL"} {
+	for _, key := range []string{"translation provider configuration", "OCR_SERVICE_URL", "REDIS_URL"} {
 		if !strings.Contains(msg, key) {
 			t.Fatalf("expected validation error to mention %s, got %q", key, msg)
 		}
+	}
+}
+
+func TestConfigValidate_AllowsOllamaOnlyProvider(t *testing.T) {
+	cfg := &Config{
+		OllamaBaseURL:                "http://ollama:11434/v1",
+		OllamaModel:                  "llama3.2",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config with Ollama provider, got %v", err)
+	}
+}
+
+func TestConfigValidate_RejectsPartialProviderTuple(t *testing.T) {
+	cfg := &Config{
+		LiteLLMBaseURL:               "http://litellm:4000",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for partial provider tuple")
+	}
+	if !strings.Contains(err.Error(), "LITELLM_BASE_URL and LITELLM_MODEL") {
+		t.Fatalf("expected tuple validation error, got %q", err.Error())
 	}
 }
 

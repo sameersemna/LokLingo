@@ -96,7 +96,15 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 
 		lastErr = err
 		observability.IncProviderFailure(p.Name())
+		timeoutReason := classifyTimeoutReason(err)
+		if timeoutReason != "" {
+			observability.RecordProviderTimeout(p.Name(), timeoutReason)
+		}
 		if pi < len(providerList)-1 {
+			failoverReason := "provider_error"
+			if timeoutReason != "" {
+				failoverReason = "timeout_" + timeoutReason
+			}
 			notify(ctx, "fallback_provider",
 				fmt.Sprintf("Switching to backup translation engine (%s)", providerList[pi+1].Name()),
 				0,
@@ -105,6 +113,8 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 				"provider", p.Name(),
 				"next_provider", providerList[pi+1].Name(),
 				"retry_count", retries,
+				"timeout_reason", timeoutReason,
+				"failover_reason", failoverReason,
 				"err", err,
 			)
 		}
@@ -146,12 +156,17 @@ func (o *Orchestrator) tryProviderWithRetry(
 		}
 
 		observability.RecordProviderRetry(p.Name())
+		timeoutReason := classifyTimeoutReason(err)
+		if timeoutReason != "" {
+			observability.RecordProviderTimeout(p.Name(), timeoutReason)
+		}
 
 		if !isOrchestratorTransientError(err) {
 			// Permanent error — don't retry this provider.
 			slog.Warn("provider_permanent_error",
 				"provider", p.Name(),
 				"attempt", attempt,
+				"timeout_reason", timeoutReason,
 				"err", err,
 			)
 			return providers.TranslateResponse{}, attempt, err
@@ -182,6 +197,7 @@ func (o *Orchestrator) tryProviderWithRetry(
 			"attempt", attempt+1,
 			"max_attempts", o.cfg.MaxRetriesPerProvider+1,
 			"backoff_ms", sleep.Milliseconds(),
+			"timeout_reason", timeoutReason,
 			"err", err,
 		)
 
@@ -202,6 +218,30 @@ func (o *Orchestrator) tryProviderWithRetry(
 	observability.IncProviderExhausted(p.Name())
 	return providers.TranslateResponse{}, o.cfg.MaxRetriesPerProvider,
 		fmt.Errorf("provider %s retry exhausted: %w", p.Name(), lastErr)
+}
+
+func classifyTimeoutReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "network_timeout"
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "gateway timeout") || strings.Contains(msg, "status 504"):
+		return "gateway_timeout"
+	case strings.Contains(msg, "client.timeout exceeded") || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "timed out"):
+		return "client_timeout"
+	case strings.Contains(msg, "context deadline exceeded"):
+		return "context_deadline"
+	default:
+		return ""
+	}
 }
 
 // isOrchestratorTransientError returns true when err is worth retrying on the

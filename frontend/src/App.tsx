@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { translate, translateImage, uploadPDF, type JobProgressUpdate } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
 import { getReadiness, type ReadinessResponse } from "./api/health"
-import { getOCRMetrics, type MetricsWindow, type OCRMetricsResponse } from "./api/metrics"
+import { getOCRMetrics, getProviderMetrics, type MetricsWindow, type OCRMetricsResponse, type ProviderMetricsResponse } from "./api/metrics"
 import { PdfJobsPanel } from "./PdfJobsPanel"
 import { DeadLetterOpsPanel } from "./DeadLetterOpsPanel"
 import { saveStoredJob } from "./pdfJobsStorage"
+import { checkpointOperatorHint, formatPercent, levelLabel, safePercent, type CheckpointThresholds } from "./checkpointReliability"
 import "./App.css"
 
 const LANGUAGES = [
@@ -47,6 +48,10 @@ const FIRST_VISIT_KEY = "loklingo-first-visit"
 const RELIABILITY_WINDOWS: MetricsWindow[] = ["1h", "6h", "24h", "7d", "30d"]
 const PRESSURE_WARN_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_WARN ?? 8)
 const PRESSURE_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_CRITICAL ?? 20)
+const CHECKPOINT_HIT_WARN_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_HIT_WARN ?? 70)
+const CHECKPOINT_HIT_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_HIT_CRITICAL ?? 40)
+const CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_PERSIST_FAILURE_WARN ?? 5)
+const CHECKPOINT_PERSIST_FAILURE_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_PERSIST_FAILURE_CRITICAL ?? 15)
 
 const DEMO_PRESETS = [
   // Manga & Comics
@@ -258,6 +263,10 @@ function mapBackendImageStage(stage?: string): ProgressStage | undefined {
       return "languages"
     case "translating":
       return "translating"
+    case "retrying":
+      return "translating"
+    case "fallback_provider":
+      return "translating"
     case "rebuilding_layout":
       return "typography"
     case "rendering":
@@ -406,8 +415,10 @@ function App() {
   const [pdfJobsVersion, setPdfJobsVersion] = useState(0)
   const [metricsWindow, setMetricsWindow] = useState<MetricsWindow>("24h")
   const [metrics, setMetrics] = useState<OCRMetricsResponse | null>(null)
+  const [providerMetrics, setProviderMetrics] = useState<ProviderMetricsResponse | null>(null)
   const [metricsLoading, setMetricsLoading] = useState(false)
   const [metricsError, setMetricsError] = useState<string | null>(null)
+  const [providerMetricsError, setProviderMetricsError] = useState<string | null>(null)
   const [metricsUpdatedAt, setMetricsUpdatedAt] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -592,10 +603,26 @@ function App() {
     const fetchMetrics = async () => {
       setMetricsLoading(true)
       try {
-        const data = await getOCRMetrics(metricsWindow)
+        const [ocrResult, providerResult] = await Promise.allSettled([
+          getOCRMetrics(metricsWindow),
+          getProviderMetrics(),
+        ])
         if (cancelled) return
-        setMetrics(data)
-        setMetricsError(null)
+
+        if (ocrResult.status === "fulfilled") {
+          setMetrics(ocrResult.value)
+          setMetricsError(null)
+        } else {
+          setMetricsError(ocrResult.reason instanceof Error ? ocrResult.reason.message : "Failed to load reliability metrics")
+        }
+
+        if (providerResult.status === "fulfilled") {
+          setProviderMetrics(providerResult.value)
+          setProviderMetricsError(null)
+        } else {
+          setProviderMetricsError(providerResult.reason instanceof Error ? providerResult.reason.message : "Failed to load provider metrics")
+        }
+
         setMetricsUpdatedAt(Date.now())
       } catch (err) {
         if (cancelled) return
@@ -2099,6 +2126,140 @@ function App() {
                   </table>
                 )}
               </div>
+
+              <div className="reliability-windowed-table-wrap">
+                <div className="reliability-windowed-title">Provider reliability (live)</div>
+                {providerMetricsError && <p className="reliability-state reliability-state-error">{providerMetricsError}</p>}
+                {providerMetrics && providerMetrics.providers.length === 0 && (
+                  <p className="reliability-state">No provider calls observed yet.</p>
+                )}
+                {providerMetrics && providerMetrics.providers.length > 0 && (
+                  <table className="reliability-table">
+                    <thead>
+                      <tr>
+                        <th>Provider</th>
+                        <th>Success</th>
+                        <th>Failures</th>
+                        <th>Retries</th>
+                        <th>Timeouts</th>
+                        <th>Failovers</th>
+                        <th>Avg latency (ms)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {providerMetrics.providers.map(provider => (
+                        <tr key={provider.provider}>
+                          <td>{provider.provider}</td>
+                          <td>{provider.success_total}</td>
+                          <td>{provider.failure_total}</td>
+                          <td>{provider.retry_total}</td>
+                          <td>{provider.timeout_total}</td>
+                          <td>{provider.failover_total}</td>
+                          <td>{Math.round(provider.avg_latency_ms)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {providerMetrics && providerMetrics.timeouts.by_reason.length > 0 && (
+                <div className="reliability-windowed-table-wrap">
+                  <div className="reliability-windowed-title">Timeout reasons (live)</div>
+                  <table className="reliability-table">
+                    <thead>
+                      <tr>
+                        <th>Reason</th>
+                        <th>Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {providerMetrics.timeouts.by_reason.map(reason => (
+                        <tr key={reason.reason}>
+                          <td>{reason.reason}</td>
+                          <td>{reason.total}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {providerMetrics && (
+                <div className="reliability-windowed-table-wrap">
+                  <div className="reliability-windowed-title">Checkpoint health (live)</div>
+                  {(() => {
+                    const checkpointThresholds: CheckpointThresholds = {
+                      hitWarn: CHECKPOINT_HIT_WARN_THRESHOLD,
+                      hitCritical: CHECKPOINT_HIT_CRITICAL_THRESHOLD,
+                      persistFailureWarn: CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD,
+                      persistFailureCritical: CHECKPOINT_PERSIST_FAILURE_CRITICAL_THRESHOLD,
+                    }
+                    const checkpointEvents = providerMetrics.checkpoints.hit_total + providerMetrics.checkpoints.miss_total
+                    const checkpointHitRate = safePercent(providerMetrics.checkpoints.hit_total, checkpointEvents)
+                    const persistFailureRate = safePercent(providerMetrics.checkpoints.persist_failure_total, checkpointEvents)
+                    const operatorHint = checkpointOperatorHint(checkpointHitRate, persistFailureRate, checkpointThresholds)
+                    const evaluatedAt = metricsUpdatedAt ? new Date(metricsUpdatedAt).toLocaleTimeString() : null
+
+                    return (
+                    <>
+                  <table className="reliability-table">
+                    <thead>
+                      <tr>
+                        <th>Metric</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Checkpoint hits</td>
+                        <td>{providerMetrics.checkpoints.hit_total}</td>
+                      </tr>
+                      <tr>
+                        <td>Checkpoint misses</td>
+                        <td>{providerMetrics.checkpoints.miss_total}</td>
+                      </tr>
+                      <tr>
+                        <td>Persist failures</td>
+                        <td>{providerMetrics.checkpoints.persist_failure_total}</td>
+                      </tr>
+                      <tr>
+                        <td>Cleanup runs</td>
+                        <td>{providerMetrics.checkpoints.clear_total}</td>
+                      </tr>
+                      <tr>
+                        <td>Cleanup failures</td>
+                        <td>{providerMetrics.checkpoints.clear_failure_total}</td>
+                      </tr>
+                      <tr>
+                        <td>Hit rate</td>
+                        <td>
+                          <span className={`reliability-rate-badge reliability-rate-level-${operatorHint.hitLevel}`}>
+                            {formatPercent(checkpointHitRate)} - {levelLabel(operatorHint.hitLevel)}
+                          </span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Persist failure rate</td>
+                        <td>
+                          <span className={`reliability-rate-badge reliability-rate-level-${operatorHint.persistLevel}`}>
+                            {formatPercent(persistFailureRate)} - {levelLabel(operatorHint.persistLevel)}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                    <p className={`reliability-operator-hint reliability-operator-hint-${operatorHint.level}`}>
+                      {operatorHint.message}
+                      {evaluatedAt && (
+                        <span className="reliability-operator-hint-meta"> Evaluated at {evaluatedAt}.</span>
+                      )}
+                    </p>
+                    </>
+                    )
+                  })()}
+                </div>
+              )}
 
               {metricsUpdatedAt && (
                 <p className="reliability-updated">Updated {new Date(metricsUpdatedAt).toLocaleTimeString()}</p>

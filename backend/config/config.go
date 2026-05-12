@@ -75,11 +75,28 @@ func (c *Config) Validate() error {
 	missing := make([]string, 0, 4)
 	invalid := make([]string, 0, 3)
 
-	if strings.TrimSpace(c.LiteLLMBaseURL) == "" {
-		missing = append(missing, "LITELLM_BASE_URL")
+	liteBase := strings.TrimSpace(c.LiteLLMBaseURL)
+	liteModel := strings.TrimSpace(c.LiteLLMModel)
+	ollamaBase := strings.TrimSpace(c.OllamaBaseURL)
+	ollamaModel := strings.TrimSpace(c.OllamaModel)
+	compatBase := strings.TrimSpace(c.OpenAICompatBaseURL)
+	compatModel := strings.TrimSpace(c.OpenAICompatModel)
+
+	hasLite := liteBase != "" && liteModel != ""
+	hasOllama := ollamaBase != "" && ollamaModel != ""
+	hasCompat := compatBase != "" && compatModel != ""
+
+	if !hasLite && !hasOllama && !hasCompat {
+		missing = append(missing, "translation provider configuration (LITELLM_*, OLLAMA_*, or OPENAI_COMPAT_*)")
 	}
-	if strings.TrimSpace(c.LiteLLMModel) == "" {
-		missing = append(missing, "LITELLM_MODEL")
+	if (liteBase == "") != (liteModel == "") {
+		invalid = append(invalid, "LITELLM_BASE_URL and LITELLM_MODEL must be set together")
+	}
+	if (ollamaBase == "") != (ollamaModel == "") {
+		invalid = append(invalid, "OLLAMA_BASE_URL and OLLAMA_MODEL must be set together")
+	}
+	if (compatBase == "") != (compatModel == "") {
+		invalid = append(invalid, "OPENAI_COMPAT_BASE_URL and OPENAI_COMPAT_MODEL must be set together")
 	}
 	if strings.TrimSpace(c.OCRServiceURL) == "" {
 		missing = append(missing, "OCR_SERVICE_URL")
@@ -89,10 +106,6 @@ func (c *Config) Validate() error {
 	}
 	if strings.EqualFold(strings.TrimSpace(c.AppEnv), "production") && strings.TrimSpace(c.WriteAPIToken) == "" {
 		missing = append(missing, "WRITE_API_TOKEN")
-	}
-
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
 	if c.TranslateConcurrency <= 0 {
@@ -125,6 +138,10 @@ func (c *Config) Validate() error {
 
 	if len(invalid) > 0 {
 		return fmt.Errorf("invalid configuration: %s", strings.Join(invalid, "; "))
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
 	return nil

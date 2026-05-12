@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -107,6 +109,90 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 		return errResponse(c, fiber.StatusInternalServerError, "failed to retrieve job")
 	}
 
+	return c.JSON(buildJobResponse(job))
+}
+
+// StreamJobEvents handles GET /api/v1/jobs/:id/events and streams structured
+// job updates as Server-Sent Events until the job reaches a terminal state.
+func (h *JobsHandler) StreamJobEvents(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if id == "" {
+		return errResponse(c, fiber.StatusBadRequest, "job id is required")
+	}
+
+	// Validate existence up front to return proper HTTP status for unknown jobs.
+	if _, err := h.store.Get(c.Context(), id); errors.Is(err, jobs.ErrNotFound) {
+		return errResponse(c, fiber.StatusNotFound, "job not found")
+	} else if err != nil {
+		slog.Error("failed to retrieve job for event stream", "request_id", c.Locals("requestID"), "job_id", id, "err", err)
+		return errResponse(c, fiber.StatusInternalServerError, "failed to retrieve job")
+	}
+
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	done := c.Context().Done()
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		ticker := time.NewTicker(800 * time.Millisecond)
+		defer ticker.Stop()
+
+		lastPayload := ""
+		sendEvent := func(event string, payload fiber.Map) bool {
+			b, err := json.Marshal(payload)
+			if err != nil {
+				return false
+			}
+			if _, err := w.WriteString("event: " + event + "\n"); err != nil {
+				return false
+			}
+			if _, err := w.WriteString("data: " + string(b) + "\n\n"); err != nil {
+				return false
+			}
+			if err := w.Flush(); err != nil {
+				return false
+			}
+			return true
+		}
+
+		for {
+			job, err := h.store.Get(context.Background(), id)
+			if err != nil {
+				payload := fiber.Map{"job_id": id, "event_type": "stream_error", "error": "job stream unavailable", "timestamp": time.Now().UTC()}
+				_ = sendEvent("error", payload)
+				return
+			}
+
+			payload := buildJobResponse(job)
+			payload["event_type"] = eventTypeForJob(job)
+			payload["timestamp"] = time.Now().UTC()
+
+			encoded, _ := json.Marshal(payload)
+			encodedStr := string(encoded)
+			if encodedStr != lastPayload {
+				if !sendEvent("progress", payload) {
+					return
+				}
+				lastPayload = encodedStr
+			}
+
+			if job.Status == jobs.StatusCompleted || job.Status == jobs.StatusFailed {
+				return
+			}
+
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+		}
+	})
+
+	return nil
+}
+
+func buildJobResponse(job *jobs.Job) fiber.Map {
 	resp := fiber.Map{
 		"job_id":     job.ID,
 		"status":     job.Status,
@@ -127,6 +213,9 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 	}
 	if job.Status == jobs.StatusCompleted {
 		resp["translated_text"] = job.TranslatedText
+		if job.ProcessingMethod != "" {
+			resp["processing_method"] = job.ProcessingMethod
+		}
 		if job.OutputFilePath != "" {
 			resp["output_file_path"] = job.OutputFilePath
 			if job.Type == jobs.TypeImage {
@@ -137,8 +226,33 @@ func (h *JobsHandler) GetJob(c *fiber.Ctx) error {
 	if job.Status == jobs.StatusFailed {
 		resp["error"] = job.ErrorMsg
 	}
+	return resp
+}
 
-	return c.JSON(resp)
+func eventTypeForJob(job *jobs.Job) string {
+	if job == nil {
+		return "job_update"
+	}
+	if job.Status == jobs.StatusCompleted {
+		return "job_complete"
+	}
+	if job.Status == jobs.StatusFailed {
+		return "job_failed"
+	}
+	switch strings.ToLower(job.Stage) {
+	case jobs.StageDetectingText:
+		return "ocr_complete"
+	case jobs.StageTranslating:
+		return "translation_progress"
+	case jobs.StageRetrying:
+		return "retrying"
+	case jobs.StageFallbackProvider:
+		return "fallback_provider_active"
+	case jobs.StageRendering, jobs.StageRebuildingLayout:
+		return "rendering_progress"
+	default:
+		return "job_update"
+	}
 }
 
 // CreatePDFJob handles POST /api/v1/jobs/pdf.

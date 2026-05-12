@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -180,5 +181,33 @@ func TestOrchestratorSupportsConcurrentCalls(t *testing.T) {
 	}
 	if provider.CallCount() != workers {
 		t.Fatalf("expected %d provider calls, got %d", workers, provider.CallCount())
+	}
+}
+
+func TestClassifyTimeoutReason_ContextDeadline(t *testing.T) {
+	reason := classifyTimeoutReason(context.DeadlineExceeded)
+	if reason != "context_deadline" {
+		t.Fatalf("expected context_deadline, got %q", reason)
+	}
+}
+
+func TestClassifyTimeoutReason_GatewayTimeoutPhrase(t *testing.T) {
+	reason := classifyTimeoutReason(fmt.Errorf("provider status 504: gateway timeout"))
+	if reason != "gateway_timeout" {
+		t.Fatalf("expected gateway_timeout, got %q", reason)
+	}
+}
+
+func TestClassifyTimeoutReason_ClientTimeoutPhrase(t *testing.T) {
+	reason := classifyTimeoutReason(fmt.Errorf("net/http: request canceled (Client.Timeout exceeded while awaiting headers): i/o timeout"))
+	if reason != "client_timeout" {
+		t.Fatalf("expected client_timeout, got %q", reason)
+	}
+}
+
+func TestClassifyTimeoutReason_NonTimeout(t *testing.T) {
+	reason := classifyTimeoutReason(fmt.Errorf("provider returned 400 bad request"))
+	if reason != "" {
+		t.Fatalf("expected empty timeout reason, got %q", reason)
 	}
 }

@@ -1245,6 +1245,104 @@ body {
   margin: 0.55rem 0 0;
 }
 
+.reliability-rate-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+.reliability-rate-level-normal {
+  color: #146c3a;
+  border-color: #98ddb5;
+  background: #eaf8f0;
+}
+
+.reliability-rate-level-warn {
+  color: #9a4d00;
+  border-color: #f0ba6f;
+  background: #fff2db;
+}
+
+.reliability-rate-level-critical {
+  color: #8f1f1f;
+  border-color: #ef9b9b;
+  background: #fde9e9;
+}
+
+.reliability-operator-hint {
+  margin: 0.45rem 0 0;
+  padding: 0.35rem 0.52rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.reliability-operator-hint-meta {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.reliability-operator-hint-normal {
+  color: #146c3a;
+  border-color: #98ddb5;
+  background: #eaf8f0;
+}
+
+.reliability-operator-hint-warn {
+  color: #9a4d00;
+  border-color: #f0ba6f;
+  background: #fff2db;
+}
+
+.reliability-operator-hint-critical {
+  color: #8f1f1f;
+  border-color: #ef9b9b;
+  background: #fde9e9;
+}
+
+:root[data-theme="dark"] .reliability-rate-level-normal {
+  color: #9de6bf;
+  border-color: #2f6d4a;
+  background: #112a1d;
+}
+
+:root[data-theme="dark"] .reliability-rate-level-warn {
+  color: #ffd18f;
+  border-color: #80531d;
+  background: #2f220d;
+}
+
+:root[data-theme="dark"] .reliability-rate-level-critical {
+  color: #ffb4b4;
+  border-color: #7c3333;
+  background: #361818;
+}
+
+:root[data-theme="dark"] .reliability-operator-hint-normal {
+  color: #9de6bf;
+  border-color: #2f6d4a;
+  background: #112a1d;
+}
+
+:root[data-theme="dark"] .reliability-operator-hint-warn {
+  color: #ffd18f;
+  border-color: #80531d;
+  background: #2f220d;
+}
+
+:root[data-theme="dark"] .reliability-operator-hint-critical {
+  color: #ffb4b4;
+  border-color: #7c3333;
+  background: #361818;
+}
+
 @media (max-width: 900px) {
   .reliability-summary-grid {
     grid-template-columns: 1fr;

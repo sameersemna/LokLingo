@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchJob, type JobResponse } from './api/translate'
+import { fetchJob, subscribeJobEvents, type JobResponse } from './api/translate'
 import {
   clearStoredJobs,
   loadStoredJobs,
@@ -79,27 +79,44 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
   useEffect(() => {
     stopRef.current = false
     let timer: ReturnType<typeof setTimeout>
+    let closeStream: (() => void) | null = null
 
-    async function poll() {
+    const poll = async () => {
       if (stopRef.current) return
       try {
         const job = await fetchJob(stored.job_id)
         setPollIssue(false)
         setLive(job)
         if (job.status === 'pending' || job.status === 'processing') {
-          timer = setTimeout(poll, 1500)
+          timer = setTimeout(poll, 1800)
         }
       } catch {
         setPollIssue(true)
-        // network error — retry after a longer delay
         timer = setTimeout(poll, 5000)
       }
     }
 
     poll()
+    closeStream = subscribeJobEvents(
+      stored.job_id,
+      (event) => {
+        if (stopRef.current) return
+        setPollIssue(false)
+        setLive(event)
+        if (event.status === 'completed' || event.status === 'failed') {
+          closeStream?.()
+        }
+      },
+      () => {
+        if (stopRef.current) return
+        setPollIssue(true)
+      },
+    )
+
     return () => {
       stopRef.current = true
       clearTimeout(timer)
+      closeStream?.()
     }
   }, [stored.job_id])
 

@@ -12,9 +12,32 @@ type providerCounters struct {
 	retries        atomic.Int64
 	exhausted      atomic.Int64
 	failovers      atomic.Int64
+	timeouts       atomic.Int64
 	latencyTotalMS atomic.Int64
 	latencyCount   atomic.Int64
 }
+
+type timeoutReasonCounters struct {
+	count atomic.Int64
+}
+
+var timeoutReasonMetricsMap sync.Map
+
+type renderFailureCounters struct {
+	total atomic.Int64
+}
+
+var renderFailureMetricsMap sync.Map
+
+type chunkCheckpointCounters struct {
+	hits            atomic.Int64
+	misses          atomic.Int64
+	persistFailures atomic.Int64
+	clears          atomic.Int64
+	clearFailures   atomic.Int64
+}
+
+var chunkCheckpointMetrics chunkCheckpointCounters
 
 // providerMetricsMap stores *providerCounters keyed by provider name.
 var providerMetricsMap sync.Map
@@ -41,6 +64,43 @@ func IncProviderExhausted(provider string) { getProviderCounters(provider).exhau
 // (i.e. a previous provider failed and this one succeeded).
 func IncProviderFailover(provider string) { getProviderCounters(provider).failovers.Add(1) }
 
+// RecordProviderTimeout records timeout-classified failures by provider and reason.
+func RecordProviderTimeout(provider, reason string) {
+	if provider == "" {
+		provider = "unknown"
+	}
+	getProviderCounters(provider).timeouts.Add(1)
+	if reason == "" {
+		reason = "unknown"
+	}
+	v, _ := timeoutReasonMetricsMap.LoadOrStore(reason, &timeoutReasonCounters{})
+	v.(*timeoutReasonCounters).count.Add(1)
+}
+
+// IncRenderFailure records a rendering failure by mode (e.g. layout, fast).
+func IncRenderFailure(mode string) {
+	if mode == "" {
+		mode = "unknown"
+	}
+	v, _ := renderFailureMetricsMap.LoadOrStore(mode, &renderFailureCounters{})
+	v.(*renderFailureCounters).total.Add(1)
+}
+
+// IncChunkCheckpointHit records one checkpoint cache hit.
+func IncChunkCheckpointHit() { chunkCheckpointMetrics.hits.Add(1) }
+
+// IncChunkCheckpointMiss records one checkpoint cache miss.
+func IncChunkCheckpointMiss() { chunkCheckpointMetrics.misses.Add(1) }
+
+// IncChunkCheckpointPersistFailure records one failed checkpoint persist.
+func IncChunkCheckpointPersistFailure() { chunkCheckpointMetrics.persistFailures.Add(1) }
+
+// IncChunkCheckpointClear records one terminal checkpoint cleanup run.
+func IncChunkCheckpointClear() { chunkCheckpointMetrics.clears.Add(1) }
+
+// IncChunkCheckpointClearFailure records one failed terminal checkpoint cleanup.
+func IncChunkCheckpointClearFailure() { chunkCheckpointMetrics.clearFailures.Add(1) }
+
 // RecordProviderLatency records a successful call latency in milliseconds.
 func RecordProviderLatency(provider string, ms int64) {
 	c := getProviderCounters(provider)
@@ -56,7 +116,29 @@ type ProviderSnapshot struct {
 	RetryTotal     int64   `json:"retry_total"`
 	ExhaustedTotal int64   `json:"exhausted_total"`
 	FailoverTotal  int64   `json:"failover_total"`
+	TimeoutTotal   int64   `json:"timeout_total"`
 	AvgLatencyMS   float64 `json:"avg_latency_ms"`
+}
+
+// TimeoutReasonSnapshot captures timeout frequencies grouped by reason.
+type TimeoutReasonSnapshot struct {
+	Reason string `json:"reason"`
+	Total  int64  `json:"total"`
+}
+
+// RenderFailureSnapshot captures render failures grouped by render mode.
+type RenderFailureSnapshot struct {
+	Mode  string `json:"mode"`
+	Total int64  `json:"total"`
+}
+
+// ChunkCheckpointSnapshot captures resume checkpoint health counters.
+type ChunkCheckpointSnapshot struct {
+	HitTotal            int64 `json:"hit_total"`
+	MissTotal           int64 `json:"miss_total"`
+	PersistFailureTotal int64 `json:"persist_failure_total"`
+	ClearTotal          int64 `json:"clear_total"`
+	ClearFailureTotal   int64 `json:"clear_failure_total"`
 }
 
 // SnapshotProviderMetrics returns a snapshot for every provider that has been
@@ -78,9 +160,45 @@ func SnapshotProviderMetrics() []ProviderSnapshot {
 			RetryTotal:     c.retries.Load(),
 			ExhaustedTotal: c.exhausted.Load(),
 			FailoverTotal:  c.failovers.Load(),
+			TimeoutTotal:   c.timeouts.Load(),
 			AvgLatencyMS:   avg,
 		})
 		return true
 	})
 	return out
+}
+
+// SnapshotTimeoutReasonMetrics returns timeout frequency by classified reason.
+func SnapshotTimeoutReasonMetrics() []TimeoutReasonSnapshot {
+	var out []TimeoutReasonSnapshot
+	timeoutReasonMetricsMap.Range(func(k, v any) bool {
+		reason := k.(string)
+		c := v.(*timeoutReasonCounters)
+		out = append(out, TimeoutReasonSnapshot{Reason: reason, Total: c.count.Load()})
+		return true
+	})
+	return out
+}
+
+// SnapshotRenderFailureMetrics returns render failure counts by mode.
+func SnapshotRenderFailureMetrics() []RenderFailureSnapshot {
+	var out []RenderFailureSnapshot
+	renderFailureMetricsMap.Range(func(k, v any) bool {
+		mode := k.(string)
+		c := v.(*renderFailureCounters)
+		out = append(out, RenderFailureSnapshot{Mode: mode, Total: c.total.Load()})
+		return true
+	})
+	return out
+}
+
+// SnapshotChunkCheckpointMetrics returns chunk checkpoint health counters.
+func SnapshotChunkCheckpointMetrics() ChunkCheckpointSnapshot {
+	return ChunkCheckpointSnapshot{
+		HitTotal:            chunkCheckpointMetrics.hits.Load(),
+		MissTotal:           chunkCheckpointMetrics.misses.Load(),
+		PersistFailureTotal: chunkCheckpointMetrics.persistFailures.Load(),
+		ClearTotal:          chunkCheckpointMetrics.clears.Load(),
+		ClearFailureTotal:   chunkCheckpointMetrics.clearFailures.Load(),
+	}
 }

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"loklingo/backend/internal/observability"
 	internalservices "loklingo/backend/internal/services"
 	"loklingo/backend/services"
 )
@@ -45,6 +47,15 @@ type retryRequeuer interface {
 
 type deadLetterer interface {
 	DeadLetter(ctx context.Context, id string, reason string) error
+}
+
+type chunkCheckpointStore interface {
+	GetChunkCheckpoint(ctx context.Context, jobID, chunkKey string) ([]chunkUnit, bool, error)
+	SetChunkCheckpoint(ctx context.Context, jobID, chunkKey string, units []chunkUnit) error
+}
+
+type chunkCheckpointLifecycleStore interface {
+	ClearChunkCheckpoints(ctx context.Context, jobID string) error
 }
 
 // WorkerOption is a functional option for NewWorker.
@@ -230,12 +241,32 @@ func (w *Worker) Run(ctx context.Context) {
 		if job.Status == StatusFailed {
 			w.handleFailedJob(ctx, job)
 		}
+		w.cleanupTerminalChunkCheckpoints(ctx, job)
 		if acker, ok := w.store.(storeAcker); ok {
 			if err := acker.Ack(ctx, job.ID); err != nil {
 				slog.Warn("ack_inflight_job_failed", "job_id", job.ID, "err", err)
 			}
 		}
 	}
+}
+
+func (w *Worker) cleanupTerminalChunkCheckpoints(ctx context.Context, job *Job) {
+	if job == nil || job.Type != TypePDF {
+		return
+	}
+	if job.Status != StatusCompleted && job.Status != StatusFailed {
+		return
+	}
+	lifecycleStore, ok := w.store.(chunkCheckpointLifecycleStore)
+	if !ok {
+		return
+	}
+	if err := lifecycleStore.ClearChunkCheckpoints(ctx, job.ID); err != nil {
+		observability.IncChunkCheckpointClearFailure()
+		slog.Warn("chunk_checkpoint_cleanup_failed", "job_id", job.ID, "status", job.Status, "err", err)
+		return
+	}
+	observability.IncChunkCheckpointClear()
 }
 
 // normalizeText collapses runs of whitespace within each paragraph while
@@ -466,6 +497,15 @@ func splitByWordBudget(text string, maxWords int) []string {
 	return parts
 }
 
+func chunkCheckpointKey(chunk textChunk, source, target string) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s\x00%s", source, target)
+	for _, u := range chunk.units {
+		_, _ = fmt.Fprintf(h, "\x00%d\x00%s", u.pageIndex, u.text)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 func buildChunkUnits(pages []string, maxWords int) []chunkUnit {
 	units := make([]chunkUnit, 0, len(pages))
 	for pageIdx, pageText := range pages {
@@ -533,6 +573,16 @@ func isChunkTimeoutError(parentCtx context.Context, chunkCtx context.Context, er
 		return true
 	}
 	return errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "context deadline exceeded")
+}
+
+func isUnrecoverableChunkError(parentCtx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if parentCtx != nil && parentCtx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 func sumUnitWords(units []chunkUnit) int {
@@ -1155,12 +1205,23 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		translatedPartsBySegment := make([][]string, len(segmentText))
 		for i, res := range results {
 			if errByChunk[i] != nil {
-				job.Status = StatusFailed
-				job.ErrorMsg = errByChunk[i].Error()
-				if uerr := w.store.Update(ctx, job); uerr != nil {
-					slog.Error("update image job result (translation failed)", "job_id", job.ID, "err", uerr)
+				if isUnrecoverableChunkError(ctx, errByChunk[i]) {
+					job.Status = StatusFailed
+					job.ErrorMsg = errByChunk[i].Error()
+					if uerr := w.store.Update(ctx, job); uerr != nil {
+						slog.Error("update image job result (translation failed)", "job_id", job.ID, "err", uerr)
+					}
+					return
 				}
-				return
+				slog.Warn("image_chunk_translation_degraded",
+					"job_id", job.ID,
+					"chunk_idx", i,
+					"chunk_words", chunks[i].words,
+					"degrade_reason", "chunk_retry_exhausted",
+					"err", errByChunk[i],
+				)
+				results[i] = chunks[i].units
+				res = results[i]
 			}
 			for _, u := range res {
 				if u.pageIndex >= 0 && u.pageIndex < len(translatedPartsBySegment) {
@@ -1230,8 +1291,10 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		outPath, renderStats, err := internalservices.DrawTextOnImageWithOptions(job.FilePath, renderBlocks, translatedTexts, renderOpts)
 		if err != nil && effectiveJobMode == ModeLayout {
 			// If layout rendering fails, fall back to the regular overlay render path.
+			observability.IncRenderFailure("layout")
 			slog.Warn("layout_render_failed_falling_back_to_overlay",
 				"job_id", job.ID,
+				"failover_reason", "layout_render_error",
 				"err", err,
 			)
 			overlayOpts := internalservices.DefaultOverlayOptions()
@@ -1248,12 +1311,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			renderOpts = overlayOpts
 		}
 		if err != nil {
-			job.Status = StatusFailed
-			job.ErrorMsg = fmt.Sprintf("image rendering failed: %v", err)
-			if uerr := w.store.Update(ctx, job); uerr != nil {
-				slog.Error("update image job result (render failed)", "job_id", job.ID, "err", uerr)
+			observability.IncRenderFailure("fast")
+			slog.Warn("image_render_failed_falling_back_to_passthrough",
+				"job_id", job.ID,
+				"mode", effectiveJobMode,
+				"failover_reason", "rendering_failed_all_modes",
+				"err", err,
+			)
+			w.setJobStage(ctx, job, StageRendering, "Rendering fallback active (Fast mode)…", 0.92)
+			passthroughPath, copyErr := writeImagePassthroughOutput(job.FilePath)
+			if copyErr != nil {
+				job.Status = StatusFailed
+				job.ErrorMsg = fmt.Sprintf("image rendering failed: %v; passthrough fallback failed: %v", err, copyErr)
+				if uerr := w.store.Update(ctx, job); uerr != nil {
+					slog.Error("update image job result (render+fallback failed)", "job_id", job.ID, "err", uerr)
+				}
+				return
 			}
-			return
+			outPath = passthroughPath
 		}
 
 		renderEvent := "image_overlay_rendered"
@@ -1348,6 +1423,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	remainingUnits := units
 	adaptiveMinWords := w.chunkMinWords
 	adaptiveMaxWords := w.chunkMaxWords
+	checkpointStore, hasCheckpointStore := w.store.(chunkCheckpointStore)
 	for len(remainingUnits) > 0 {
 		chunks := buildTextChunks(remainingUnits, adaptiveMinWords, adaptiveMaxWords)
 		if len(chunks) == 0 {
@@ -1368,10 +1444,26 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			wg.Add(1)
 			go func(idx int, c textChunk) {
 				defer wg.Done()
+
+				checkpointKey := chunkCheckpointKey(c, job.Source, job.Target)
+				if hasCheckpointStore {
+					cachedUnits, found, cerr := checkpointStore.GetChunkCheckpoint(pdfNotifyCtx, job.ID, checkpointKey)
+					if cerr != nil {
+						slog.Warn("chunk_checkpoint_lookup_failed", "job_id", job.ID, "chunk_idx", chunkIdxOffset+idx, "err", cerr)
+					} else if found {
+						observability.IncChunkCheckpointHit()
+						results[idx] = pageResult{units: cachedUnits, err: nil, dur: 0}
+						slog.Info("chunk_checkpoint_hit", "job_id", job.ID, "chunk_idx", chunkIdxOffset+idx, "units", len(cachedUnits))
+						return
+					} else {
+						observability.IncChunkCheckpointMiss()
+					}
+				}
+
 				select {
 				case sem <- struct{}{}:
 				case <-pdfNotifyCtx.Done():
-					results[idx] = pageResult{err: pdfNotifyCtx.Err()}
+					results[idx] = pageResult{units: c.units, err: pdfNotifyCtx.Err()}
 					return
 				}
 				defer func() { <-sem }()
@@ -1432,7 +1524,17 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 					}
 					progressMu.Unlock()
 				}
-				results[idx] = pageResult{units: translatedUnits, err: err, dur: chunkDur}
+				if err != nil {
+					results[idx] = pageResult{units: c.units, err: err, dur: chunkDur}
+					return
+				}
+				if hasCheckpointStore {
+					if cerr := checkpointStore.SetChunkCheckpoint(pdfNotifyCtx, job.ID, checkpointKey, translatedUnits); cerr != nil {
+						observability.IncChunkCheckpointPersistFailure()
+						slog.Warn("chunk_checkpoint_persist_failed", "job_id", job.ID, "chunk_idx", chunkIdxOffset+idx, "err", cerr)
+					}
+				}
+				results[idx] = pageResult{units: translatedUnits, err: nil, dur: chunkDur}
 			}(i, chunk)
 		}
 		wg.Wait()
@@ -1473,10 +1575,19 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}
 	translatedPageParts := make([][]string, len(pages))
 	var translateErr error
+	degradedChunks := 0
 	for _, r := range allResults {
 		if r.err != nil {
-			translateErr = r.err
-			break
+			if isUnrecoverableChunkError(ctx, r.err) {
+				translateErr = r.err
+				break
+			}
+			degradedChunks++
+			slog.Warn("pdf_chunk_translation_degraded",
+				"job_id", job.ID,
+				"degrade_reason", "chunk_retry_exhausted",
+				"err", r.err,
+			)
 		}
 		for _, u := range r.units {
 			if u.pageIndex >= 0 && u.pageIndex < len(translatedPageParts) {
@@ -1501,7 +1612,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 	} else {
 		job.Stage = StageCompleted
-		job.StageMessage = "Translation complete"
+		if degradedChunks > 0 {
+			job.StageMessage = fmt.Sprintf("Translation complete with graceful fallback on %d chunk(s)", degradedChunks)
+		} else {
+			job.StageMessage = "Translation complete"
+		}
 		job.StageProgress = 1.0
 		job.Status = StatusCompleted
 		job.TranslatedText = translated

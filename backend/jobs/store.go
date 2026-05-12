@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -20,6 +21,7 @@ const (
 	deadLetterQueueKey = "loklingo:jobs:dead:queue"
 	deadLetterMetaKey  = "loklingo:jobs:dead:meta"
 	jobKeyFmt          = "loklingo:job:%s"
+	jobChunkKeyFmt     = "loklingo:job:%s:chunk:%s"
 	cacheKeyFmt        = "loklingo:cache:%s"
 	jobTTL             = 24 * time.Hour
 	cacheTTL           = 30 * 24 * time.Hour // cache translations for 30 days
@@ -55,6 +57,32 @@ func CacheKey(text, source, target string) string {
 
 type redisStore struct {
 	rdb *redis.Client
+}
+
+type chunkCheckpointUnit struct {
+	PageIndex int    `json:"page_index"`
+	Text      string `json:"text"`
+	Words     int    `json:"words"`
+}
+
+type chunkCheckpointRecord struct {
+	Units []chunkCheckpointUnit `json:"units"`
+}
+
+func chunkUnitsToCheckpointUnits(units []chunkUnit) []chunkCheckpointUnit {
+	out := make([]chunkCheckpointUnit, 0, len(units))
+	for _, u := range units {
+		out = append(out, chunkCheckpointUnit{PageIndex: u.pageIndex, Text: u.text, Words: u.words})
+	}
+	return out
+}
+
+func checkpointUnitsToChunkUnits(units []chunkCheckpointUnit) []chunkUnit {
+	out := make([]chunkUnit, 0, len(units))
+	for _, u := range units {
+		out = append(out, chunkUnit{pageIndex: u.PageIndex, text: u.Text, words: u.Words})
+	}
+	return out
 }
 
 // DeadJobEntry represents one dead-letter queue item with optional job payload.
@@ -389,4 +417,60 @@ func (s *redisStore) GetCached(ctx context.Context, text, source, target string)
 func (s *redisStore) SetCached(ctx context.Context, text, source, target, translated string) error {
 	key := CacheKey(text, source, target)
 	return s.rdb.Set(ctx, key, translated, cacheTTL).Err()
+}
+
+// GetChunkCheckpoint returns previously persisted chunk output units for jobID
+// and chunkKey. found=false indicates there is no persisted checkpoint.
+func (s *redisStore) GetChunkCheckpoint(ctx context.Context, jobID, chunkKey string) ([]chunkUnit, bool, error) {
+	key := fmt.Sprintf(jobChunkKeyFmt, jobID, chunkKey)
+	data, err := s.rdb.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("redis get chunk checkpoint: %w", err)
+	}
+	var rec chunkCheckpointRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, false, fmt.Errorf("unmarshal chunk checkpoint: %w", err)
+	}
+	return checkpointUnitsToChunkUnits(rec.Units), true, nil
+}
+
+// SetChunkCheckpoint persists chunk output units for later resume/retry reuse.
+func (s *redisStore) SetChunkCheckpoint(ctx context.Context, jobID, chunkKey string, units []chunkUnit) error {
+	key := fmt.Sprintf(jobChunkKeyFmt, jobID, chunkKey)
+	data, err := json.Marshal(chunkCheckpointRecord{Units: chunkUnitsToCheckpointUnits(units)})
+	if err != nil {
+		return fmt.Errorf("marshal chunk checkpoint: %w", err)
+	}
+	if err := s.rdb.Set(ctx, key, data, jobTTL).Err(); err != nil {
+		return fmt.Errorf("redis set chunk checkpoint: %w", err)
+	}
+	return nil
+}
+
+// ClearChunkCheckpoints removes all persisted chunk checkpoints for jobID.
+func (s *redisStore) ClearChunkCheckpoints(ctx context.Context, jobID string) error {
+	if strings.TrimSpace(jobID) == "" {
+		return fmt.Errorf("job id is required")
+	}
+	pattern := fmt.Sprintf(jobChunkKeyFmt, jobID, "*")
+	var cursor uint64
+	for {
+		keys, next, err := s.rdb.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return fmt.Errorf("scan chunk checkpoints: %w", err)
+		}
+		if len(keys) > 0 {
+			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+				return fmt.Errorf("delete chunk checkpoints: %w", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
 }

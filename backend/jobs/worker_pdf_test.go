@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"loklingo/backend/internal/observability"
 	internalservices "loklingo/backend/internal/services"
 	"loklingo/backend/services"
 )
@@ -25,6 +26,35 @@ type mockWorkerStore struct {
 	requeueDelay []time.Duration
 	deadIDs      []string
 	deadReasons  []string
+}
+
+type checkpointWorkerStore struct {
+	*mockWorkerStore
+	chunks                map[string][]chunkUnit
+	clearCheckpointJobIDs []string
+	clearCheckpointErr    error
+}
+
+func (s *checkpointWorkerStore) chunkKey(jobID, checkpointKey string) string {
+	return jobID + ":" + checkpointKey
+}
+
+func (s *checkpointWorkerStore) GetChunkCheckpoint(_ context.Context, jobID, checkpointKey string) ([]chunkUnit, bool, error) {
+	units, ok := s.chunks[s.chunkKey(jobID, checkpointKey)]
+	if !ok {
+		return nil, false, nil
+	}
+	return units, true, nil
+}
+
+func (s *checkpointWorkerStore) SetChunkCheckpoint(_ context.Context, jobID, checkpointKey string, units []chunkUnit) error {
+	s.chunks[s.chunkKey(jobID, checkpointKey)] = units
+	return nil
+}
+
+func (s *checkpointWorkerStore) ClearChunkCheckpoints(_ context.Context, jobID string) error {
+	s.clearCheckpointJobIDs = append(s.clearCheckpointJobIDs, jobID)
+	return s.clearCheckpointErr
 }
 
 func (m *mockWorkerStore) Enqueue(_ context.Context, _ *Job) error { return nil }
@@ -65,6 +95,29 @@ func (m *mockTranslSvc) Translate(_ services.TranslationInput) (string, error) {
 		return "", m.err
 	}
 	return m.result, nil
+}
+
+type countingTranslSvc struct {
+	mu    sync.Mutex
+	calls int
+
+	result string
+}
+
+func (m *countingTranslSvc) Translate(in services.TranslationInput) (string, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	if m.result != "" {
+		return m.result, nil
+	}
+	return "translated:" + in.Text, nil
+}
+
+func (m *countingTranslSvc) Calls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
 }
 
 type mockPDFSvc struct {
@@ -138,6 +191,82 @@ func (m *mockOCRSvc) ExtractImageBlocks(_, _ string) ([]internalservices.OCRText
 }
 
 // ---------- tests ---------------------------------------------------------
+
+func TestWorker_CleanupTerminalChunkCheckpoints_CalledForTerminalPDF(t *testing.T) {
+	store := &checkpointWorkerStore{mockWorkerStore: &mockWorkerStore{}, chunks: map[string][]chunkUnit{}}
+	w := NewWorker(store, &mockTranslSvc{}, &mockPDFSvc{}, nil, 0)
+
+	cases := []struct {
+		name   string
+		status Status
+	}{
+		{name: "completed", status: StatusCompleted},
+		{name: "failed", status: StatusFailed},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store.clearCheckpointJobIDs = nil
+			job := &Job{ID: "pdf-terminal-" + string(tc.status), Type: TypePDF, Status: tc.status}
+			w.cleanupTerminalChunkCheckpoints(context.Background(), job)
+			if len(store.clearCheckpointJobIDs) != 1 {
+				t.Fatalf("expected exactly one checkpoint cleanup call, got %d", len(store.clearCheckpointJobIDs))
+			}
+			if store.clearCheckpointJobIDs[0] != job.ID {
+				t.Fatalf("expected cleanup for job %q, got %q", job.ID, store.clearCheckpointJobIDs[0])
+			}
+		})
+	}
+}
+
+func TestWorker_CleanupTerminalChunkCheckpoints_SkipsNonTerminalOrNonPDF(t *testing.T) {
+	store := &checkpointWorkerStore{mockWorkerStore: &mockWorkerStore{}, chunks: map[string][]chunkUnit{}}
+	w := NewWorker(store, &mockTranslSvc{}, &mockPDFSvc{}, nil, 0)
+
+	jobs := []*Job{
+		{ID: "pdf-processing", Type: TypePDF, Status: StatusProcessing},
+		{ID: "image-completed", Type: TypeImage, Status: StatusCompleted},
+		{ID: "image-failed", Type: TypeImage, Status: StatusFailed},
+	}
+
+	for _, job := range jobs {
+		w.cleanupTerminalChunkCheckpoints(context.Background(), job)
+	}
+
+	if len(store.clearCheckpointJobIDs) != 0 {
+		t.Fatalf("expected no checkpoint cleanup calls for non-terminal/non-pdf jobs, got %d (%v)", len(store.clearCheckpointJobIDs), store.clearCheckpointJobIDs)
+	}
+}
+
+func TestWorker_CleanupTerminalChunkCheckpoints_FailureIsNonFatalAndCounted(t *testing.T) {
+	store := &checkpointWorkerStore{
+		mockWorkerStore:    &mockWorkerStore{},
+		chunks:             map[string][]chunkUnit{},
+		clearCheckpointErr: errors.New("redis unavailable"),
+	}
+	w := NewWorker(store, &mockTranslSvc{}, &mockPDFSvc{}, nil, 0)
+
+	before := observability.SnapshotChunkCheckpointMetrics()
+	job := &Job{ID: "pdf-terminal-failure", Type: TypePDF, Status: StatusCompleted}
+
+	// cleanupTerminalChunkCheckpoints must never panic/block job flow on cleanup errors.
+	w.cleanupTerminalChunkCheckpoints(context.Background(), job)
+
+	if len(store.clearCheckpointJobIDs) != 1 {
+		t.Fatalf("expected one cleanup attempt, got %d", len(store.clearCheckpointJobIDs))
+	}
+	if store.clearCheckpointJobIDs[0] != job.ID {
+		t.Fatalf("expected cleanup attempt for job %q, got %q", job.ID, store.clearCheckpointJobIDs[0])
+	}
+
+	after := observability.SnapshotChunkCheckpointMetrics()
+	if after.ClearFailureTotal != before.ClearFailureTotal+1 {
+		t.Fatalf("expected clear failure total to increment by 1 (before=%d after=%d)", before.ClearFailureTotal, after.ClearFailureTotal)
+	}
+	if after.ClearTotal != before.ClearTotal {
+		t.Fatalf("expected successful clear total unchanged on failure (before=%d after=%d)", before.ClearTotal, after.ClearTotal)
+	}
+}
 
 func TestWorker_PDFJob_MissingFilePath(t *testing.T) {
 	store := &mockWorkerStore{}
@@ -264,8 +393,128 @@ func TestWorker_PDFJob_TranslationError(t *testing.T) {
 	if store.lastJob == nil {
 		t.Fatal("expected Update to be called")
 	}
-	if store.lastJob.Status != StatusFailed {
-		t.Fatalf("expected status=failed, got %s", store.lastJob.Status)
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected graceful completion, got %s", store.lastJob.Status)
+	}
+	if store.lastJob.TranslatedText == "" {
+		t.Fatal("expected translated text to be preserved after degradation")
+	}
+}
+
+func TestWorker_PDFJob_GracefulChunkDegradation_Completes(t *testing.T) {
+	store := &mockWorkerStore{}
+	pdfSvc := &mockPDFSvc{result: "Some extracted text"}
+	transSvc := &mockTranslSvc{err: errors.New("provider timeout")}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-degrade-1",
+		Type:     TypePDF,
+		FilePath: "/tmp/exists.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected graceful completion, got %s (err=%s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText == "" {
+		t.Fatal("expected translated_text to be preserved in degraded path")
+	}
+	if store.lastJob.StageMessage == "" {
+		t.Fatal("expected stage message describing completion path")
+	}
+}
+
+func TestWorker_PDFJob_UsesPersistedChunkCheckpoint(t *testing.T) {
+	const page = "Hello from PDF page"
+	const fromCheckpoint = "Gespeicherte Übersetzung"
+
+	baseStore := &mockWorkerStore{}
+	store := &checkpointWorkerStore{mockWorkerStore: baseStore, chunks: map[string][]chunkUnit{}}
+	pdfSvc := &mockMultiPagePDFSvc{pages: []string{page}}
+	transSvc := &countingTranslSvc{}
+	w := NewWorker(store, transSvc, pdfSvc, nil, 0)
+
+	job := &Job{
+		ID:       "pdf-checkpoint-hit",
+		Type:     TypePDF,
+		FilePath: "/tmp/checkpoint.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+
+	units := buildChunkUnits([]string{normalizeText(page)}, pdfChunkMaxWords)
+	chunks := buildTextChunks(units, w.chunkMinWords, w.chunkMaxWords)
+	if len(chunks) != 1 {
+		t.Fatalf("expected exactly one chunk in test setup, got %d", len(chunks))
+	}
+	ck := chunkCheckpointKey(chunks[0], job.Source, job.Target)
+	store.chunks[store.chunkKey(job.ID, ck)] = []chunkUnit{{pageIndex: 0, text: fromCheckpoint, words: 2}}
+
+	w.process(context.Background(), job)
+
+	if baseStore.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if baseStore.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed, got %s", baseStore.lastJob.Status)
+	}
+	if baseStore.lastJob.TranslatedText != fromCheckpoint {
+		t.Fatalf("expected checkpoint translated text %q, got %q", fromCheckpoint, baseStore.lastJob.TranslatedText)
+	}
+	if transSvc.Calls() != 0 {
+		t.Fatalf("expected provider not to be called on checkpoint hit, got %d calls", transSvc.Calls())
+	}
+}
+
+func TestWorker_PDFJob_ReusesCheckpointAfterWorkerRestart(t *testing.T) {
+	const page1 = "First page words for checkpoint reuse"
+	const page2 = "Second page words for checkpoint reuse"
+
+	baseStore := &mockWorkerStore{}
+	store := &checkpointWorkerStore{mockWorkerStore: baseStore, chunks: map[string][]chunkUnit{}}
+	pdfSvc := &mockMultiPagePDFSvc{pages: []string{page1, page2}}
+
+	firstSvc := &countingTranslSvc{}
+	firstWorker := NewWorker(store, firstSvc, pdfSvc, nil, 0)
+	job := &Job{
+		ID:       "pdf-checkpoint-restart",
+		Type:     TypePDF,
+		FilePath: "/tmp/restart.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	firstWorker.process(context.Background(), job)
+
+	if baseStore.lastJob == nil || baseStore.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected first run completed, got %+v", baseStore.lastJob)
+	}
+	if firstSvc.Calls() == 0 {
+		t.Fatal("expected first worker run to invoke provider at least once")
+	}
+
+	// Simulate worker restart with a fresh translation service instance.
+	secondSvc := &countingTranslSvc{}
+	secondWorker := NewWorker(store, secondSvc, pdfSvc, nil, 0)
+	job2 := &Job{
+		ID:       "pdf-checkpoint-restart",
+		Type:     TypePDF,
+		FilePath: "/tmp/restart.pdf",
+		Source:   "en",
+		Target:   "de",
+	}
+	secondWorker.process(context.Background(), job2)
+
+	if baseStore.lastJob == nil || baseStore.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected second run completed, got %+v", baseStore.lastJob)
+	}
+	if secondSvc.Calls() != 0 {
+		t.Fatalf("expected second worker to fully reuse persisted checkpoints, got %d provider calls", secondSvc.Calls())
 	}
 }
 
@@ -479,8 +728,8 @@ func TestWorker_PDFJob_FileCleanedUpOnCompletion(t *testing.T) {
 	}
 }
 
-func TestWorker_PDFJob_FileCleanedUpOnFailure(t *testing.T) {
-	// Even when translation fails, the file must be cleaned up.
+func TestWorker_PDFJob_FileCleanedUpOnDegradedCompletion(t *testing.T) {
+	// Even when translation degrades, the file must be cleaned up.
 	f, err := os.CreateTemp(t.TempDir(), "loklingo-fail-*.pdf")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
@@ -502,11 +751,11 @@ func TestWorker_PDFJob_FileCleanedUpOnFailure(t *testing.T) {
 	}
 	w.process(context.Background(), job)
 
-	if store.lastJob == nil || store.lastJob.Status != StatusFailed {
-		t.Fatalf("expected failed job, got %v", store.lastJob)
+	if store.lastJob == nil || store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected completed job after graceful degradation, got %v", store.lastJob)
 	}
 	if _, statErr := os.Stat(tmpPath); !os.IsNotExist(statErr) {
-		t.Fatalf("expected temp file %s to be removed even on failure", tmpPath)
+		t.Fatalf("expected temp file %s to be removed after degraded completion", tmpPath)
 	}
 }
 
@@ -781,7 +1030,8 @@ func TestWorker_TranslateWithRetry_MetricsCountTranslateRetries(t *testing.T) {
 }
 
 // TestWorker_TranslateWithRetry_ExhaustsRetries verifies that after
-// translateMaxRetries+1 consecutive 429s the job is marked failed.
+// translateMaxRetries+1 consecutive 429s the job completes via graceful
+// degradation instead of hard-failing.
 func TestWorker_TranslateWithRetry_ExhaustsRetries(t *testing.T) {
 	store := &mockWorkerStore{}
 	pdfSvc := &mockPDFSvc{result: "Hello world"}
@@ -801,11 +1051,11 @@ func TestWorker_TranslateWithRetry_ExhaustsRetries(t *testing.T) {
 	if store.lastJob == nil {
 		t.Fatal("expected Update to be called")
 	}
-	if store.lastJob.Status != StatusFailed {
-		t.Fatalf("expected status=failed after exhausted retries, got %s", store.lastJob.Status)
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed after graceful degradation, got %s", store.lastJob.Status)
 	}
-	if store.lastJob.ErrorMsg == "" {
-		t.Fatal("expected non-empty ErrorMsg")
+	if store.lastJob.TranslatedText == "" {
+		t.Fatal("expected translated text to be preserved in degraded path")
 	}
 
 	transSvc.mu.Lock()
@@ -819,7 +1069,7 @@ func TestWorker_TranslateWithRetry_ExhaustsRetries(t *testing.T) {
 }
 
 // TestWorker_TranslateWithRetry_NonRetryableErrorIsImmediate verifies that a
-// non-429 error is NOT retried and the job fails immediately.
+// non-429 error is NOT retried, and the worker degrades gracefully.
 func TestWorker_TranslateWithRetry_NonRetryableErrorIsImmediate(t *testing.T) {
 	store := &mockWorkerStore{}
 	pdfSvc := &mockPDFSvc{result: "Hello world"}
@@ -841,8 +1091,8 @@ func TestWorker_TranslateWithRetry_NonRetryableErrorIsImmediate(t *testing.T) {
 	if store.lastJob == nil {
 		t.Fatal("expected Update to be called")
 	}
-	if store.lastJob.Status != StatusFailed {
-		t.Fatalf("expected status=failed, got %s", store.lastJob.Status)
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected status=completed after graceful degradation, got %s", store.lastJob.Status)
 	}
 }
 

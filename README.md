@@ -187,80 +187,58 @@ Async job failure handling:
 
 ## 📊 Reliability Telemetry
 
-LokLingo can persist OCR and LiteLLM reliability events into Postgres for
-time-windowed operations dashboards.
+Operational reliability guidance has moved to a dedicated runbook:
 
-### 1) Apply analytics migrations
+* [guide/reliability-runbook.md](guide/reliability-runbook.md)
 
-If `POSTGRES_DSN` is configured for backend analytics logging, apply SQL
-migrations in order:
+Quick access:
 
-```bash
-for f in backend/migrations/*.sql; do
-    psql "$POSTGRES_DSN" -f "$f"
-done
-```
-
-The new reliability telemetry table is created by:
-
-* `backend/migrations/003_create_reliability_events.sql`
-* `backend/migrations/004_add_reliability_retention_policy.sql`
-
-Retention cleanup helper:
-
-```sql
-SELECT prune_reliability_events(INTERVAL '30 days');
-```
-
-Recommended: run that SQL daily from an external scheduler (system cron,
-Kubernetes CronJob, CI maintenance job, etc.).
-
-### 2) Query API-level metrics
-
-The internal metrics endpoint now returns both:
-
-* `reliability`: in-process counters since backend start
-* `reliability_windowed.events`: Postgres-aggregated reliability events for the requested window
-
-Example:
-
-```bash
-curl "http://localhost:28080/api/v1/metrics/ocr?window=24h" \
-    -H "X-Internal-Token: $INTERNAL_TOKEN"
-```
-
-Accepted windows: `1h`, `6h`, `24h`, `7d`, `30d`.
-
-### 3) Query dashboard SQL directly
-
-Use:
-
-* `backend/analytics/ocr_dashboard.sql`
-
-This file now includes reliability-focused queries such as top failure reasons,
-retry/circuit event volumes, and integration/event trends over time.
-
-### 4) Frontend reliability severity thresholds
-
-The readiness popover mini-widget and sparkline support configurable severity
-thresholds through Vite environment variables:
-
-* `VITE_RELIABILITY_PRESSURE_WARN`: warn threshold for pressure score (default `8`)
-* `VITE_RELIABILITY_PRESSURE_CRITICAL`: critical threshold for pressure score (default `20`)
-
-Pressure score is computed from the latest 1h metrics as:
-
-```text
-litellm.retry_attempts_total
-+ litellm.circuit_opened_total
-+ ocr.retry_attempts_total
-+ ocr.response_rejected_total
-```
-
-Set these in the frontend environment used at build time to tune alert
-sensitivity per environment (dev/staging/prod).
-
----
+* Checkpoint counters and thresholds: [guide/reliability-runbook.md](guide/reliability-runbook.md#5-checkpoint-reliability-counters-and-thresholds)
+* On-call runbook order: [guide/reliability-runbook.md](guide/reliability-runbook.md#on-call-runbook-order-checkpoint-reliability)
+* Reliability ownership model: [guide/reliability-runbook.md](guide/reliability-runbook.md#reliability-ownership-model)
+* Communication cadence guidance: [guide/reliability-runbook.md](guide/reliability-runbook.md#communication-cadence-guidance)
+* Incident severity matrix: [guide/reliability-runbook.md](guide/reliability-runbook.md#incident-severity-matrix-response-and-escalation)
+* First 60 minutes timeline: [guide/reliability-runbook.md](guide/reliability-runbook.md#first-60-minutes-incident-timeline)
+* Incident handoff template: [guide/reliability-runbook.md](guide/reliability-runbook.md#incident-handoff-template-unresolved-reliability-issues)
+* Incident evidence checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#incident-evidence-checklist)
+* Incident artifact bundle template: [guide/reliability-runbook.md](guide/reliability-runbook.md#incident-artifact-bundle-template)
+* Incident closure definition of done: [guide/reliability-runbook.md](guide/reliability-runbook.md#incident-closure-definition-of-done-reliability)
+* Closure signoff checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#closure-signoff-checklist)
+* Closure quality scorecard: [guide/reliability-runbook.md](guide/reliability-runbook.md#closure-quality-scorecard)
+* Post-incident follow-up SLA defaults: [guide/reliability-runbook.md](guide/reliability-runbook.md#post-incident-follow-up-sla-defaults)
+* Follow-up tracking template: [guide/reliability-runbook.md](guide/reliability-runbook.md#follow-up-tracking-template)
+* Follow-up review cadence: [guide/reliability-runbook.md](guide/reliability-runbook.md#follow-up-review-cadence)
+* Follow-up completion evidence checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#follow-up-completion-evidence-checklist)
+* Follow-up status taxonomy: [guide/reliability-runbook.md](guide/reliability-runbook.md#follow-up-status-taxonomy)
+* Blocked-item escalation playbook: [guide/reliability-runbook.md](guide/reliability-runbook.md#blocked-item-escalation-playbook)
+* Blocked escalation exception matrix: [guide/reliability-runbook.md](guide/reliability-runbook.md#blocked-escalation-exception-matrix)
+* Exception expiry sweep checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#exception-expiry-sweep-checklist)
+* Weekly exception audit checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#weekly-exception-audit-checklist)
+* Monthly exception trend review: [guide/reliability-runbook.md](guide/reliability-runbook.md#monthly-exception-trend-review)
+* Exception reduction action plan template: [guide/reliability-runbook.md](guide/reliability-runbook.md#exception-reduction-action-plan-template)
+* Action plan outcome review block: [guide/reliability-runbook.md](guide/reliability-runbook.md#action-plan-outcome-review-block)
+* Monthly governance signoff checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#monthly-governance-signoff-checklist)
+* Quarter-end exception governance snapshot: [guide/reliability-runbook.md](guide/reliability-runbook.md#quarter-end-exception-governance-snapshot)
+* Annual exception governance summary: [guide/reliability-runbook.md](guide/reliability-runbook.md#annual-exception-governance-summary)
+* Annual leadership review checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#annual-leadership-review-checklist)
+* Governance archive and retrieval checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#governance-archive-and-retrieval-checklist)
+* Governance artifact retention policy: [guide/reliability-runbook.md](guide/reliability-runbook.md#governance-artifact-retention-policy)
+* Governance index template: [guide/reliability-runbook.md](guide/reliability-runbook.md#governance-index-template)
+* Governance index maintenance cadence: [guide/reliability-runbook.md](guide/reliability-runbook.md#governance-index-maintenance-cadence)
+* Governance ownership RACI: [guide/reliability-runbook.md](guide/reliability-runbook.md#governance-ownership-raci)
+* Governance change log entry template: [guide/reliability-runbook.md](guide/reliability-runbook.md#governance-change-log-entry-template)
+* Weekly reliability KPI scorecard: [guide/reliability-runbook.md](guide/reliability-runbook.md#weekly-reliability-kpi-scorecard)
+* Reliability review meeting agenda: [guide/reliability-runbook.md](guide/reliability-runbook.md#reliability-review-meeting-agenda-template)
+* Severity-to-channel communication policy: [guide/reliability-runbook.md](guide/reliability-runbook.md#severity-to-channel-communication-policy)
+* Communication escalation exception policy: [guide/reliability-runbook.md](guide/reliability-runbook.md#communication-escalation-exception-policy)
+* Escalation decision log template: [guide/reliability-runbook.md](guide/reliability-runbook.md#escalation-decision-log-template)
+* Escalation decision quality checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#escalation-decision-quality-checklist)
+* Decision outcome review block: [guide/reliability-runbook.md](guide/reliability-runbook.md#decision-outcome-review-block)
+* Stability confirmation checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#stability-confirmation-checklist)
+* Post-closure watchback checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#post-closure-watchback-checklist)
+* Reopen readiness checklist: [guide/reliability-runbook.md](guide/reliability-runbook.md#reopen-readiness-checklist)
+* New on-call quick start: [guide/reliability-runbook.md](guide/reliability-runbook.md#new-on-call-quick-start-reliability)
+* Common pitfalls: [guide/reliability-runbook.md](guide/reliability-runbook.md#common-pitfalls-on-call-reliability)
 
 ## 📌 Roadmap
 

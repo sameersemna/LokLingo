@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -322,6 +323,49 @@ func TestWorkerImageRetryKeepsSourceFile(t *testing.T) {
 		t.Fatalf("expected intermediate failed status before retry handling, got %q", store.lastJob.Status)
 	}
 }
+
+func TestWorker_ImageJob_GracefulChunkDegradation_Completes(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "input.png")
+
+	img := image.NewRGBA(image.Rect(0, 0, 120, 80))
+	f, err := os.Create(inPath)
+	if err != nil {
+		t.Fatalf("create input image: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode input image: %v", err)
+	}
+	_ = f.Close()
+
+	store := &mockWorkerStore{}
+	ocr := &mockOCRSvc{blocks: []internalservices.OCRTextBlock{{Text: "Hello", Bbox: []float64{10, 10, 80, 40}}}}
+	// Non-cancelled errors are treated as recoverable for chunk-level degradation.
+	w := NewWorker(store, &mockTranslSvc{err: errors.New("provider timeout")}, &mockPDFSvc{}, ocr, 0)
+
+	job := &Job{
+		ID:       "img-degrade-1",
+		Type:     TypeImage,
+		Mode:     ModeOverlay,
+		FilePath: inPath,
+		Source:   "en",
+		Target:   "de",
+	}
+
+	w.process(context.Background(), job)
+
+	if store.lastJob == nil {
+		t.Fatal("expected Update to be called")
+	}
+	if store.lastJob.Status != StatusCompleted {
+		t.Fatalf("expected graceful completion, got %s (err=%s)", store.lastJob.Status, store.lastJob.ErrorMsg)
+	}
+	if store.lastJob.TranslatedText == "" {
+		t.Fatal("expected translated_text to be preserved even in degraded path")
+	}
+}
+
 func TestApplyLayoutModeBBoxOptions_DefaultAndGeometry(t *testing.T) {
 	opts := internalservices.DefaultOverlayOptions()
 	applyLayoutModeBBoxOptions(&opts, -1)

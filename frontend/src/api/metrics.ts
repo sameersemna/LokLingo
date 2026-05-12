@@ -49,6 +49,44 @@ export interface OCRMetricsResponse {
   }
 }
 
+export interface ProviderMetricSnapshot {
+  provider: string
+  success_total: number
+  failure_total: number
+  retry_total: number
+  exhausted_total: number
+  failover_total: number
+  timeout_total: number
+  avg_latency_ms: number
+}
+
+export interface TimeoutReasonSnapshot {
+  reason: string
+  total: number
+}
+
+export interface RenderFailureSnapshot {
+  mode: string
+  total: number
+}
+
+export interface CheckpointMetricsSnapshot {
+  hit_total: number
+  miss_total: number
+  persist_failure_total: number
+  clear_total: number
+  clear_failure_total: number
+}
+
+export interface ProviderMetricsResponse {
+  providers: ProviderMetricSnapshot[]
+  timeouts: {
+    by_reason: TimeoutReasonSnapshot[]
+  }
+  render_failures: RenderFailureSnapshot[]
+  checkpoints: CheckpointMetricsSnapshot
+}
+
 function parseErrorMessage(status: number, payload: unknown): string {
   if (typeof payload === 'object' && payload !== null && 'error' in payload) {
     const v = (payload as { error?: unknown }).error
@@ -77,4 +115,24 @@ export async function getOCRMetrics(window: MetricsWindow): Promise<OCRMetricsRe
   }
 
   return res.json() as Promise<OCRMetricsResponse>
+}
+
+export async function getProviderMetrics(): Promise<ProviderMetricsResponse> {
+  const internalToken = import.meta.env.VITE_INTERNAL_TOKEN as string | undefined
+  const headers: HeadersInit = {}
+  if (internalToken && internalToken.trim()) {
+    headers['X-Internal-Token'] = internalToken.trim()
+  }
+
+  const res = await fetch('/api/v1/metrics/providers', {
+    headers,
+    signal: AbortSignal.timeout(7000),
+  })
+
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null)
+    throw new Error(parseErrorMessage(res.status, payload))
+  }
+
+  return res.json() as Promise<ProviderMetricsResponse>
 }
