@@ -44,9 +44,11 @@ Operational governance framework docs:
 * [Governance Release Checklist](governance/governance-release-checklist.md)
 * [Governance Drift Dashboard Template](governance/governance-drift-dashboard-template.md)
 * [Governance Maintainer Quickstart](governance/MAINTAINER-QUICKSTART.md)
+* [Reliability Review Workflows](governance/reliability-review-workflows.md)
 * [Monthly Governance Signoff Template](governance/reviews/monthly-governance-signoff-template.md)
 * [Quarterly Governance Review Template](governance/reviews/quarterly-governance-review-template.md)
 * [Annual Governance Summary Template](governance/reviews/annual-governance-summary-template.md)
+* [Reliability Recovery Tooling](ops/README.md)
 * [Incident Example Index](governance/examples/README.md)
 * [Example Sev 1 OCR Outage Packet](governance/examples/sev1-ocr-outage/summary.md)
 * [Example Sev 2 Translation Failover Packet](governance/examples/sev2-translation-failover/summary.md)
@@ -56,6 +58,10 @@ Operational governance framework docs:
 Runbook quick links:
 
 * [Checkpoint counters and thresholds](#5-checkpoint-reliability-counters-and-thresholds)
+* [Alert-to-response mapping](#alert-to-response-mapping-degradedadaptive-path)
+* [Alert-to-command mapping](#alert-to-command-mapping-reliability-recovery-script)
+* [Severity response matrix](#severity-response-matrix-command-bundles)
+* [Dashboard panel-to-alert-owner map](#dashboard-panel-to-alert-owner-map-degraded-operations)
 * [On-call runbook order](#on-call-runbook-order-checkpoint-reliability)
 * [Incident handoff template](#incident-handoff-template-unresolved-reliability-issues)
 * [Incident closure definition of done](#incident-closure-definition-of-done-reliability)
@@ -89,14 +95,21 @@ Auto-provisioned assets:
 - Datasource: `LokLingo Prometheus`
 - Dashboard: `LokLingo Reliability Overview`
 - Dashboard: `LokLingo Incident Timeline Companion`
+- Dashboard: `LokLingo Degraded Operations Guard`
 
 Smoke validation:
 
 - `sh guide/smoke-observability.sh`
+- `bash guide/reliability-smoke-suite.sh --json-out guide/reliability-smoke-report.json`
+
+Recovery snapshot command (provider policy + degraded signals):
+
+- `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
 
 Prometheus scrape source:
 
 - `GET /api/v1/metrics/prometheus`
+- `GET /api/v1/metrics/providers/health`
 
 Incident lineage query workflow:
 
@@ -234,7 +247,109 @@ Alerting suggestions (starting points):
 * Coverage alert: `hit_rate` below `VITE_CHECKPOINT_HIT_CRITICAL` for two consecutive evaluation windows.
 * Correlation alert: checkpoint failure deltas rising together with provider timeout deltas (same window) to prioritize infrastructure triage.
 
+Timeout-storm guardrails (smoke + alert alignment):
+
+* `timeouts_delta_10m > 8` and `retries_delta_10m > 80` should be treated as critical overload behavior.
+* Reliability smoke suite knobs:
+    * `STORM_TIMEOUT_DELTA_MAX` (default `8`)
+    * `STORM_RETRY_DELTA_MAX` (default `80`)
+    * `STORM_RECOVERY_DEPTH_THRESHOLD` (default `6`)
+
 Treat these values as environment-specific baselines; tune thresholds using your normal traffic profile and window size.
+
+Alert-to-response mapping (degraded/adaptive path):
+
+* `LokLingoTimeoutStormDetected`
+    * First checks: compare `loklingo_pipeline_timeouts_total` and `loklingo_pipeline_retries_total` deltas in the degraded-operations dashboard.
+    * Immediate action: reduce translation pressure and verify queue recovery against `loklingo_queue_depth`.
+    * Escalation: page on-call and open incident channel immediately.
+* `LokLingoAdaptiveClampFrequent`
+    * First checks: confirm clamp share and queue depth trend in the degraded-operations dashboard.
+    * Immediate action: inspect worker saturation and recent provider timeout spikes before changing concurrency.
+    * Escalation: warn service owner; promote if queue depth does not recover within one evaluation window.
+* `LokLingoDegradedModeSpike`
+    * First checks: break down render fallback vs low OCR confidence in the degraded-operations dashboard.
+    * Immediate action: distinguish provider/network stress from OCR quality drift.
+    * Escalation: involve OCR owner if low-confidence dominates; involve translation owner if timeout/retry signals rise together.
+* `LokLingoRenderFallbackSpike`
+    * First checks: correlate fallback increase with recent render latency and output-format changes.
+    * Immediate action: verify image/layout rendering path health and confirm passthrough fallback is preserving output delivery.
+    * Escalation: treat as warning unless export success or degraded total also trends upward.
+* `LokLingoRetryBacklogHigh` or `LokLingoRetryBacklogCritical`
+    * First checks: inspect retry backlog, dead-letter volume, and provider timeout reason metrics in the same window.
+    * Immediate action: determine whether backlog is provider-driven or queue-capacity driven before replaying or increasing concurrency.
+    * Escalation: critical backlog should follow standard incident escalation if accompanied by clamp or timeout-storm alerts.
+
+Alert-to-command mapping (reliability-recovery script):
+
+* `LokLingoQueueDepthHigh` or `LokLingoQueueDepthCritical`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>`
+* `LokLingoStuckJobsDetected`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+    * `bash guide/ops/reliability-recovery.sh list-dead 100`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+* `LokLingoDeadLetterGrowth`
+    * `bash guide/ops/reliability-recovery.sh list-dead 100`
+    * `bash guide/ops/reliability-recovery.sh replay-dead-all 50`
+    * `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>`
+* `LokLingoChunkSuccessDrop`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>`
+* `LokLingoExportSuccessDrop`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+    * `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>`
+* `LokLingoProviderTimeoutSpike`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+* `LokLingoTimeoutStormDetected`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>`
+* `LokLingoAdaptiveClampFrequent`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+* `LokLingoDegradedModeSpike`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+    * `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>`
+* `LokLingoRenderFallbackSpike`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+* `LokLingoRetryBacklogHigh` or `LokLingoRetryBacklogCritical`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
+    * `bash guide/ops/reliability-recovery.sh list-dead 100`
+    * `bash guide/ops/reliability-recovery.sh replay-dead-all 50`
+
+After capturing an incident JSON packet, generate a compact handoff brief:
+
+* `python3 guide/ops/generate-incident-brief.py <incident-snapshot.json> <brief-output.md>`
+
+Severity response matrix (command bundles):
+
+| Severity | Typical alerts | Ordered command bundle |
+| --- | --- | --- |
+| `warning` | `LokLingoQueueDepthHigh`, `LokLingoChunkSuccessDrop`, `LokLingoExportSuccessDrop`, `LokLingoProviderTimeoutSpike`, `LokLingoAdaptiveClampFrequent`, `LokLingoDegradedModeSpike`, `LokLingoRenderFallbackSpike` | 1. `bash guide/ops/reliability-recovery.sh queue-status` 2. `bash guide/ops/reliability-recovery.sh provider-policy-snapshot` 3. `bash guide/ops/reliability-recovery.sh provider-history` |
+| `critical` | `LokLingoQueueDepthCritical`, `LokLingoDeadLetterGrowth`, `LokLingoRetryBacklogCritical`, `LokLingoTimeoutStormDetected` | 1. `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>` 2. `bash guide/ops/reliability-recovery.sh validate-incident-snapshot <incident-snapshot.json>` 3. `bash guide/ops/reliability-recovery.sh generate-incident-brief <incident-snapshot.json> <brief-output.md>` |
+| `critical` with replay required | `LokLingoDeadLetterGrowth`, `LokLingoRetryBacklogCritical` after provider-driven triage is ruled out | 1. `bash guide/ops/reliability-recovery.sh list-dead 100` 2. `bash guide/ops/reliability-recovery.sh replay-dead-all 50` 3. Re-run `bash guide/ops/reliability-recovery.sh queue-status` |
+
+### Dashboard panel-to-alert-owner map (degraded operations)
+
+| Dashboard panel | Primary alert(s) | First owner | Backup owner |
+| --- | --- | --- | --- |
+| `Degraded Events Total` | `LokLingoDegradedModeSpike` | Reliability Lead (Platform) | Backend On-Call Owner |
+| `Degradation Signals (10m)` | `LokLingoRenderFallbackSpike`, `LokLingoDegradedModeSpike` | OCR Service Owner + Rendering Owner | Reliability Lead (Platform) |
+| `Adaptive Concurrency Decisions (10m)` | `LokLingoAdaptiveClampFrequent` | Platform/SRE Owner | Backend On-Call Owner |
+| `Timeout Storm Guard (10m)` | `LokLingoTimeoutStormDetected` | Translation Service Owner | Platform/SRE Owner |
+| `Queue Pressure` | `LokLingoQueueDepthHigh`, `LokLingoQueueDepthCritical`, `LokLingoRetryBacklogHigh`, `LokLingoRetryBacklogCritical` | Platform/SRE Owner | Backend On-Call Owner |
+| `Provider Policy Score` | `LokLingoProviderTimeoutSpike`, `LokLingoTimeoutStormDetected` | Translation Service Owner | Reliability Lead (Platform) |
+| `Clamp Share (15m)` | `LokLingoAdaptiveClampFrequent` | Platform/SRE Owner | Reliability Lead (Platform) |
+| `Degraded Mode Alert Guard (10m)` | `LokLingoDegradedModeSpike` | Reliability Lead (Platform) | Backend On-Call Owner |
 
 On-call runbook order (checkpoint reliability):
 

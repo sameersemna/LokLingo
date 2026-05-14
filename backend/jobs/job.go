@@ -74,6 +74,8 @@ type Job struct {
 	Stage         string  `json:"stage,omitempty"`
 	StageMessage  string  `json:"stage_message,omitempty"`
 	StageProgress float64 `json:"stage_progress,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
+	OCRConfidence float64  `json:"ocr_confidence,omitempty"`
 
 	// File-job-specific fields (PDF and image jobs).
 	FilePath         string `json:"file_path,omitempty"`         // path to the uploaded file on the worker's filesystem

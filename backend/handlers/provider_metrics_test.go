@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"loklingo/backend/internal/observability"
+	"loklingo/backend/services"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -55,6 +56,12 @@ func TestProviderMetricsSummary_ReturnsPayload(t *testing.T) {
 	if _, ok := body["checkpoints"]; !ok {
 		t.Fatal("expected checkpoints key in response")
 	}
+	if _, ok := body["degraded_mode"]; !ok {
+		t.Fatal("expected degraded_mode key in response")
+	}
+	if _, ok := body["provider_policy"]; !ok {
+		t.Fatal("expected provider_policy key in response")
+	}
 
 	checkpoints, ok := body["checkpoints"].(map[string]any)
 	if !ok {
@@ -65,6 +72,42 @@ func TestProviderMetricsSummary_ReturnsPayload(t *testing.T) {
 	assertMetricAtLeast(t, checkpoints, "persist_failure_total", 1)
 	assertMetricAtLeast(t, checkpoints, "clear_total", 1)
 	assertMetricAtLeast(t, checkpoints, "clear_failure_total", 1)
+}
+
+type mockProviderHealthSnapshotter struct{}
+
+func (m mockProviderHealthSnapshotter) SnapshotProviderHealth() []services.ProviderHealthSnapshot {
+	return []services.ProviderHealthSnapshot{{Provider: "litellm", Score: 1.12}}
+}
+
+func TestProviderMetricsHealth_ReturnsSnapshot(t *testing.T) {
+	h := NewProviderMetricsHandler(mockProviderHealthSnapshotter{})
+	app := fiber.New()
+	app.Get("/metrics/providers/health", h.Health)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics/providers/health", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if _, ok := body["captured_at"]; !ok {
+		t.Fatal("expected captured_at key in response")
+	}
+	if _, ok := body["provider_policy"]; !ok {
+		t.Fatal("expected provider_policy key in response")
+	}
+	if _, ok := body["degraded_mode"]; !ok {
+		t.Fatal("expected degraded_mode key in response")
+	}
 }
 
 func TestProviderMetricsSummary_CheckpointCountersInterleavingRemainNumericAndAccumulate(t *testing.T) {

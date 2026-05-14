@@ -1,0 +1,492 @@
+name: Reliability Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      review_period:
+        description: "Optional review period to generate"
+        required: false
+        default: "monthly"
+        type: choice
+        options:
+          - monthly
+          - quarterly
+          - annual
+  schedule:
+    - cron: '30 7 * * 2'
+    - cron: '0 9 1 * *'
+    - cron: '0 9 1 1,4,7,10 *'
+    - cron: '0 9 1 1 *'
+
+jobs:
+  reliability-smoke-scheduled:
+    if: github.event_name == 'schedule' && github.event.schedule == '30 7 * * 2'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore provider baseline snapshot
+        if: github.event_name == 'schedule'
+        id: restore_provider_baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: guide/governance/reviews/previous-provider-policy-snapshot.json
+          key: reliability-provider-baseline-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            reliability-provider-baseline-${{ github.ref_name }}-
+      - name: Start compose stack
+        run: |
+          cp .env.development .env
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.yml up -d --build
+      - name: Run reliability smoke suite
+        run: |
+          export INTERNAL_TOKEN="${INTERNAL_TOKEN:-dev-internal-token}"
+          export LOKLINGO_BASE_URL="${LOKLINGO_BASE_URL:-http://localhost:28080}"
+          chmod +x guide/reliability-smoke-suite.sh
+          bash guide/reliability-smoke-suite.sh --json-out guide/reliability-smoke-report.json
+      - name: Capture provider policy snapshot
+        if: always()
+        run: |
+          export INTERNAL_TOKEN="${INTERNAL_TOKEN:-dev-internal-token}"
+          export LOKLINGO_BASE_URL="${LOKLINGO_BASE_URL:-http://localhost:28080}"
+          chmod +x guide/ops/reliability-recovery.sh
+          bash guide/ops/reliability-recovery.sh provider-policy-snapshot guide/provider-policy-snapshot.json
+      - name: Validate provider policy snapshot schema
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          snapshot = Path('guide/provider-policy-snapshot.json')
+          if not snapshot.exists() or snapshot.stat().st_size == 0:
+            raise SystemExit('provider-policy-snapshot.json is missing or empty')
+
+          payload = json.loads(snapshot.read_text(encoding='utf-8'))
+          required_root = [
+            'generated_at',
+            'provider_health_snapshot',
+            'degraded_and_queue_signals',
+            'provider_policy_scores',
+          ]
+          missing_root = [key for key in required_root if key not in payload]
+          if missing_root:
+            raise SystemExit(f'missing root keys: {missing_root}')
+
+          signals = payload['degraded_and_queue_signals']
+          required_signals = [
+            'loklingo_degraded_mode_total',
+            'loklingo_degraded_render_fallback_total',
+            'loklingo_degraded_ocr_low_confidence_total',
+            'loklingo_adaptive_concurrency_reduce_total',
+            'loklingo_adaptive_concurrency_boost_total',
+            'loklingo_adaptive_concurrency_clamp_total',
+            'loklingo_queue_depth',
+            'loklingo_queue_retry_backlog',
+          ]
+          missing_signals = [key for key in required_signals if key not in signals]
+          if missing_signals:
+            raise SystemExit(f'missing signal keys: {missing_signals}')
+
+          non_numeric = [
+            key for key in required_signals
+            if not isinstance(signals.get(key), (int, float))
+          ]
+          if non_numeric:
+            raise SystemExit(f'non-numeric signal values: {non_numeric}')
+
+          if not isinstance(payload['provider_policy_scores'], dict):
+            raise SystemExit('provider_policy_scores must be an object')
+
+          invalid_scores = []
+          for provider, score in payload['provider_policy_scores'].items():
+            if not isinstance(provider, str) or not provider:
+              invalid_scores.append(f'{provider!r}:invalid-provider')
+              continue
+            if not isinstance(score, (int, float)):
+              invalid_scores.append(f'{provider}:non-numeric')
+              continue
+            if score < 0 or score > 1:
+              invalid_scores.append(f'{provider}:out-of-range')
+          if invalid_scores:
+            raise SystemExit(f'invalid provider policy scores: {invalid_scores}')
+
+          print('snapshot-schema-ok')
+          PY
+      - name: Capture optional incident packet and brief
+        if: always()
+        run: |
+          export INTERNAL_TOKEN="${INTERNAL_TOKEN:-dev-internal-token}"
+          export LOKLINGO_BASE_URL="${LOKLINGO_BASE_URL:-http://localhost:28080}"
+          correlation_id="${RELIABILITY_INCIDENT_CORRELATION_ID:-}"
+          if [[ -z "$correlation_id" && -f guide/reliability-smoke-report.json ]]; then
+            correlation_id="$(python3 - <<'PY'
+            import json
+            from pathlib import Path
+
+            report = Path('guide/reliability-smoke-report.json')
+            payload = json.loads(report.read_text(encoding='utf-8'))
+            value = payload.get('correlation_id') or payload.get('last_correlation_id') or ''
+            print(value)
+            PY
+            )"
+          fi
+
+          if [[ -z "$correlation_id" ]]; then
+            echo "No correlation id available; skipping real incident packet capture."
+            exit 0
+          fi
+
+          chmod +x guide/ops/reliability-recovery.sh
+          bash guide/ops/reliability-recovery.sh export-incident-snapshot "$correlation_id" guide/incident-snapshot.json
+          bash guide/ops/reliability-recovery.sh validate-incident-snapshot guide/incident-snapshot.json
+          bash guide/ops/reliability-recovery.sh generate-incident-brief guide/incident-snapshot.json guide/incident-brief.md
+      - name: Upload reliability smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-smoke-report
+          path: guide/reliability-smoke-report.json
+      - name: Upload provider policy snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-policy-snapshot
+          path: guide/provider-policy-snapshot.json
+      - name: Baseline persistence self-check
+        if: always() && github.event_name == 'schedule'
+        run: |
+          if [[ ! -f guide/provider-policy-snapshot.json ]]; then
+            echo "provider snapshot missing; cannot persist baseline" >&2
+            exit 1
+          fi
+          mkdir -p guide/governance/reviews
+          if [[ "${{ steps.restore_provider_baseline.outputs.cache-hit }}" == "true" ]]; then
+            if [[ ! -f guide/governance/reviews/previous-provider-policy-snapshot.json ]]; then
+              echo "cache reported a hit but baseline file is missing" >&2
+              exit 1
+            fi
+          fi
+          echo "baseline-self-check-ok"
+      - name: Persist provider baseline snapshot
+        if: always() && github.event_name == 'schedule'
+        run: |
+          mkdir -p guide/governance/reviews
+          cp guide/provider-policy-snapshot.json guide/governance/reviews/previous-provider-policy-snapshot.json
+      - name: Save provider baseline snapshot cache
+        if: always() && github.event_name == 'schedule'
+        uses: actions/cache/save@v4
+        with:
+          path: guide/governance/reviews/previous-provider-policy-snapshot.json
+          key: reliability-provider-baseline-${{ github.ref_name }}-${{ github.run_id }}
+      - name: Upload incident packet and brief
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incident-packet-and-brief
+          path: |
+            guide/incident-snapshot.json
+            guide/incident-brief.md
+          if-no-files-found: ignore
+      - name: Generate smoke ops summary
+        if: always()
+        run: |
+          incident_brief_path="NONE"
+          provider_snapshot_path="NONE"
+          previous_provider_snapshot_path="NONE"
+          if [[ -f guide/incident-brief.md ]]; then
+            incident_brief_path="guide/incident-brief.md"
+          fi
+          if [[ -f guide/provider-policy-snapshot.json ]]; then
+            provider_snapshot_path="guide/provider-policy-snapshot.json"
+          fi
+          if [[ -f guide/governance/reviews/previous-provider-policy-snapshot.json ]]; then
+            previous_provider_snapshot_path="guide/governance/reviews/previous-provider-policy-snapshot.json"
+          fi
+          python3 guide/governance/reviews/generate-smoke-ops-summary.py \
+            guide/reliability-smoke-report.json \
+            "$incident_brief_path" \
+            "$provider_snapshot_path" \
+            guide/governance/reviews/generated-weekly-smoke-ops-summary.md
+          python3 guide/governance/reviews/generate-provider-policy-trend.py \
+            "$provider_snapshot_path" \
+            "$previous_provider_snapshot_path" \
+            guide/governance/reviews/generated-provider-policy-trend.md
+      - name: Upload smoke ops summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-smoke-ops-summary
+          path: guide/governance/reviews/generated-weekly-smoke-ops-summary.md
+      - name: Upload provider policy trend
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-provider-policy-trend
+          path: guide/governance/reviews/generated-provider-policy-trend.md
+      - name: Generate reliability artifact index
+        if: always()
+        run: |
+          python3 guide/governance/reviews/generate-incident-artifact-index.py \
+            guide/reliability-smoke-report.json \
+            guide/provider-policy-snapshot.json \
+            guide/incident-snapshot.json \
+            guide/incident-brief.md \
+            guide/governance/reviews/generated-weekly-smoke-ops-summary.md \
+            guide/governance/reviews/generated-reliability-artifact-index.md
+      - name: Generate weekly operator one-pager
+        if: always()
+        run: |
+          python3 guide/governance/reviews/generate-weekly-operator-onepager.py \
+            guide/governance/reviews/generated-weekly-smoke-ops-summary.md \
+            guide/governance/reviews/generated-provider-policy-trend.md \
+            guide/governance/reviews/generated-reliability-artifact-index.md \
+            guide/governance/reviews/generated-weekly-operator-onepager.md
+      - name: Generate incident escalation summary
+        if: always()
+        run: |
+          python3 guide/governance/reviews/generate-incident-escalation-summary.py \
+            guide/governance/reviews/generated-provider-policy-trend.md \
+            guide/governance/reviews/generated-reliability-artifact-index.md \
+            guide/governance/reviews/generated-incident-escalation-summary.md
+      - name: Validate mandatory reliability artifacts
+        if: always()
+        run: |
+          export RELIABILITY_ESCALATION_SUMMARY_MAX_AGE_HOURS="12"
+          python3 guide/governance/reviews/validate-reliability-artifacts.py \
+            guide/reliability-smoke-report.json \
+            guide/provider-policy-snapshot.json \
+            guide/governance/reviews/generated-weekly-smoke-ops-summary.md \
+            guide/governance/reviews/generated-reliability-artifact-index.md \
+            guide/governance/reviews/generated-provider-policy-trend.md \
+            guide/governance/reviews/generated-incident-escalation-summary.md \
+            guide/governance/reviews/generated-weekly-operator-onepager.md
+      - name: Upload reliability artifact index
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-artifact-index
+          path: guide/governance/reviews/generated-reliability-artifact-index.md
+      - name: Upload weekly operator one-pager
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-weekly-operator-onepager
+          path: guide/governance/reviews/generated-weekly-operator-onepager.md
+      - name: Upload incident escalation summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-incident-escalation-summary
+          path: guide/governance/reviews/generated-incident-escalation-summary.md
+      - name: Generate weekly artifact summary
+        if: always()
+        run: |
+          python3 guide/governance/reviews/generate-weekly-artifact-summary.py \
+            guide/reliability-smoke-report.json \
+            guide/provider-policy-snapshot.json \
+            guide/governance/reviews/generated-weekly-smoke-ops-summary.md \
+            guide/governance/reviews/generated-reliability-artifact-index.md \
+            guide/governance/reviews/generated-provider-policy-trend.md \
+            guide/governance/reviews/generated-incident-escalation-summary.md \
+            guide/governance/reviews/generated-weekly-operator-onepager.md \
+            guide/governance/reviews/generated-weekly-artifact-summary.md
+      - name: Publish weekly artifact summary to step summary
+        if: always()
+        run: |
+          if [[ -f guide/governance/reviews/generated-weekly-artifact-summary.md ]]; then
+            cat guide/governance/reviews/generated-weekly-artifact-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Weekly artifact summary was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload weekly artifact summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-weekly-artifact-summary
+          path: guide/governance/reviews/generated-weekly-artifact-summary.md
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.yml logs --no-color
+      - name: Stop compose stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.yml down -v
+
+  incident-snapshot-schema-sample:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate sample incident snapshot
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = {
+              'generated_at': '2026-05-13T00:00:00Z',
+              'correlation_id': 'sample-correlation-id',
+              'lifecycle_events': {'events': [{'stage': 'ingest'}, {'stage': 'translate'}]},
+              'provider_metrics': {
+                  'reliability': {
+                      'litellm': {
+                          'provider_timeouts_total': 3,
+                          'retry_attempts_total': 21,
+                      }
+                  }
+              },
+              'ocr_metrics': {
+                  'reliability': {
+                      'ocr': {
+                          'response_rejected_total': 1,
+                      }
+                  }
+              },
+              'provider_policy_snapshot': {
+                  'generated_at': '2026-05-13T00:00:00Z',
+                  'provider_health_snapshot': {'providers': []},
+                  'degraded_and_queue_signals': {
+                      'loklingo_degraded_mode_total': 1,
+                      'loklingo_degraded_render_fallback_total': 1,
+                      'loklingo_degraded_ocr_low_confidence_total': 0,
+                      'loklingo_adaptive_concurrency_reduce_total': 5,
+                      'loklingo_adaptive_concurrency_boost_total': 3,
+                      'loklingo_adaptive_concurrency_clamp_total': 2,
+                      'loklingo_queue_depth': 120,
+                      'loklingo_queue_retry_backlog': 30,
+                  },
+                  'provider_policy_scores': {'litellm': 0.72},
+              },
+              'derived_summary': {
+                  'lifecycle_event_count': 2,
+                  'lifecycle_stage_counts': {'ingest': 1, 'translate': 1},
+                  'queue_depth': 120,
+                  'retry_backlog': 30,
+                  'degraded_total': 1,
+                  'render_fallback_total': 1,
+                  'ocr_low_confidence_total': 0,
+                  'provider_timeouts_total': 3,
+                  'provider_retries_total': 21,
+                  'ocr_rejected_total': 1,
+                  'lowest_provider_policy': {'provider': 'litellm', 'score': 0.72},
+                  'triage_severity_hint': 'warning',
+                  'triage_trigger_reasons': ['degraded_mode_events_present'],
+              },
+          }
+
+          out_path = Path('guide/ops/incident-snapshot-sample.json')
+          out_path.parent.mkdir(parents=True, exist_ok=True)
+          out_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+          print(out_path)
+          PY
+      - name: Validate sample incident snapshot schema
+        run: python3 guide/ops/validate-incident-snapshot.py guide/ops/incident-snapshot-sample.json
+      - name: Run incident validator regression tests
+        run: python3 guide/ops/test_validate_incident_snapshot.py
+      - name: Run smoke lineage regression harness
+        run: python3 guide/ops/test_reliability_smoke_lineage.py
+      - name: Run weekly review tooling regression tests
+        run: |
+          chmod +x guide/governance/reviews/run-weekly-review-tests.sh
+          bash guide/governance/reviews/run-weekly-review-tests.sh guide/governance/reviews/test-logs
+      - name: Run weekly reliability preflight smoke
+        run: |
+          chmod +x guide/governance/reviews/run-weekly-reliability-preflight.sh
+          bash guide/governance/reviews/run-weekly-reliability-preflight.sh --smoke
+      - name: Upload weekly review test logs on failure
+        if: failure()
+        run: |
+          expected=(
+            "guide/governance/reviews/test-logs/test_generate_weekly_operator_onepager.log"
+            "guide/governance/reviews/test-logs/test_validate_reliability_artifacts.log"
+            "guide/governance/reviews/test-logs/test_generate_incident_escalation_summary.log"
+            "guide/governance/reviews/test-logs/test_generate_weekly_artifact_summary.log"
+            "guide/governance/reviews/test-logs/test_run_weekly_review_tests.log"
+          )
+          missing=0
+          for file in "${expected[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "missing expected weekly review log: $file" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+      - name: Upload weekly review test logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-weekly-review-test-logs
+          path: guide/governance/reviews/test-logs/
+          if-no-files-found: ignore
+      - name: Generate sample incident brief
+        run: python3 guide/ops/generate-incident-brief.py guide/ops/incident-snapshot-sample.json guide/ops/incident-snapshot-sample-brief.md
+      - name: Upload sample incident artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: incident-snapshot-sample
+          path: |
+            guide/ops/incident-snapshot-sample.json
+            guide/ops/incident-snapshot-sample-brief.md
+
+  reliability-review-monthly:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 9 1 * *' || github.event_name == 'workflow_dispatch' && inputs.review_period == 'monthly'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run weekly reliability preflight smoke
+        run: |
+          chmod +x guide/governance/reviews/run-weekly-reliability-preflight.sh
+          bash guide/governance/reviews/run-weekly-reliability-preflight.sh --smoke
+      - name: Generate monthly reliability review
+        run: |
+          export INTERNAL_TOKEN="${INTERNAL_TOKEN:-dev-internal-token}"
+          export LOKLINGO_BASE_URL="${LOKLINGO_BASE_URL:-http://localhost:28080}"
+          chmod +x guide/governance/reviews/generate-reliability-review.sh
+          bash guide/governance/reviews/generate-reliability-review.sh monthly
+      - name: Upload monthly review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-review-monthly
+          path: guide/governance/reviews/generated-monthly-reliability-review.md
+
+  reliability-review-quarterly:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 9 1 1,4,7,10 *' || github.event_name == 'workflow_dispatch' && inputs.review_period == 'quarterly'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run weekly reliability preflight smoke
+        run: |
+          chmod +x guide/governance/reviews/run-weekly-reliability-preflight.sh
+          bash guide/governance/reviews/run-weekly-reliability-preflight.sh --smoke
+      - name: Generate quarterly resilience review
+        run: |
+          export INTERNAL_TOKEN="${INTERNAL_TOKEN:-dev-internal-token}"
+          export LOKLINGO_BASE_URL="${LOKLINGO_BASE_URL:-http://localhost:28080}"
+          chmod +x guide/governance/reviews/generate-reliability-review.sh
+          bash guide/governance/reviews/generate-reliability-review.sh quarterly
+      - name: Upload quarterly review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-review-quarterly
+          path: guide/governance/reviews/generated-quarterly-reliability-review.md
+
+  reliability-review-annual:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 9 1 1 *' || github.event_name == 'workflow_dispatch' && inputs.review_period == 'annual'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run weekly reliability preflight smoke
+        run: |
+          chmod +x guide/governance/reviews/run-weekly-reliability-preflight.sh
+          bash guide/governance/reviews/run-weekly-reliability-preflight.sh --smoke
+      - name: Generate annual operational summary
+        run: |
+          export INTERNAL_TOKEN="${INTERNAL_TOKEN:-dev-internal-token}"
+          export LOKLINGO_BASE_URL="${LOKLINGO_BASE_URL:-http://localhost:28080}"
+          chmod +x guide/governance/reviews/generate-reliability-review.sh
+          bash guide/governance/reviews/generate-reliability-review.sh annual
+      - name: Upload annual review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-review-annual
+          path: guide/governance/reviews/generated-annual-reliability-review.md

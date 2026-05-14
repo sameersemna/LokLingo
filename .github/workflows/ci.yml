@@ -117,6 +117,7 @@ jobs:
         run: |
           python3 -m json.tool guide/governance/dashboards/loklingo-reliability-dashboard.json >/dev/null
           python3 -m json.tool guide/governance/dashboards/loklingo-incident-timeline-dashboard.json >/dev/null
+          python3 -m json.tool guide/governance/dashboards/loklingo-degraded-operations-dashboard.json >/dev/null
       - name: Validate provisioning YAML
         run: |
           python3 - <<'PYEOF'
@@ -126,10 +127,15 @@ jobs:
             "guide/governance/prometheus/prometheus.yml",
             "guide/governance/grafana/provisioning/datasources/prometheus.yml",
             "guide/governance/grafana/provisioning/dashboards/dashboards.yml",
+            "guide/governance/alerts/reliability-alerts.prometheus.yml",
           ]:
             with open(path, "r", encoding="utf-8") as handle:
               yaml.safe_load(handle)
           PYEOF
+      - name: Validate Prometheus alert rules with promtool
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD:/workspace" -w /workspace prom/prometheus:v2.55.0 \
+            check rules guide/governance/alerts/reliability-alerts.prometheus.yml
 
   governance-maintenance-scheduled:
     if: github.event_name == 'schedule'

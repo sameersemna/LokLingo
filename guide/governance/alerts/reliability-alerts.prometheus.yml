@@ -71,3 +71,63 @@ groups:
         annotations:
           summary: Provider timeout spike detected
           description: Provider {{ $labels.provider }} exceeded 20 timeouts over 5 minutes.
+
+      - alert: LokLingoRetryBacklogHigh
+        expr: loklingo_queue_retry_backlog >= 50
+        for: 10m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo retry backlog is elevated
+          description: Retry backlog has stayed above 50 for 10 minutes.
+
+      - alert: LokLingoRetryBacklogCritical
+        expr: loklingo_queue_retry_backlog >= 200
+        for: 5m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: LokLingo retry backlog is critical
+          description: Retry backlog has stayed above 200 for 5 minutes.
+
+      - alert: LokLingoDegradedModeSpike
+        expr: increase(loklingo_degraded_mode_total[10m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo degraded-mode events are spiking
+          description: Degraded-mode events increased by more than 20 over 10 minutes.
+
+      - alert: LokLingoRenderFallbackSpike
+        expr: increase(loklingo_degraded_render_fallback_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo render fallbacks are rising
+          description: Render fallback events increased by more than 5 over 10 minutes.
+
+      - alert: LokLingoAdaptiveClampFrequent
+        expr: increase(loklingo_adaptive_concurrency_clamp_total[10m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LokLingo is frequently clamping translation concurrency
+          description: Adaptive clamp events exceeded 10 over 10 minutes, indicating sustained overload.
+
+      - alert: LokLingoTimeoutStormDetected
+        expr: increase(loklingo_pipeline_timeouts_total[10m]) > 8 and increase(loklingo_pipeline_retries_total[10m]) > 80
+        for: 5m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: LokLingo timeout storm detected
+          description: Timeout and retry deltas breached storm thresholds over 10 minutes.

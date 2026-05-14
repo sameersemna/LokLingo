@@ -4244,3 +4244,11 @@ body {
   background: var(--bg);
 }
 
+.pdf-job-warning {
+  padding: 0.55rem 0.9rem;
+  font-size: 0.8rem;
+  color: var(--warning);
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+

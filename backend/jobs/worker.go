@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -56,6 +57,10 @@ type chunkCheckpointStore interface {
 
 type chunkCheckpointLifecycleStore interface {
 	ClearChunkCheckpoints(ctx context.Context, jobID string) error
+}
+
+type ocrPageConfidenceExtractor interface {
+	ExtractPagesWithConfidence(filePath, lang string) ([]string, float64, error)
 }
 
 // WorkerOption is a functional option for NewWorker.
@@ -338,6 +343,17 @@ const pdfChunkSep = "\n\n[[[LK_PAGE_BREAK]]]\n\n"
 
 const defaultJobMaxAttempts = 3
 const maxRetryDelay = 60 * time.Second
+const retryJitterFraction = 0.25
+const queueOverloadDepthThreshold = int64(200)
+const retryBacklogOverloadThreshold = int64(120)
+const stuckJobsOverloadThreshold = int64(20)
+const severeQueueOverloadDepthThreshold = int64(400)
+const severeRetryBacklogThreshold = int64(240)
+const severeStuckJobsThreshold = int64(40)
+const lowQueueDepthThreshold = int64(30)
+const lowRetryBacklogThreshold = int64(10)
+const adaptiveTranslateConcurrencyCeiling = 6
+const lowOCRConfidenceThreshold = 0.72
 
 type chunkUnit struct {
 	pageIndex int
@@ -768,9 +784,35 @@ func isRetryableJobError(msg string) bool {
 		strings.Contains(lower, "temporarily unavailable")
 }
 
+func isPermanentJobError(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "invalid api key") ||
+		strings.Contains(lower, "authentication failed") ||
+		strings.Contains(lower, "unauthorized") ||
+		strings.Contains(lower, "forbidden") ||
+		strings.Contains(lower, "unsupported language") ||
+		strings.Contains(lower, "invalid request") ||
+		strings.Contains(lower, "malformed")
+}
+
+func classifyJobError(msg string) (kind string, retryable bool) {
+	if isPermanentJobError(msg) {
+		return "permanent", false
+	}
+	if isRetryableJobError(msg) {
+		return "transient", true
+	}
+	return "unknown", false
+}
+
 func retryDelayForAttempt(attempt int) time.Duration {
 	if attempt <= 1 {
-		return 2 * time.Second
+		base := 2 * time.Second
+		jitter := time.Duration(rand.Float64() * float64(base) * retryJitterFraction)
+		return base + jitter
 	}
 	delay := 2 * time.Second
 	for i := 1; i < attempt && delay < maxRetryDelay; i++ {
@@ -779,7 +821,91 @@ func retryDelayForAttempt(attempt int) time.Duration {
 	if delay > maxRetryDelay {
 		delay = maxRetryDelay
 	}
-	return delay
+	jitter := time.Duration(rand.Float64() * float64(delay) * retryJitterFraction)
+	return delay + jitter
+}
+
+func (w *Worker) isQueueOverloaded(ctx context.Context) bool {
+	statsProvider, ok := w.store.(interface {
+		QueueStats(context.Context) (QueueStats, error)
+	})
+	if !ok {
+		return false
+	}
+	stats, err := statsProvider.QueueStats(ctx)
+	if err != nil {
+		return false
+	}
+	return stats.QueueDepth >= queueOverloadDepthThreshold ||
+		stats.RetryBacklog >= retryBacklogOverloadThreshold ||
+		stats.StuckJobs >= stuckJobsOverloadThreshold
+}
+
+func (w *Worker) effectiveTranslateConcurrency(ctx context.Context) int {
+	base := w.translateConcurrency
+	if base <= 0 {
+		base = 1
+	}
+	statsProvider, ok := w.store.(interface {
+		QueueStats(context.Context) (QueueStats, error)
+	})
+	if !ok {
+		return base
+	}
+	stats, err := statsProvider.QueueStats(ctx)
+	if err != nil {
+		return base
+	}
+	if stats.QueueDepth >= severeQueueOverloadDepthThreshold ||
+		stats.RetryBacklog >= severeRetryBacklogThreshold ||
+		stats.StuckJobs >= severeStuckJobsThreshold {
+		observability.IncAdaptiveConcurrencyClamp()
+		return 1
+	}
+	if stats.QueueDepth >= queueOverloadDepthThreshold ||
+		stats.RetryBacklog >= retryBacklogOverloadThreshold ||
+		stats.StuckJobs >= stuckJobsOverloadThreshold {
+		observability.IncAdaptiveConcurrencyReduce()
+		half := base / 2
+		if half < 1 {
+			return 1
+		}
+		return half
+	}
+	if stats.QueueDepth <= lowQueueDepthThreshold &&
+		stats.RetryBacklog <= lowRetryBacklogThreshold &&
+		stats.StuckJobs == 0 &&
+		base < adaptiveTranslateConcurrencyCeiling {
+		observability.IncAdaptiveConcurrencyBoost()
+		return base + 1
+	}
+	return base
+}
+
+func averageOCRBlockConfidence(blocks []internalservices.OCRTextBlock) float64 {
+	if len(blocks) == 0 {
+		return 0
+	}
+	total := 0.0
+	count := 0
+	for _, b := range blocks {
+		if b.Confidence > 0 {
+			total += b.Confidence
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return total / float64(count)
+}
+
+func extractOCRPagesAndConfidence(client internalservices.OCRClient, filePath, lang string) ([]string, float64, error) {
+	if withConfidence, ok := client.(ocrPageConfidenceExtractor); ok {
+		return withConfidence.ExtractPagesWithConfidence(filePath, lang)
+	}
+	pages, err := client.ExtractPages(filePath, lang)
+	return pages, 0, err
 }
 
 func (w *Worker) handleFailedJob(ctx context.Context, job *Job) {
@@ -792,12 +918,20 @@ func (w *Worker) handleFailedJob(ctx context.Context, job *Job) {
 		job.MaxAttempts = defaultJobMaxAttempts
 	}
 
-	retryable := isRetryableJobError(reason)
+	errorKind, retryable := classifyJobError(reason)
+	overloaded := w.isQueueOverloaded(ctx)
+	effectiveMaxAttempts := job.MaxAttempts
+	if overloaded && effectiveMaxAttempts > 1 {
+		effectiveMaxAttempts--
+	}
 	job.Attempt++
 	job.LastErrorMsg = reason
 
-	if retryable && job.Attempt < job.MaxAttempts {
+	if retryable && job.Attempt < effectiveMaxAttempts {
 		delay := retryDelayForAttempt(job.Attempt)
+		if overloaded {
+			delay += 3 * time.Second
+		}
 		nextRetry := time.Now().Add(delay)
 		job.Status = StatusPending
 		job.ErrorMsg = ""
@@ -829,6 +963,9 @@ func (w *Worker) handleFailedJob(ctx context.Context, job *Job) {
 			"job_id", job.ID,
 			"attempt", job.Attempt,
 			"max_attempts", job.MaxAttempts,
+			"effective_max_attempts", effectiveMaxAttempts,
+			"error_kind", errorKind,
+			"queue_overloaded", overloaded,
 			"next_retry_at", nextRetry.UTC().Format(time.RFC3339),
 			"reason", reason,
 		)
@@ -852,12 +989,18 @@ func (w *Worker) handleFailedJob(ctx context.Context, job *Job) {
 		"job_id", job.ID,
 		"attempt", job.Attempt,
 		"max_attempts", job.MaxAttempts,
+		"effective_max_attempts", effectiveMaxAttempts,
+		"error_kind", errorKind,
+		"queue_overloaded", overloaded,
 		"retryable", retryable,
 		"reason", reason,
 	)
 }
 
 func (w *Worker) process(ctx context.Context, job *Job) {
+	job.Warnings = nil
+	job.OCRConfidence = 0
+
 	// Best-effort: remove uploaded source files once the job reaches a terminal state.
 	defer func() {
 		shouldCleanup := false
@@ -878,13 +1021,16 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 	startedAt := time.Now()
 	queueDepth := int64(0)
-	if statsProvider, ok := w.store.(interface{ QueueStats(context.Context) (QueueStats, error) }); ok {
+	if statsProvider, ok := w.store.(interface {
+		QueueStats(context.Context) (QueueStats, error)
+	}); ok {
 		if stats, err := statsProvider.QueueStats(ctx); err == nil {
 			queueDepth = stats.QueueDepth
 		}
 	}
 	queueWaitMS := startedAt.Sub(job.CreatedAt).Milliseconds()
 	observability.RecordQueueWaitLatency(queueWaitMS)
+	effectiveTranslateConcurrency := w.effectiveTranslateConcurrency(ctx)
 	if job.CorrelationID == "" {
 		job.CorrelationID = job.ID
 	}
@@ -908,6 +1054,13 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 	}()
 
 	slog.Info("processing translation job", "job_id", job.ID, "type", job.Type, "mode", job.Mode, "source", job.Source, "target", job.Target)
+	slog.Info("adaptive_translation_concurrency_selected",
+		"job_id", job.ID,
+		"job_type", job.Type,
+		"base_concurrency", w.translateConcurrency,
+		"effective_concurrency", effectiveTranslateConcurrency,
+		"queue_depth", queueDepth,
+	)
 
 	// pages holds per-page normalized text used for translation.
 	// For PDF jobs this is populated during extraction; for text jobs it wraps job.Text.
@@ -953,7 +1106,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
-			ocrPages, ocrErr := w.ocrClient.ExtractPages(job.FilePath, job.Lang)
+			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
@@ -966,6 +1119,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				return
 			}
 			pages = normalizePages(ocrPages)
+			job.OCRConfidence = ocrConfidence
+			if job.OCRConfidence > 0 && job.OCRConfidence < lowOCRConfidenceThreshold {
+				job.Warnings = append(job.Warnings, fmt.Sprintf("OCR confidence is low (%.2f). Continue with caution and verify critical text.", job.OCRConfidence))
+				observability.IncOCRLowConfidence()
+			}
 			if len(pages) == 0 {
 				job.Status = StatusFailed
 				job.ErrorMsg = "pdf OCR extraction returned no text"
@@ -1016,7 +1174,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			ocrTriggered = true
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
-			ocrPages, ocrErr := w.ocrClient.ExtractPages(job.FilePath, job.Lang)
+			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
@@ -1042,6 +1200,11 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				return
 			}
 			pages = normalizePages(ocrPages)
+			job.OCRConfidence = ocrConfidence
+			if job.OCRConfidence > 0 && job.OCRConfidence < lowOCRConfidenceThreshold {
+				job.Warnings = append(job.Warnings, fmt.Sprintf("OCR confidence is low (%.2f). Continue with caution and verify critical text.", job.OCRConfidence))
+				observability.IncOCRLowConfidence()
+			}
 			job.ProcessingMethod = "ocr"
 		} else {
 			job.ProcessingMethod = "pdf_text"
@@ -1114,6 +1277,17 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				slog.Error("update image job result (ocr failed)", "job_id", job.ID, "err", uerr)
 			}
 			return
+		}
+		job.OCRConfidence = averageOCRBlockConfidence(blocks)
+		if job.OCRConfidence > 0 && job.OCRConfidence < lowOCRConfidenceThreshold {
+			warning := fmt.Sprintf("OCR confidence is low (%.2f). Translation continued in graceful-degradation mode; verify critical text manually.", job.OCRConfidence)
+			job.Warnings = append(job.Warnings, warning)
+			observability.IncOCRLowConfidence()
+			slog.Warn("ocr_low_confidence_detected",
+				"job_id", job.ID,
+				"ocr_confidence", job.OCRConfidence,
+				"threshold", lowOCRConfidenceThreshold,
+			)
 		}
 
 		w.setJobStage(ctx, job, StageUnderstandingLayout, "Understanding layout geometry…", 0.14)
@@ -1200,7 +1374,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 		results := make([][]chunkUnit, len(chunks))
 		errByChunk := make([]error, len(chunks))
-		maxParallel := w.translateConcurrency
+		maxParallel := effectiveTranslateConcurrency
 		if maxParallel <= 0 {
 			maxParallel = 1
 		}
@@ -1254,6 +1428,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 					"degrade_reason", "chunk_retry_exhausted",
 					"err", errByChunk[i],
 				)
+				observability.IncDegradedMode()
 				results[i] = chunks[i].units
 				res = results[i]
 			}
@@ -1333,6 +1508,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				"failover_reason", "layout_render_error",
 				"err", err,
 			)
+			observability.IncRenderFallback()
 			overlayOpts := internalservices.DefaultOverlayOptions()
 			if job.JPEGQuality > 0 {
 				overlayOpts.JPEGQuality = job.JPEGQuality
@@ -1354,6 +1530,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				"failover_reason", "rendering_failed_all_modes",
 				"err", err,
 			)
+			observability.IncRenderFallback()
 			w.setJobStage(ctx, job, StageRendering, "Rendering fallback active (Fast mode)…", 0.92)
 			passthroughPath, copyErr := writeImagePassthroughOutput(job.FilePath)
 			if copyErr != nil {
@@ -1469,7 +1646,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		if len(chunks) == 0 {
 			break
 		}
-		batchSize := w.translateConcurrency
+		batchSize := effectiveTranslateConcurrency
 		if batchSize <= 0 {
 			batchSize = 1
 		}
@@ -1478,7 +1655,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		}
 		batch := chunks[:batchSize]
 		results := make([]pageResult, len(batch))
-		sem := make(chan struct{}, w.translateConcurrency)
+		sem := make(chan struct{}, batchSize)
 		var wg sync.WaitGroup
 		for i, chunk := range batch {
 			wg.Add(1)
@@ -1630,6 +1807,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 				"degrade_reason", "chunk_retry_exhausted",
 				"err", r.err,
 			)
+			observability.IncDegradedMode()
 		}
 		for _, u := range r.units {
 			if u.pageIndex >= 0 && u.pageIndex < len(translatedPageParts) {

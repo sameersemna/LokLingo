@@ -25,7 +25,7 @@ func TestPrometheusMetricsExpose_ReturnsTextFormat(t *testing.T) {
 	observability.RecordProviderTimeout("litellm", "network_timeout")
 
 	store := &mockQueueMetricsStore{stats: jobs.QueueStats{QueueDepth: 7, InflightDepth: 2, RetryBacklog: 1, DeadLetterCount: 0, StuckJobs: 0}}
-	h := NewPrometheusMetricsHandler(store)
+	h := NewPrometheusMetricsHandler(store, mockProviderHealthSnapshotter{})
 	app := fiber.New()
 	app.Get("/metrics/prometheus", h.Expose)
 
@@ -54,5 +54,11 @@ func TestPrometheusMetricsExpose_ReturnsTextFormat(t *testing.T) {
 	}
 	if !strings.Contains(body, "loklingo_provider_success_total") {
 		t.Fatal("expected provider success metric in output")
+	}
+	if !strings.Contains(body, "loklingo_degraded_mode_total") {
+		t.Fatal("expected degraded mode metric in output")
+	}
+	if !strings.Contains(body, "loklingo_provider_policy_score") {
+		t.Fatal("expected provider policy score metric in output")
 	}
 }

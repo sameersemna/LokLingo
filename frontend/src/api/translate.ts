@@ -29,6 +29,8 @@ export interface JobResponse {
   total_pages?: number
   processed_pages?: number
   processing_method?: 'pdf_text' | 'ocr'
+  warnings?: string[]
+  ocr_confidence?: number
 }
 
 export interface JobProgressUpdate {

@@ -110,6 +110,60 @@ func TestOrchestratorFailsOverToNextProvider(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_ReordersProvidersByHealthAfterFailure(t *testing.T) {
+	registry := providers.NewRegistry()
+	primary := providers.NewFailingMockProvider("litellm", &providers.ProviderError{Provider: "litellm", StatusCode: 503, Body: "busy"})
+	secondary := providers.NewMockProvider("openai", "hola")
+	registry.Register(primary)
+	registry.Register(secondary)
+
+	orchestrator := NewOrchestrator(registry, OrchestratorConfig{
+		MaxRetriesPerProvider: 0,
+		InitialBackoff:        time.Millisecond,
+		MaxBackoff:            time.Millisecond,
+		JitterFraction:        0,
+	})
+
+	first, err := orchestrator.Translate(TranslationInput{
+		Ctx:    context.Background(),
+		Text:   "hello",
+		Source: "en",
+		Target: "es",
+	})
+	if err != nil {
+		t.Fatalf("first Translate returned error: %v", err)
+	}
+	if first != "hola" {
+		t.Fatalf("expected translated text %q, got %q", "hola", first)
+	}
+	if primary.CallCount() != 1 {
+		t.Fatalf("expected first call to hit primary exactly once, got %d", primary.CallCount())
+	}
+	if secondary.CallCount() != 1 {
+		t.Fatalf("expected first call to hit secondary once via failover, got %d", secondary.CallCount())
+	}
+
+	second, err := orchestrator.Translate(TranslationInput{
+		Ctx:    context.Background(),
+		Text:   "hello again",
+		Source: "en",
+		Target: "es",
+	})
+	if err != nil {
+		t.Fatalf("second Translate returned error: %v", err)
+	}
+	if second != "hola" {
+		t.Fatalf("expected translated text %q, got %q", "hola", second)
+	}
+
+	if primary.CallCount() != 1 {
+		t.Fatalf("expected health ordering to avoid degraded primary on second call; primary calls=%d", primary.CallCount())
+	}
+	if secondary.CallCount() != 2 {
+		t.Fatalf("expected healthy secondary to be preferred on second call; secondary calls=%d", secondary.CallCount())
+	}
+}
+
 func TestOrchestratorHonorsContextDeadline(t *testing.T) {
 	registry := providers.NewRegistry()
 	provider := providers.NewMockProvider("litellm", "bonjour")

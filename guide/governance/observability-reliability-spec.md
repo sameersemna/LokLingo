@@ -56,6 +56,7 @@ API:
 - `GET /api/v1/metrics/prometheus`
 
 Prometheus-compatible metrics include pipeline counters/ratios, queue gauges, provider counters, timeout reason counters, and checkpoint counters.
+Provider health-policy ordering scores are exposed as `loklingo_provider_policy_score{provider=...}`.
 
 ## Provider Health Views
 
@@ -81,6 +82,16 @@ Health rollups:
 API:
 
 - `GET /api/v1/metrics/providers`
+- `GET /api/v1/metrics/providers/health`
+
+Degraded/adaptive reliability signals:
+
+- `loklingo_degraded_mode_total`
+- `loklingo_degraded_render_fallback_total`
+- `loklingo_degraded_ocr_low_confidence_total`
+- `loklingo_adaptive_concurrency_reduce_total`
+- `loklingo_adaptive_concurrency_boost_total`
+- `loklingo_adaptive_concurrency_clamp_total`
 
 ## Queue Visibility
 
@@ -98,6 +109,9 @@ Alert recommendations:
 - stuck_jobs: warn 1, critical 5
 - retry_backlog: warn 50, critical 200
 - dead_letter_volume: warn 1, critical 10
+- degraded_mode delta (10m): warn 20
+- adaptive clamp delta (10m): warn 10
+- timeout storm (10m): critical when timeouts > 8 and retries > 80
 
 ## Failure Tracing and Lineage
 
@@ -111,6 +125,10 @@ Lifecycle event query API:
 
 - `GET /api/v1/metrics/lifecycle/events`
 - Query params: `correlation_id`, `job_id`, `event`, `limit`
+
+Weekly reliability smoke automation may persist `correlation_id`, `job_id`,
+`lifecycle_event_count`, and `lineage_verified` into its JSON report so scheduled
+incident artifact generation can confirm traceability before exporting packets.
 
 ## Dashboard Specification
 
@@ -135,6 +153,7 @@ Grafana reference dashboard is maintained in:
 
 - `guide/governance/dashboards/loklingo-reliability-dashboard.json`
 - `guide/governance/dashboards/loklingo-incident-timeline-dashboard.json`
+- `guide/governance/dashboards/loklingo-degraded-operations-dashboard.json`
 
 Prometheus scrape config is maintained in:
 

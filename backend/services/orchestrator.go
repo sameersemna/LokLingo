@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"loklingo/backend/internal/observability"
@@ -48,11 +50,115 @@ var DefaultOrchestratorConfig = OrchestratorConfig{
 type Orchestrator struct {
 	registry *providers.Registry
 	cfg      OrchestratorConfig
+
+	mu             sync.Mutex
+	providerHealth map[string]float64
+}
+
+// ProviderHealthSnapshot represents a provider health score used for dynamic
+// ordering and failover decisions.
+type ProviderHealthSnapshot struct {
+	Provider string  `json:"provider"`
+	Score    float64 `json:"score"`
 }
 
 // NewOrchestrator constructs an Orchestrator backed by the given registry.
 func NewOrchestrator(registry *providers.Registry, cfg OrchestratorConfig) *Orchestrator {
-	return &Orchestrator{registry: registry, cfg: cfg}
+	return &Orchestrator{
+		registry:       registry,
+		cfg:            cfg,
+		providerHealth: make(map[string]float64),
+	}
+}
+
+const (
+	providerHealthDefaultScore    = 1.0
+	providerHealthMaxScore        = 1.5
+	providerHealthMinScore        = 0.05
+	providerHealthSuccessTarget   = 1.2
+	providerHealthTransientTarget = 0.35
+	providerHealthPermanentTarget = 0.15
+	providerHealthSmoothing       = 0.22
+)
+
+func clampProviderHealth(v float64) float64 {
+	if v < providerHealthMinScore {
+		return providerHealthMinScore
+	}
+	if v > providerHealthMaxScore {
+		return providerHealthMaxScore
+	}
+	return v
+}
+
+func blendProviderHealth(current, target float64) float64 {
+	if current <= 0 {
+		current = providerHealthDefaultScore
+	}
+	next := (1-providerHealthSmoothing)*current + providerHealthSmoothing*target
+	return clampProviderHealth(next)
+}
+
+func (o *Orchestrator) currentProviderHealth(name string) float64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	score, ok := o.providerHealth[name]
+	if !ok || score <= 0 {
+		return providerHealthDefaultScore
+	}
+	return score
+}
+
+func (o *Orchestrator) updateProviderHealth(name string, target float64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	current := o.providerHealth[name]
+	o.providerHealth[name] = blendProviderHealth(current, target)
+}
+
+func (o *Orchestrator) orderedProvidersByHealth() []providers.TranslationProvider {
+	ordered := o.registry.Ordered()
+	if len(ordered) <= 1 {
+		return ordered
+	}
+
+	type candidate struct {
+		provider    providers.TranslationProvider
+		baseIndex   int
+		healthScore float64
+	}
+	items := make([]candidate, 0, len(ordered))
+	for idx, p := range ordered {
+		items = append(items, candidate{provider: p, baseIndex: idx, healthScore: o.currentProviderHealth(p.Name())})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].healthScore == items[j].healthScore {
+			return items[i].baseIndex < items[j].baseIndex
+		}
+		return items[i].healthScore > items[j].healthScore
+	})
+	out := make([]providers.TranslationProvider, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.provider)
+	}
+	return out
+}
+
+// SnapshotProviderHealth returns current provider scores, sorted by score
+// descending (and registration order for ties).
+func (o *Orchestrator) SnapshotProviderHealth() []ProviderHealthSnapshot {
+	ordered := o.orderedProvidersByHealth()
+	if len(ordered) == 0 {
+		return nil
+	}
+	out := make([]ProviderHealthSnapshot, 0, len(ordered))
+	for _, p := range ordered {
+		out = append(out, ProviderHealthSnapshot{
+			Provider: p.Name(),
+			Score:    o.currentProviderHealth(p.Name()),
+		})
+	}
+	return out
 }
 
 // Translate implements TranslationService. It attempts providers in order,
@@ -70,7 +176,7 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 		Target: input.Target,
 	}
 
-	providerList := o.registry.Ordered()
+	providerList := o.orderedProvidersByHealth()
 	if len(providerList) == 0 {
 		return "", fmt.Errorf("no translation providers configured")
 	}
@@ -83,6 +189,7 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 
 		result, retries, err := o.tryProviderWithRetry(ctx, p, req, pi, len(providerList))
 		if err == nil {
+			o.updateProviderHealth(p.Name(), providerHealthSuccessTarget)
 			if pi > 0 {
 				observability.IncProviderFailover(p.Name())
 				observability.EmitLifecycleEventFromContext(ctx, "provider_failover", observability.LifecycleEvent{Provider: p.Name(), RetryCount: int64(retries)})
@@ -96,6 +203,11 @@ func (o *Orchestrator) Translate(input TranslationInput) (string, error) {
 		}
 
 		lastErr = err
+		if isOrchestratorTransientError(err) {
+			o.updateProviderHealth(p.Name(), providerHealthTransientTarget)
+		} else {
+			o.updateProviderHealth(p.Name(), providerHealthPermanentTarget)
+		}
 		observability.IncProviderFailure(p.Name())
 		timeoutReason := classifyTimeoutReason(err)
 		if timeoutReason != "" {

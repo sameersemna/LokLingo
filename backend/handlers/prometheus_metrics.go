@@ -13,11 +13,16 @@ import (
 
 // PrometheusMetricsHandler exposes low-overhead process metrics in Prometheus format.
 type PrometheusMetricsHandler struct {
-	store jobs.Store
+	store             jobs.Store
+	healthSnapshotter providerHealthSnapshotter
 }
 
-func NewPrometheusMetricsHandler(store jobs.Store) *PrometheusMetricsHandler {
-	return &PrometheusMetricsHandler{store: store}
+func NewPrometheusMetricsHandler(store jobs.Store, healthSnapshotter ...providerHealthSnapshotter) *PrometheusMetricsHandler {
+	h := &PrometheusMetricsHandler{store: store}
+	if len(healthSnapshotter) > 0 {
+		h.healthSnapshotter = healthSnapshotter[0]
+	}
+	return h
 }
 
 // Expose handles GET /api/v1/metrics/prometheus.
@@ -26,6 +31,19 @@ func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 	providers := observability.SnapshotProviderMetrics()
 	timeouts := observability.SnapshotTimeoutReasonMetrics()
 	checkpoints := observability.SnapshotChunkCheckpointMetrics()
+	degraded := observability.SnapshotDegradedModeMetrics()
+	policyScores := []struct {
+		Provider string
+		Score    float64
+	}{}
+	if h.healthSnapshotter != nil {
+		for _, p := range h.healthSnapshotter.SnapshotProviderHealth() {
+			policyScores = append(policyScores, struct {
+				Provider string
+				Score    float64
+			}{Provider: p.Provider, Score: p.Score})
+		}
+	}
 	queue := jobs.QueueStats{}
 
 	if provider, ok := h.store.(queueMetricsProvider); ok {
@@ -89,6 +107,12 @@ func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 		fmt.Fprintf(&b, "loklingo_provider_timeout_reason_total{reason=\"%s\"} %d\n", reason, tr.Total)
 	}
 
+	b.WriteString("# TYPE loklingo_provider_policy_score gauge\n")
+	for _, p := range policyScores {
+		label := sanitizePromLabel(p.Provider)
+		fmt.Fprintf(&b, "loklingo_provider_policy_score{provider=\"%s\"} %g\n", label, p.Score)
+	}
+
 	b.WriteString("# TYPE loklingo_chunk_checkpoint_hit_total counter\n")
 	fmt.Fprintf(&b, "loklingo_chunk_checkpoint_hit_total %d\n", checkpoints.HitTotal)
 	b.WriteString("# TYPE loklingo_chunk_checkpoint_miss_total counter\n")
@@ -99,6 +123,19 @@ func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 	fmt.Fprintf(&b, "loklingo_chunk_checkpoint_clear_total %d\n", checkpoints.ClearTotal)
 	b.WriteString("# TYPE loklingo_chunk_checkpoint_clear_failure_total counter\n")
 	fmt.Fprintf(&b, "loklingo_chunk_checkpoint_clear_failure_total %d\n", checkpoints.ClearFailureTotal)
+
+	b.WriteString("# TYPE loklingo_degraded_mode_total counter\n")
+	fmt.Fprintf(&b, "loklingo_degraded_mode_total %d\n", degraded.TotalEvents)
+	b.WriteString("# TYPE loklingo_degraded_render_fallback_total counter\n")
+	fmt.Fprintf(&b, "loklingo_degraded_render_fallback_total %d\n", degraded.RenderFallbackEvents)
+	b.WriteString("# TYPE loklingo_degraded_ocr_low_confidence_total counter\n")
+	fmt.Fprintf(&b, "loklingo_degraded_ocr_low_confidence_total %d\n", degraded.OCRLowConfidenceEvents)
+	b.WriteString("# TYPE loklingo_adaptive_concurrency_reduce_total counter\n")
+	fmt.Fprintf(&b, "loklingo_adaptive_concurrency_reduce_total %d\n", degraded.AdaptiveReduceEvents)
+	b.WriteString("# TYPE loklingo_adaptive_concurrency_boost_total counter\n")
+	fmt.Fprintf(&b, "loklingo_adaptive_concurrency_boost_total %d\n", degraded.AdaptiveBoostEvents)
+	b.WriteString("# TYPE loklingo_adaptive_concurrency_clamp_total counter\n")
+	fmt.Fprintf(&b, "loklingo_adaptive_concurrency_clamp_total %d\n", degraded.AdaptiveClampEvents)
 
 	c.Set(fiber.HeaderContentType, "text/plain; version=0.0.4; charset=utf-8")
 	return c.SendString(b.String())

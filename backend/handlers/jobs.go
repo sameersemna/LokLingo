@@ -236,6 +236,12 @@ func buildJobResponse(job *jobs.Job) fiber.Map {
 		resp["stage_message"] = job.StageMessage
 		resp["stage_progress"] = job.StageProgress
 	}
+	if len(job.Warnings) > 0 {
+		resp["warnings"] = job.Warnings
+	}
+	if job.OCRConfidence > 0 {
+		resp["ocr_confidence"] = job.OCRConfidence
+	}
 	if job.Status == jobs.StatusCompleted {
 		resp["translated_text"] = job.TranslatedText
 		if job.ProcessingMethod != "" {

@@ -23,6 +23,7 @@ This folder holds the production governance baseline for reliability operations.
 - [Reliability Dashboard Specification](dashboard-spec.md)
 - Grafana Dashboard JSON: `dashboards/loklingo-reliability-dashboard.json`
 - Incident Timeline Dashboard JSON: `dashboards/loklingo-incident-timeline-dashboard.json`
+- Degraded Operations Guard Dashboard JSON: `dashboards/loklingo-degraded-operations-dashboard.json`
 - Prometheus Scrape Config: `prometheus/prometheus.yml`
 - Metrics Proxy Config: `metrics-proxy/default.conf.template`
 - Grafana Provisioning (datasource/dashboard providers): `grafana/provisioning/`
@@ -51,6 +52,10 @@ This folder holds the production governance baseline for reliability operations.
 - Prometheus Alert Rules: `alerts/reliability-alerts.prometheus.yml`
 - Observability Compose Overlay: `docker-compose.observability.yml`
 - Observability Smoke Script: `../smoke-observability.sh`
+- Reliability Smoke Suite Script: `../reliability-smoke-suite.sh`
+- [Reliability Review Workflows](reliability-review-workflows.md)
+- Recovery Tooling: `../ops/reliability-recovery.sh`
+- Recovery Tooling Guide: `../ops/README.md`
 - [Governance Maintainer Quickstart](MAINTAINER-QUICKSTART.md)
 - [Monthly Governance Signoff Template](reviews/monthly-governance-signoff-template.md)
 - [Quarterly Governance Review Template](reviews/quarterly-governance-review-template.md)

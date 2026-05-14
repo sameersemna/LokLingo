@@ -2,15 +2,27 @@ package handlers
 
 import (
 	"loklingo/backend/internal/observability"
+	"loklingo/backend/services"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-// ProviderMetricsHandler serves translation-provider reliability metrics.
-type ProviderMetricsHandler struct{}
+type providerHealthSnapshotter interface {
+	SnapshotProviderHealth() []services.ProviderHealthSnapshot
+}
 
-func NewProviderMetricsHandler() *ProviderMetricsHandler {
-	return &ProviderMetricsHandler{}
+// ProviderMetricsHandler serves translation-provider reliability metrics.
+type ProviderMetricsHandler struct {
+	healthSnapshotter providerHealthSnapshotter
+}
+
+func NewProviderMetricsHandler(healthSnapshotter ...providerHealthSnapshotter) *ProviderMetricsHandler {
+	h := &ProviderMetricsHandler{}
+	if len(healthSnapshotter) > 0 {
+		h.healthSnapshotter = healthSnapshotter[0]
+	}
+	return h
 }
 
 // Summary handles GET /api/v1/metrics/providers.
@@ -30,23 +42,45 @@ func (h *ProviderMetricsHandler) Summary(c *fiber.Ctx) error {
 			failoverRate = float64(p.FailoverTotal) / float64(total)
 		}
 		health = append(health, fiber.Map{
-			"provider":       p.Provider,
-			"success_rate":   successRate,
-			"retry_rate":     retryRate,
-			"timeout_rate":   timeoutRate,
-			"failover_rate":  failoverRate,
-			"avg_latency_ms": p.AvgLatencyMS,
+			"provider":        p.Provider,
+			"success_rate":    successRate,
+			"retry_rate":      retryRate,
+			"timeout_rate":    timeoutRate,
+			"failover_rate":   failoverRate,
+			"avg_latency_ms":  p.AvgLatencyMS,
 			"latency_buckets": p.LatencyBuckets,
 		})
 	}
 
+	providerPolicy := []services.ProviderHealthSnapshot{}
+	if h.healthSnapshotter != nil {
+		providerPolicy = h.healthSnapshotter.SnapshotProviderHealth()
+	}
+
 	return c.JSON(fiber.Map{
-		"providers": providers,
-		"health":    health,
+		"providers":       providers,
+		"health":          health,
+		"provider_policy": providerPolicy,
 		"timeouts": fiber.Map{
 			"by_reason": observability.SnapshotTimeoutReasonMetrics(),
 		},
 		"render_failures": observability.SnapshotRenderFailureMetrics(),
 		"checkpoints":     observability.SnapshotChunkCheckpointMetrics(),
+		"degraded_mode":   observability.SnapshotDegradedModeMetrics(),
+	})
+}
+
+// Health handles GET /api/v1/metrics/providers/health.
+func (h *ProviderMetricsHandler) Health(c *fiber.Ctx) error {
+	providerPolicy := []services.ProviderHealthSnapshot{}
+	if h.healthSnapshotter != nil {
+		providerPolicy = h.healthSnapshotter.SnapshotProviderHealth()
+	}
+
+	return c.JSON(fiber.Map{
+		"captured_at":       time.Now().UTC().Format(time.RFC3339),
+		"provider_policy":   providerPolicy,
+		"degraded_mode":     observability.SnapshotDegradedModeMetrics(),
+		"timeout_by_reason": observability.SnapshotTimeoutReasonMetrics(),
 	})
 }

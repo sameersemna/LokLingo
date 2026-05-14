@@ -44,6 +44,17 @@ type chunkCheckpointCounters struct {
 
 var chunkCheckpointMetrics chunkCheckpointCounters
 
+type degradedModeCounters struct {
+	total                atomic.Int64
+	renderFallbacks      atomic.Int64
+	ocrLowConfidence     atomic.Int64
+	adaptiveReduceEvents atomic.Int64
+	adaptiveBoostEvents  atomic.Int64
+	adaptiveClampEvents  atomic.Int64
+}
+
+var degradedModeMetrics degradedModeCounters
+
 // providerMetricsMap stores *providerCounters keyed by provider name.
 var providerMetricsMap sync.Map
 
@@ -106,6 +117,30 @@ func IncChunkCheckpointClear() { chunkCheckpointMetrics.clears.Add(1) }
 // IncChunkCheckpointClearFailure records one failed terminal checkpoint cleanup.
 func IncChunkCheckpointClearFailure() { chunkCheckpointMetrics.clearFailures.Add(1) }
 
+// IncDegradedMode records a graceful degradation event in processing paths.
+func IncDegradedMode() { degradedModeMetrics.total.Add(1) }
+
+// IncRenderFallback records rendering fallback activations.
+func IncRenderFallback() {
+	degradedModeMetrics.renderFallbacks.Add(1)
+	degradedModeMetrics.total.Add(1)
+}
+
+// IncOCRLowConfidence records low-confidence OCR continuation events.
+func IncOCRLowConfidence() {
+	degradedModeMetrics.ocrLowConfidence.Add(1)
+	degradedModeMetrics.total.Add(1)
+}
+
+// IncAdaptiveConcurrencyReduce records queue-pressure concurrency reductions.
+func IncAdaptiveConcurrencyReduce() { degradedModeMetrics.adaptiveReduceEvents.Add(1) }
+
+// IncAdaptiveConcurrencyBoost records low-pressure concurrency boosts.
+func IncAdaptiveConcurrencyBoost() { degradedModeMetrics.adaptiveBoostEvents.Add(1) }
+
+// IncAdaptiveConcurrencyClamp records severe-overload clamped concurrency events.
+func IncAdaptiveConcurrencyClamp() { degradedModeMetrics.adaptiveClampEvents.Add(1) }
+
 // RecordProviderLatency records a successful call latency in milliseconds.
 func RecordProviderLatency(provider string, ms int64) {
 	c := getProviderCounters(provider)
@@ -127,14 +162,14 @@ func RecordProviderLatency(provider string, ms int64) {
 
 // ProviderSnapshot captures per-provider counters at a point in time.
 type ProviderSnapshot struct {
-	Provider       string  `json:"provider"`
-	SuccessTotal   int64   `json:"success_total"`
-	FailureTotal   int64   `json:"failure_total"`
-	RetryTotal     int64   `json:"retry_total"`
-	ExhaustedTotal int64   `json:"exhausted_total"`
-	FailoverTotal  int64   `json:"failover_total"`
-	TimeoutTotal   int64   `json:"timeout_total"`
-	AvgLatencyMS   float64 `json:"avg_latency_ms"`
+	Provider       string                 `json:"provider"`
+	SuccessTotal   int64                  `json:"success_total"`
+	FailureTotal   int64                  `json:"failure_total"`
+	RetryTotal     int64                  `json:"retry_total"`
+	ExhaustedTotal int64                  `json:"exhausted_total"`
+	FailoverTotal  int64                  `json:"failover_total"`
+	TimeoutTotal   int64                  `json:"timeout_total"`
+	AvgLatencyMS   float64                `json:"avg_latency_ms"`
 	LatencyBuckets ProviderLatencyBuckets `json:"latency_buckets"`
 }
 
@@ -166,6 +201,16 @@ type ChunkCheckpointSnapshot struct {
 	PersistFailureTotal int64 `json:"persist_failure_total"`
 	ClearTotal          int64 `json:"clear_total"`
 	ClearFailureTotal   int64 `json:"clear_failure_total"`
+}
+
+// DegradedModeSnapshot captures graceful degradation and adaptive concurrency events.
+type DegradedModeSnapshot struct {
+	TotalEvents            int64 `json:"total_events"`
+	RenderFallbackEvents   int64 `json:"render_fallback_events"`
+	OCRLowConfidenceEvents int64 `json:"ocr_low_confidence_events"`
+	AdaptiveReduceEvents   int64 `json:"adaptive_reduce_events"`
+	AdaptiveBoostEvents    int64 `json:"adaptive_boost_events"`
+	AdaptiveClampEvents    int64 `json:"adaptive_clamp_events"`
 }
 
 // SnapshotProviderMetrics returns a snapshot for every provider that has been
@@ -234,5 +279,17 @@ func SnapshotChunkCheckpointMetrics() ChunkCheckpointSnapshot {
 		PersistFailureTotal: chunkCheckpointMetrics.persistFailures.Load(),
 		ClearTotal:          chunkCheckpointMetrics.clears.Load(),
 		ClearFailureTotal:   chunkCheckpointMetrics.clearFailures.Load(),
+	}
+}
+
+// SnapshotDegradedModeMetrics returns graceful degradation and adaptive events.
+func SnapshotDegradedModeMetrics() DegradedModeSnapshot {
+	return DegradedModeSnapshot{
+		TotalEvents:            degradedModeMetrics.total.Load(),
+		RenderFallbackEvents:   degradedModeMetrics.renderFallbacks.Load(),
+		OCRLowConfidenceEvents: degradedModeMetrics.ocrLowConfidence.Load(),
+		AdaptiveReduceEvents:   degradedModeMetrics.adaptiveReduceEvents.Load(),
+		AdaptiveBoostEvents:    degradedModeMetrics.adaptiveBoostEvents.Load(),
+		AdaptiveClampEvents:    degradedModeMetrics.adaptiveClampEvents.Load(),
 	}
 }

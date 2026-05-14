@@ -158,10 +158,12 @@ func IncExportCompletedTotal() { exportCompletedTotal.Add(1) }
 func IncJobFailedTotal()       { jobFailedTotal.Add(1) }
 func IncJobCompletedTotal()    { jobCompletedTotal.Add(1) }
 
-func RecordOCRLatency(ms int64)         { recordLatency(&ocrLatencyTotalMS, &ocrLatencyCount, ms) }
-func RecordTranslationLatency(ms int64) { recordLatency(&translationLatencyTotalMS, &translationLatencyCount, ms) }
-func RecordRenderLatency(ms int64)      { recordLatency(&renderLatencyTotalMS, &renderLatencyCount, ms) }
-func RecordQueueWaitLatency(ms int64)   { recordLatency(&queueWaitTotalMS, &queueWaitCount, ms) }
+func RecordOCRLatency(ms int64) { recordLatency(&ocrLatencyTotalMS, &ocrLatencyCount, ms) }
+func RecordTranslationLatency(ms int64) {
+	recordLatency(&translationLatencyTotalMS, &translationLatencyCount, ms)
+}
+func RecordRenderLatency(ms int64)    { recordLatency(&renderLatencyTotalMS, &renderLatencyCount, ms) }
+func RecordQueueWaitLatency(ms int64) { recordLatency(&queueWaitTotalMS, &queueWaitCount, ms) }
 
 func buildLatencyStats(total, count int64) LatencyStats {
 	avg := 0.0

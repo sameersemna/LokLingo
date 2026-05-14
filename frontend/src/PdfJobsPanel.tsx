@@ -263,6 +263,14 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
       {status === 'failed' && live?.error && (
         <div className="pdf-job-error">{getFriendlyFailureMessage(live.error)}</div>
       )}
+      {Array.isArray(live?.warnings) && live.warnings.length > 0 && (
+        <div className="pdf-job-warning" role="status" aria-live="polite">
+          {live.warnings[0]}
+          {typeof live.ocr_confidence === 'number' && live.ocr_confidence > 0 && (
+            <span>{` (OCR confidence ${Math.round(live.ocr_confidence * 100)}%)`}</span>
+          )}
+        </div>
+      )}
     </li>
   )
 }

@@ -62,6 +62,7 @@ payload = json.loads(sys.argv[1])
 want = {
     "LokLingo Reliability Overview",
     "LokLingo Incident Timeline Companion",
+    "LokLingo Degraded Operations Guard",
 }
 found = {item.get("title") for item in payload}
 missing = sorted(want - found)

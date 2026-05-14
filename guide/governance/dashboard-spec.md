@@ -34,6 +34,7 @@ Operational Scope: Internal reliability observability for queueing, provider beh
 - Every panel must show time window, aggregation method, and last update timestamp.
 - Every reliability-critical panel must include direct links to runbook triage steps.
 - Severity colors must align with the severity matrix definitions.
+- Degraded-operations dashboards must include provider policy score drift and adaptive clamp-share visibility.
 
 ## Required Operational Views
 
@@ -41,6 +42,7 @@ Operational Scope: Internal reliability observability for queueing, provider beh
 - Provider health view: success/failure rates, retry/failover rates, timeout rate, and latency distribution buckets.
 - Queue health view: queue depth, processing concurrency, stuck jobs, retry backlog, dead-letter volume.
 - Export reliability view: export success rate and terminal failure trend.
+- Degraded-operations view: degraded event totals, render/OCR degradation trends, adaptive clamp share, and provider policy score drift.
 
 ## Alert Routing
 
@@ -61,3 +63,4 @@ Operational Scope: Internal reliability observability for queueing, provider beh
 
 - Ready-to-import Grafana dashboard JSON: `guide/governance/dashboards/loklingo-reliability-dashboard.json`
 - Incident timeline companion dashboard JSON: `guide/governance/dashboards/loklingo-incident-timeline-dashboard.json`
+- Degraded-operations guard dashboard JSON: `guide/governance/dashboards/loklingo-degraded-operations-dashboard.json`

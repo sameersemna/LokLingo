@@ -77,19 +77,22 @@ func NewOCRClient(ocrBaseURL, sharedStorageDir string) OCRClient {
 
 // ocrPDFResponse mirrors the relevant subset of OCRPdfResponse.
 type ocrPDFResponse struct {
-	Text  string          `json:"text"`
-	Pages []ocrPageResult `json:"pages"`
+	Text       string          `json:"text"`
+	Pages      []ocrPageResult `json:"pages"`
+	Confidence float64         `json:"confidence,omitempty"`
 }
 
 // OCRTextBlock mirrors TextBlock from the OCR service.
 type OCRTextBlock struct {
-	Text string    `json:"text"`
-	Bbox []float64 `json:"bbox"` // [x1, y1, x2, y2]
+	Text       string    `json:"text"`
+	Bbox       []float64 `json:"bbox"` // [x1, y1, x2, y2]
+	Confidence float64   `json:"confidence,omitempty"`
 }
 
 type ocrPageResult struct {
-	Text   string         `json:"text"`
-	Blocks []OCRTextBlock `json:"blocks"`
+	Text       string         `json:"text"`
+	Blocks     []OCRTextBlock `json:"blocks"`
+	Confidence float64        `json:"confidence,omitempty"`
 }
 
 type ocrImageResponse struct {
@@ -197,6 +200,46 @@ func (c *ocrClient) ExtractPages(filePath, lang string) ([]string, error) {
 		return nil, fmt.Errorf("ocr: service returned empty response")
 	}
 	return []string{resp.Text}, nil
+}
+
+// ExtractPagesWithConfidence returns per-page OCR text and an aggregate
+// confidence score when available. It is intentionally an extra method (not
+// part of OCRClient) so existing callers can type-assert support gradually.
+func (c *ocrClient) ExtractPagesWithConfidence(filePath, lang string) ([]string, float64, error) {
+	resp, err := c.fetchOCRResponse(filePath, lang)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(resp.Pages) > 0 {
+		pages := make([]string, len(resp.Pages))
+		confidenceTotal := 0.0
+		confidenceCount := 0
+		for i, p := range resp.Pages {
+			pages[i] = p.Text
+			if p.Confidence > 0 {
+				confidenceTotal += p.Confidence
+				confidenceCount++
+				continue
+			}
+			for _, b := range p.Blocks {
+				if b.Confidence > 0 {
+					confidenceTotal += b.Confidence
+					confidenceCount++
+				}
+			}
+		}
+		avg := 0.0
+		if confidenceCount > 0 {
+			avg = confidenceTotal / float64(confidenceCount)
+		} else if resp.Confidence > 0 {
+			avg = resp.Confidence
+		}
+		return pages, avg, nil
+	}
+	if resp.Text == "" {
+		return nil, 0, fmt.Errorf("ocr: service returned empty response")
+	}
+	return []string{resp.Text}, resp.Confidence, nil
 }
 
 func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, error) {
