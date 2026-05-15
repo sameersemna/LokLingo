@@ -246,6 +246,37 @@ Alerting suggestions (starting points):
 * Ratio alert: `persist_failure_rate` >= `VITE_CHECKPOINT_PERSIST_FAILURE_WARN` for two consecutive evaluation windows.
 * Coverage alert: `hit_rate` below `VITE_CHECKPOINT_HIT_CRITICAL` for two consecutive evaluation windows.
 * Correlation alert: checkpoint failure deltas rising together with provider timeout deltas (same window) to prioritize infrastructure triage.
+* Fallback-budget exhaustion (OCR chain):
+    * warning when `increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) > 0 and increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) < 3`
+    * critical when `increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) >= 3`
+    * use `for: 5m` to reduce false positives from one-off bursts
+
+Prometheus rule snippet (drop-in starting point):
+
+```yaml
+groups:
+    - name: loklingo-ocr-fallback-budget
+        rules:
+            - alert: LokLingoOCRFallbackBudgetExhausted
+                expr: increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) > 0 and increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) < 3
+                for: 5m
+                labels:
+                    severity: warning
+                    service: loklingo-backend
+                annotations:
+                    summary: OCR provider fallback budget exhausted
+                    description: At least one OCR request exhausted fallback budget in the last 10m.
+
+            - alert: LokLingoOCRFallbackBudgetExhausted
+                expr: increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) >= 3
+                for: 5m
+                labels:
+                    severity: critical
+                    service: loklingo-backend
+                annotations:
+                    summary: OCR provider fallback budget repeatedly exhausted
+                    description: Repeated fallback-budget exhaustion indicates OCR provider-chain instability.
+```
 
 Timeout-storm guardrails (smoke + alert alignment):
 
@@ -279,6 +310,10 @@ Alert-to-response mapping (degraded/adaptive path):
     * First checks: inspect retry backlog, dead-letter volume, and provider timeout reason metrics in the same window.
     * Immediate action: determine whether backlog is provider-driven or queue-capacity driven before replaying or increasing concurrency.
     * Escalation: critical backlog should follow standard incident escalation if accompanied by clamp or timeout-storm alerts.
+* `LokLingoOCRFallbackBudgetExhausted`
+    * First checks: measure `increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m])` and compare with provider timeout/failure deltas.
+    * Immediate action: verify `OCR_PROVIDER_TIMEOUT_SECONDS` and `OCR_MAX_FALLBACKS` are still aligned with current provider latency profile.
+    * Escalation: page OCR/service owner at critical threshold; treat repeated exhaustion as degraded OCR availability.
 
 Alert-to-command mapping (reliability-recovery script):
 
@@ -325,6 +360,10 @@ Alert-to-command mapping (reliability-recovery script):
     * `bash guide/ops/reliability-recovery.sh queue-status`
     * `bash guide/ops/reliability-recovery.sh list-dead 100`
     * `bash guide/ops/reliability-recovery.sh replay-dead-all 50`
+* `LokLingoOCRFallbackBudgetExhausted`
+    * `bash guide/ops/reliability-recovery.sh provider-history`
+    * `bash guide/ops/reliability-recovery.sh provider-policy-snapshot`
+    * `bash guide/ops/reliability-recovery.sh queue-status`
 
 After capturing an incident JSON packet, generate a compact handoff brief:
 
@@ -334,8 +373,8 @@ Severity response matrix (command bundles):
 
 | Severity | Typical alerts | Ordered command bundle |
 | --- | --- | --- |
-| `warning` | `LokLingoQueueDepthHigh`, `LokLingoChunkSuccessDrop`, `LokLingoExportSuccessDrop`, `LokLingoProviderTimeoutSpike`, `LokLingoAdaptiveClampFrequent`, `LokLingoDegradedModeSpike`, `LokLingoRenderFallbackSpike` | 1. `bash guide/ops/reliability-recovery.sh queue-status` 2. `bash guide/ops/reliability-recovery.sh provider-policy-snapshot` 3. `bash guide/ops/reliability-recovery.sh provider-history` |
-| `critical` | `LokLingoQueueDepthCritical`, `LokLingoDeadLetterGrowth`, `LokLingoRetryBacklogCritical`, `LokLingoTimeoutStormDetected` | 1. `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>` 2. `bash guide/ops/reliability-recovery.sh validate-incident-snapshot <incident-snapshot.json>` 3. `bash guide/ops/reliability-recovery.sh generate-incident-brief <incident-snapshot.json> <brief-output.md>` |
+| `warning` | `LokLingoQueueDepthHigh`, `LokLingoChunkSuccessDrop`, `LokLingoExportSuccessDrop`, `LokLingoProviderTimeoutSpike`, `LokLingoAdaptiveClampFrequent`, `LokLingoDegradedModeSpike`, `LokLingoRenderFallbackSpike`, `LokLingoOCRFallbackBudgetExhausted` | 1. `bash guide/ops/reliability-recovery.sh queue-status` 2. `bash guide/ops/reliability-recovery.sh provider-policy-snapshot` 3. `bash guide/ops/reliability-recovery.sh provider-history` |
+| `critical` | `LokLingoQueueDepthCritical`, `LokLingoDeadLetterGrowth`, `LokLingoRetryBacklogCritical`, `LokLingoTimeoutStormDetected`, `LokLingoOCRFallbackBudgetExhausted` | 1. `bash guide/ops/reliability-recovery.sh export-incident-snapshot <correlation-id>` 2. `bash guide/ops/reliability-recovery.sh validate-incident-snapshot <incident-snapshot.json>` 3. `bash guide/ops/reliability-recovery.sh generate-incident-brief <incident-snapshot.json> <brief-output.md>` |
 | `critical` with replay required | `LokLingoDeadLetterGrowth`, `LokLingoRetryBacklogCritical` after provider-driven triage is ruled out | 1. `bash guide/ops/reliability-recovery.sh list-dead 100` 2. `bash guide/ops/reliability-recovery.sh replay-dead-all 50` 3. Re-run `bash guide/ops/reliability-recovery.sh queue-status` |
 
 ### Dashboard panel-to-alert-owner map (degraded operations)
@@ -346,6 +385,7 @@ Severity response matrix (command bundles):
 | `Degradation Signals (10m)` | `LokLingoRenderFallbackSpike`, `LokLingoDegradedModeSpike` | OCR Service Owner + Rendering Owner | Reliability Lead (Platform) |
 | `Adaptive Concurrency Decisions (10m)` | `LokLingoAdaptiveClampFrequent` | Platform/SRE Owner | Backend On-Call Owner |
 | `Timeout Storm Guard (10m)` | `LokLingoTimeoutStormDetected` | Translation Service Owner | Platform/SRE Owner |
+| `OCR Fallback Budget Exhaustion (10m)` | `LokLingoOCRFallbackBudgetExhausted` | OCR Service Owner | Reliability Lead (Platform) |
 | `Queue Pressure` | `LokLingoQueueDepthHigh`, `LokLingoQueueDepthCritical`, `LokLingoRetryBacklogHigh`, `LokLingoRetryBacklogCritical` | Platform/SRE Owner | Backend On-Call Owner |
 | `Provider Policy Score` | `LokLingoProviderTimeoutSpike`, `LokLingoTimeoutStormDetected` | Translation Service Owner | Reliability Lead (Platform) |
 | `Clamp Share (15m)` | `LokLingoAdaptiveClampFrequent` | Platform/SRE Owner | Reliability Lead (Platform) |

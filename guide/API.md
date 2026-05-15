@@ -650,6 +650,33 @@ GET /api/v1/metrics/reliability
 }
 ```
 
+**Alert-Ready Threshold Block (OCR provider fallback budget):**
+
+Use this block when wiring reliability alerts from OCR provider-chain telemetry.
+
+```json
+{
+  "metric": "provider_fallback_budget_exhausted_total",
+  "source_endpoint": "GET /api/v1/metrics/ocr?window=24h",
+  "json_path": "reliability.ocr.provider_fallback_budget_exhausted_total",
+  "prometheus_metric": "loklingo_ocr_provider_fallback_budget_exhausted_total",
+  "window": "10m",
+  "warn_delta_gt": 0,
+  "critical_delta_gte": 3,
+  "note": "Any increase means at least one OCR request exhausted fallback budget. Escalate quickly if repeated in the same short window."
+}
+```
+
+PromQL examples:
+
+```promql
+# Warning: any fallback-budget exhaustion observed in the last 10 minutes.
+increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) > 0
+
+# Critical: repeated exhaustion in the same 10-minute window.
+increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) >= 3
+```
+
 ---
 
 ### Prometheus Metrics

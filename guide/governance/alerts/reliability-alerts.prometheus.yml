@@ -131,3 +131,23 @@ groups:
         annotations:
           summary: LokLingo timeout storm detected
           description: Timeout and retry deltas breached storm thresholds over 10 minutes.
+
+      - alert: LokLingoOCRFallbackBudgetExhausted
+        expr: increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) > 0 and increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) < 3
+        for: 5m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: OCR provider fallback budget exhausted
+          description: OCR fallback budget was exhausted at least once in the last 10 minutes.
+
+      - alert: LokLingoOCRFallbackBudgetExhausted
+        expr: increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) >= 3
+        for: 5m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: OCR provider fallback budget repeatedly exhausted
+          description: OCR fallback budget exhaustion occurred three or more times in the last 10 minutes.
