@@ -397,6 +397,7 @@ jobs:
         if: failure()
         run: |
           expected=(
+            "guide/governance/reviews/test-logs/test_fallback_signal_parser.log"
             "guide/governance/reviews/test-logs/test_generate_weekly_operator_onepager.log"
             "guide/governance/reviews/test-logs/test_validate_reliability_artifacts.log"
             "guide/governance/reviews/test-logs/test_generate_incident_escalation_summary.log"
