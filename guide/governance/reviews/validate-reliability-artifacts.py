@@ -28,18 +28,22 @@ def has_required_onepager_sections(path: Path) -> bool:
     return all(marker in text for marker in required_markers)
 
 
-def extract_smoke_fallback_budget_total(path: Path) -> str | None:
+def extract_smoke_fallback_budget_total(path: Path) -> tuple[str | None, bool]:
     if not is_present(path):
-        return None
+        return None, False
     text = path.read_text(encoding="utf-8")
     for line in text.splitlines():
         if not line.startswith("| OCR Fallback Budget Exhausted Total |"):
             continue
         cols = [col.strip() for col in line.strip("|").split("|")]
         if len(cols) < 3:
-            return None
-        return cols[1]
-    return None
+            return None, True
+        value = cols[1]
+        guidance = cols[2]
+        if value == "" or guidance == "":
+            return None, True
+        return value, False
+    return None, False
 
 
 def onepager_has_fallback_signal(path: Path, expected_total: str) -> bool:
@@ -189,7 +193,14 @@ def main() -> int:
         )
         return 1
 
-    fallback_total = extract_smoke_fallback_budget_total(smoke_summary)
+    fallback_total, fallback_row_malformed = extract_smoke_fallback_budget_total(smoke_summary)
+    if fallback_row_malformed:
+        print(
+            "weekly smoke summary has malformed OCR fallback-budget signal row",
+            file=sys.stderr,
+        )
+        return 1
+
     if fallback_total is not None and fallback_total.lower() != "n/a":
         if not onepager_has_fallback_signal(operator_onepager, fallback_total):
             print(

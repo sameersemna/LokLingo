@@ -335,6 +335,115 @@ class ValidateReliabilityArtifactsTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_rejects_malformed_smoke_fallback_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            smoke = tmp / "smoke.json"
+            snapshot = tmp / "snapshot.json"
+            summary = tmp / "summary.md"
+            index = tmp / "index.md"
+            trend = tmp / "trend.md"
+            escalation = tmp / "escalation.md"
+            onepager = tmp / "onepager.md"
+
+            _write(smoke, json.dumps({"ok": True}))
+            _write(snapshot, json.dumps({"ok": True}))
+            _write(
+                summary,
+                "\n".join(
+                    [
+                        "# Reliability Smoke Ops Summary",
+                        "",
+                        "## Degraded Signal Threshold Reference",
+                        "",
+                        "| Signal | Current Value | Threshold Guidance |",
+                        "| --- | ---: | --- |",
+                        "| OCR Fallback Budget Exhausted Total | 2 |",
+                    ]
+                )
+                + "\n",
+            )
+            _write(index, "# Index\n")
+            _write(
+                trend,
+                "\n".join(
+                    [
+                        "# Provider Policy Trend",
+                        "",
+                        "## Severity Totals",
+                        "",
+                        "- Critical: 0",
+                        "- Warning: 1",
+                        "- Stable: 0",
+                        "- Improving: 0",
+                    ]
+                )
+                + "\n",
+            )
+            _write(
+                onepager,
+                "\n".join(
+                    [
+                        "# Weekly Reliability Operator One-Pager",
+                        "",
+                        "## Operator Triage Snapshot",
+                        "",
+                        "- Severity Hint: warning",
+                        "- Recommended First Command: bash guide/ops/reliability-recovery.sh queue-status",
+                        "- Correlation ID: corr-x",
+                        "",
+                        "## Operator Handoff Commands",
+                    ]
+                )
+                + "\n",
+            )
+            _write(
+                escalation,
+                "\n".join(
+                    [
+                        "# Weekly Incident Escalation Summary",
+                        "",
+                        f"- Generated At: {datetime.now(timezone.utc).replace(microsecond=0).isoformat()}",
+                        "- Critical Regression Count: 0",
+                        "",
+                        "## Triage Snapshot",
+                        "",
+                        "- Severity Hint: warning",
+                        "- Recommended First Command: bash guide/ops/reliability-recovery.sh queue-status",
+                        "- Correlation ID: corr-x",
+                        "",
+                        "## Critical Providers",
+                        "",
+                        "- none",
+                        "",
+                        "## Immediate Commands",
+                        "",
+                        "- bash guide/ops/reliability-recovery.sh queue-status",
+                    ]
+                )
+                + "\n",
+            )
+
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPT),
+                    str(smoke),
+                    str(snapshot),
+                    str(summary),
+                    str(index),
+                    str(trend),
+                    str(escalation),
+                    str(onepager),
+                ],
+                capture_output=True,
+                text=True,
+                cwd=ROOT,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("malformed OCR fallback-budget signal row", result.stderr)
+
     def test_rejects_critical_trend_without_escalation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
