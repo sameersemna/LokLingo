@@ -151,6 +151,7 @@ Fallback-row parser contract:
 	- `generate-weekly-operator-onepager.py`
 	- `validate-reliability-artifacts.py`
 - Update parser rules and `test_fallback_signal_parser.py` together to avoid drift.
+- The reliability automation workflow runs `python3 guide/governance/reviews/test_fallback_signal_parser.py` directly before the aggregated weekly review suite so parser-only failures are easier to attribute.
 
 The mandatory artifact validator now requires the weekly operator one-pager to include
 the triage snapshot markers and operator handoff commands section, preventing structurally incomplete handoff artifacts from passing CI.
