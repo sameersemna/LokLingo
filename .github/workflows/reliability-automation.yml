@@ -383,6 +383,8 @@ jobs:
         run: python3 guide/ops/test_validate_incident_snapshot.py
       - name: Run smoke lineage regression harness
         run: python3 guide/ops/test_reliability_smoke_lineage.py
+      - name: Run fallback signal parser regression tests
+        run: python3 guide/governance/reviews/test_fallback_signal_parser.py
       - name: Run weekly review tooling regression tests
         run: |
           chmod +x guide/governance/reviews/run-weekly-review-tests.sh

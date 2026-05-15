@@ -78,6 +78,18 @@ class FallbackSignalParserTests(unittest.TestCase):
         self.assertIsNotNone(parsed.error)
         self.assertIsNone(build_onepager_signal_line(parsed))
 
+    def test_detects_malformed_row_with_empty_guidance_after_extra_separators(self) -> None:
+        lines = [
+            "| OCR Fallback Budget Exhausted Total | 2 |  ||",
+        ]
+
+        parsed = parse_fallback_budget_signal(lines)
+        self.assertTrue(parsed.found)
+        self.assertTrue(parsed.malformed)
+        self.assertIsNotNone(parsed.error)
+        self.assertIn("missing value or guidance", parsed.error)
+        self.assertIsNone(build_onepager_signal_line(parsed))
+
 
 if __name__ == "__main__":
     unittest.main()
