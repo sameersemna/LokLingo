@@ -1,0 +1,24 @@
+Checking backend health: http://localhost:28080/health
+Checking OCR health: http://localhost:8000/health
+Checking frontend translate path: http://localhost:3000/translate
+  translate latency: 0s
+Checking PDF job endpoint: POST http://localhost:28080/api/v1/jobs/pdf
+Checking OCR /api/v1/ocr/pdf endpoint: POST http://localhost:8000/api/v1/ocr/pdf
+  OCR /api/v1/ocr/pdf: 3 page(s) processed OK
+Checking OCR container RSS ceiling (<600 MB per-page …)
+  bench_pdf_memory.py skipped or no PDF available — RSS check skipped
+
+--- PDF job timing: small (2 page(s)) ---
+  submitted job_id=cc2df2ec-6ede-4283-b46e-0821c79a52d4
+  status=completed  total_time=0s
+
+--- PDF job timing: medium (15 page(s)) ---
+  submitted job_id=5ff10867-2abd-422c-b6d8-f2d5d2bc3835
+  status=completed  total_time=1s
+
+--- PDF job timing: large (50 page(s)) ---
+  submitted job_id=5e61090f-0d98-437e-9dd9-c7317b21dea1
+  status=completed  total_time=2s
+
+Smoke test passed
+INTERNAL_TOKEN not set; skipping internal reliability metrics validation

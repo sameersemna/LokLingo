@@ -1,0 +1,22 @@
+Detected LAN IP: 192.168.178.55
+
+Hostname resolution check for promaxgb10-6116:
+[OK] Hostname resolves:
+192.168.178.55  promaxgb10-6116 promaxgb10-6116.local
+192.168.178.55  promaxgb10-6116 promaxgb10-6116.local
+192.168.178.55  promaxgb10-6116 promaxgb10-6116.local
+
+[OK] Frontend reachable: http://promaxgb10-6116:3000
+[OK] Backend health healthy: http://promaxgb10-6116:28080/health
+[OK] OCR health healthy: http://promaxgb10-6116:8000/health
+
+[OK] Frontend (LAN IP) reachable: http://192.168.178.55:3000
+[OK] Backend health (LAN IP) healthy: http://192.168.178.55:28080/health
+[OK] OCR health (LAN IP) healthy: http://192.168.178.55:8000/health
+
+Ready-to-open LAN URLs:
+  http://promaxgb10-6116:3000
+  http://promaxgb10-6116:28080
+  http://promaxgb10-6116:8000
+
+LAN access check PASSED
