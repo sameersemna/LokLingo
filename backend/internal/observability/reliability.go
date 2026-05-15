@@ -25,19 +25,20 @@ type LiteLLMMetrics struct {
 }
 
 type OCRMetrics struct {
-	RetryAttemptsTotal         int64                      `json:"retry_attempts_total"`
-	RetryAfterHonoredTotal     int64                      `json:"retry_after_honored_total"`
-	RetryCancelledTotal        int64                      `json:"retry_cancelled_total"`
-	RetryExhaustedTotal        int64                      `json:"retry_exhausted_total"`
-	ResponseRejectedTotal      int64                      `json:"response_rejected_total"`
-	ResponseRejectedBodyTotal  int64                      `json:"response_rejected_body_total"`
-	ResponseRejectedJSONTotal  int64                      `json:"response_rejected_json_total"`
-	ResponseRejectedShapeTotal int64                      `json:"response_rejected_shape_total"`
-	ProviderUsage              []OCRProviderUsageSnapshot `json:"provider_usage"`
-	ProviderLatencyMS          OCRAggregateMetric         `json:"provider_latency_ms"`
-	ProviderConfidence         OCRAggregateMetric         `json:"provider_confidence"`
-	ProviderRetriesTotal       int64                      `json:"provider_retries_total"`
-	ProviderFallbackCount      int64                      `json:"provider_fallback_count"`
+	RetryAttemptsTotal                   int64                      `json:"retry_attempts_total"`
+	RetryAfterHonoredTotal               int64                      `json:"retry_after_honored_total"`
+	RetryCancelledTotal                  int64                      `json:"retry_cancelled_total"`
+	RetryExhaustedTotal                  int64                      `json:"retry_exhausted_total"`
+	ResponseRejectedTotal                int64                      `json:"response_rejected_total"`
+	ResponseRejectedBodyTotal            int64                      `json:"response_rejected_body_total"`
+	ResponseRejectedJSONTotal            int64                      `json:"response_rejected_json_total"`
+	ResponseRejectedShapeTotal           int64                      `json:"response_rejected_shape_total"`
+	ProviderUsage                        []OCRProviderUsageSnapshot `json:"provider_usage"`
+	ProviderLatencyMS                    OCRAggregateMetric         `json:"provider_latency_ms"`
+	ProviderConfidence                   OCRAggregateMetric         `json:"provider_confidence"`
+	ProviderRetriesTotal                 int64                      `json:"provider_retries_total"`
+	ProviderFallbackCount                int64                      `json:"provider_fallback_count"`
+	ProviderFallbackBudgetExhaustedTotal int64                      `json:"provider_fallback_budget_exhausted_total"`
 }
 
 type OCRProviderUsageSnapshot struct {
@@ -76,13 +77,14 @@ var (
 	ocrResponseRejectedJSON  atomic.Int64
 	ocrResponseRejectedShape atomic.Int64
 
-	ocrProviderLatencyTotalMS  atomic.Int64
-	ocrProviderLatencyCount    atomic.Int64
-	ocrProviderConfidenceMilli atomic.Int64
-	ocrProviderConfidenceCount atomic.Int64
-	ocrProviderRetriesTotal    atomic.Int64
-	ocrProviderFallbackTotal   atomic.Int64
-	ocrProviderUsageMap        sync.Map
+	ocrProviderLatencyTotalMS               atomic.Int64
+	ocrProviderLatencyCount                 atomic.Int64
+	ocrProviderConfidenceMilli              atomic.Int64
+	ocrProviderConfidenceCount              atomic.Int64
+	ocrProviderRetriesTotal                 atomic.Int64
+	ocrProviderFallbackTotal                atomic.Int64
+	ocrProviderFallbackBudgetExhaustedTotal atomic.Int64
+	ocrProviderUsageMap                     sync.Map
 )
 
 func IncLiteLLMRetryAttempt()     { liteLLMRetryAttempts.Add(1) }
@@ -159,6 +161,10 @@ func IncOCRProviderFallback() {
 	ocrProviderFallbackTotal.Add(1)
 }
 
+func IncOCRProviderFallbackBudgetExhausted() {
+	ocrProviderFallbackBudgetExhaustedTotal.Add(1)
+}
+
 func snapshotOCRProviderUsage() []OCRProviderUsageSnapshot {
 	out := make([]OCRProviderUsageSnapshot, 0, 3)
 	ocrProviderUsageMap.Range(func(k, v any) bool {
@@ -193,19 +199,20 @@ func SnapshotReliability() ReliabilitySnapshot {
 			ResponseRejectedShapeTotal: liteLLMResponseRejectedShape.Load(),
 		},
 		OCR: OCRMetrics{
-			RetryAttemptsTotal:         ocrRetryAttempts.Load(),
-			RetryAfterHonoredTotal:     ocrRetryAfterHonored.Load(),
-			RetryCancelledTotal:        ocrRetryCancelled.Load(),
-			RetryExhaustedTotal:        ocrRetryExhausted.Load(),
-			ResponseRejectedTotal:      ocrResponseRejected.Load(),
-			ResponseRejectedBodyTotal:  ocrResponseRejectedBody.Load(),
-			ResponseRejectedJSONTotal:  ocrResponseRejectedJSON.Load(),
-			ResponseRejectedShapeTotal: ocrResponseRejectedShape.Load(),
-			ProviderUsage:              snapshotOCRProviderUsage(),
-			ProviderLatencyMS:          buildOCRAggregate(float64(ocrProviderLatencyTotalMS.Load()), ocrProviderLatencyCount.Load()),
-			ProviderConfidence:         buildOCRAggregate(float64(ocrProviderConfidenceMilli.Load())/1000.0, ocrProviderConfidenceCount.Load()),
-			ProviderRetriesTotal:       ocrProviderRetriesTotal.Load(),
-			ProviderFallbackCount:      ocrProviderFallbackTotal.Load(),
+			RetryAttemptsTotal:                   ocrRetryAttempts.Load(),
+			RetryAfterHonoredTotal:               ocrRetryAfterHonored.Load(),
+			RetryCancelledTotal:                  ocrRetryCancelled.Load(),
+			RetryExhaustedTotal:                  ocrRetryExhausted.Load(),
+			ResponseRejectedTotal:                ocrResponseRejected.Load(),
+			ResponseRejectedBodyTotal:            ocrResponseRejectedBody.Load(),
+			ResponseRejectedJSONTotal:            ocrResponseRejectedJSON.Load(),
+			ResponseRejectedShapeTotal:           ocrResponseRejectedShape.Load(),
+			ProviderUsage:                        snapshotOCRProviderUsage(),
+			ProviderLatencyMS:                    buildOCRAggregate(float64(ocrProviderLatencyTotalMS.Load()), ocrProviderLatencyCount.Load()),
+			ProviderConfidence:                   buildOCRAggregate(float64(ocrProviderConfidenceMilli.Load())/1000.0, ocrProviderConfidenceCount.Load()),
+			ProviderRetriesTotal:                 ocrProviderRetriesTotal.Load(),
+			ProviderFallbackCount:                ocrProviderFallbackTotal.Load(),
+			ProviderFallbackBudgetExhaustedTotal: ocrProviderFallbackBudgetExhaustedTotal.Load(),
 		},
 	}
 }

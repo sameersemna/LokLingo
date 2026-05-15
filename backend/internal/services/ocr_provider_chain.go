@@ -206,6 +206,7 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
 			} else if idx < len(c.providers)-1 {
+				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
@@ -220,6 +221,7 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
 			} else if idx < len(c.providers)-1 {
+				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
@@ -273,6 +275,7 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
 			} else if idx < len(c.providers)-1 {
+				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
@@ -287,6 +290,7 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
 			} else if idx < len(c.providers)-1 {
+				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}

@@ -28,6 +28,7 @@ func NewPrometheusMetricsHandler(store jobs.Store, healthSnapshotter ...provider
 // Expose handles GET /api/v1/metrics/prometheus.
 func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 	pipeline := observability.SnapshotPipelineMetrics()
+	reliability := observability.SnapshotReliability()
 	providers := observability.SnapshotProviderMetrics()
 	timeouts := observability.SnapshotTimeoutReasonMetrics()
 	checkpoints := observability.SnapshotChunkCheckpointMetrics()
@@ -74,13 +75,15 @@ func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 	b.WriteString("# TYPE loklingo_pipeline_queue_wait_avg_ms gauge\n")
 	fmt.Fprintf(&b, "loklingo_pipeline_queue_wait_avg_ms %g\n", pipeline.QueueWaitMS.AvgMS)
 	b.WriteString("# TYPE loklingo_ocr_provider_latency_avg_ms gauge\n")
-	fmt.Fprintf(&b, "loklingo_ocr_provider_latency_avg_ms %g\n", observability.SnapshotReliability().OCR.ProviderLatencyMS.Avg)
+	fmt.Fprintf(&b, "loklingo_ocr_provider_latency_avg_ms %g\n", reliability.OCR.ProviderLatencyMS.Avg)
 	b.WriteString("# TYPE loklingo_ocr_provider_confidence_avg gauge\n")
-	fmt.Fprintf(&b, "loklingo_ocr_provider_confidence_avg %g\n", observability.SnapshotReliability().OCR.ProviderConfidence.Avg)
+	fmt.Fprintf(&b, "loklingo_ocr_provider_confidence_avg %g\n", reliability.OCR.ProviderConfidence.Avg)
 	b.WriteString("# TYPE loklingo_ocr_provider_retries_total counter\n")
-	fmt.Fprintf(&b, "loklingo_ocr_provider_retries_total %d\n", observability.SnapshotReliability().OCR.ProviderRetriesTotal)
+	fmt.Fprintf(&b, "loklingo_ocr_provider_retries_total %d\n", reliability.OCR.ProviderRetriesTotal)
 	b.WriteString("# TYPE loklingo_ocr_provider_fallback_total counter\n")
-	fmt.Fprintf(&b, "loklingo_ocr_provider_fallback_total %d\n", observability.SnapshotReliability().OCR.ProviderFallbackCount)
+	fmt.Fprintf(&b, "loklingo_ocr_provider_fallback_total %d\n", reliability.OCR.ProviderFallbackCount)
+	b.WriteString("# TYPE loklingo_ocr_provider_fallback_budget_exhausted_total counter\n")
+	fmt.Fprintf(&b, "loklingo_ocr_provider_fallback_budget_exhausted_total %d\n", reliability.OCR.ProviderFallbackBudgetExhaustedTotal)
 
 	b.WriteString("# TYPE loklingo_queue_depth gauge\n")
 	fmt.Fprintf(&b, "loklingo_queue_depth %d\n", queue.QueueDepth)
@@ -122,7 +125,7 @@ func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 	}
 
 	b.WriteString("# TYPE loklingo_ocr_provider_used_total counter\n")
-	for _, p := range observability.SnapshotReliability().OCR.ProviderUsage {
+	for _, p := range reliability.OCR.ProviderUsage {
 		label := sanitizePromLabel(p.Provider)
 		fmt.Fprintf(&b, "loklingo_ocr_provider_used_total{provider=\"%s\"} %d\n", label, p.Count)
 	}

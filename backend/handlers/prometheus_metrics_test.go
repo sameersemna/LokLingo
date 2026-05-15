@@ -23,6 +23,7 @@ func TestPrometheusMetricsExpose_ReturnsTextFormat(t *testing.T) {
 	observability.IncProviderSuccess("litellm")
 	observability.RecordProviderRetry("litellm")
 	observability.RecordProviderTimeout("litellm", "network_timeout")
+	observability.IncOCRProviderFallbackBudgetExhausted()
 
 	store := &mockQueueMetricsStore{stats: jobs.QueueStats{QueueDepth: 7, InflightDepth: 2, RetryBacklog: 1, DeadLetterCount: 0, StuckJobs: 0}}
 	h := NewPrometheusMetricsHandler(store, mockProviderHealthSnapshotter{})
@@ -60,5 +61,8 @@ func TestPrometheusMetricsExpose_ReturnsTextFormat(t *testing.T) {
 	}
 	if !strings.Contains(body, "loklingo_provider_policy_score") {
 		t.Fatal("expected provider policy score metric in output")
+	}
+	if !strings.Contains(body, "loklingo_ocr_provider_fallback_budget_exhausted_total") {
+		t.Fatal("expected fallback budget exhausted metric in output")
 	}
 }

@@ -59,6 +59,7 @@ func TestSnapshotReliability_OCRCountersIncrease(t *testing.T) {
 	IncOCRResponseRejectedBody()
 	IncOCRResponseRejectedJSON()
 	IncOCRResponseRejectedShape()
+	IncOCRProviderFallbackBudgetExhausted()
 
 	after := SnapshotReliability()
 
@@ -85,5 +86,8 @@ func TestSnapshotReliability_OCRCountersIncrease(t *testing.T) {
 	}
 	if got := after.OCR.ResponseRejectedShapeTotal - before.OCR.ResponseRejectedShapeTotal; got != 1 {
 		t.Fatalf("response rejected shape delta = %d, want 1", got)
+	}
+	if got := after.OCR.ProviderFallbackBudgetExhaustedTotal - before.OCR.ProviderFallbackBudgetExhaustedTotal; got != 1 {
+		t.Fatalf("fallback budget exhausted delta = %d, want 1", got)
 	}
 }
