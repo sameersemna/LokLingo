@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -26,7 +27,18 @@ class GenerateWeeklyArtifactSummaryTests(unittest.TestCase):
             onepager = tmp / "onepager.md"
             out = tmp / "artifact-summary.md"
 
-            for path in [smoke, snapshot, summary, index, trend, escalation, onepager]:
+            smoke.write_text("ok\n", encoding="utf-8")
+            snapshot.write_text(
+                json.dumps(
+                    {
+                        "degraded_and_queue_signals": {
+                            "loklingo_ocr_provider_fallback_budget_exhausted_total": 2
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for path in [summary, index, trend, escalation, onepager]:
                 path.write_text("ok\n", encoding="utf-8")
 
             result = subprocess.run(
@@ -54,8 +66,12 @@ class GenerateWeeklyArtifactSummaryTests(unittest.TestCase):
             self.assertIn("| Reliability Smoke Report |", rendered)
             self.assertIn("| Weekly Operator One-Pager |", rendered)
             self.assertIn("| present |", rendered)
+            self.assertIn("## Signal Highlights", rendered)
+            self.assertIn("| OCR Fallback Budget Exhausted Total | 2 | warning |", rendered)
 
-            lines = [line for line in rendered.splitlines() if line.startswith("| ")]
+            rows = [line for line in rendered.splitlines() if line.startswith("| ")]
+            table_break_idx = rows.index("| Signal | Current Total | Highlight Status | Guidance |")
+            lines = rows[:table_break_idx]
             self.assertEqual(len(lines), 9)
             self.assertEqual(lines[0], "| Artifact | Path | Status |")
             self.assertEqual(lines[1], "| --- | --- | --- |")

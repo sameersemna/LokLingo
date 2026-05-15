@@ -42,6 +42,28 @@ Export provider-policy and degraded-signal snapshot:
 bash guide/ops/reliability-recovery.sh provider-policy-snapshot
 ```
 
+## OCR Fallback-Budget Triage Quick Block
+
+Use this when alerting reports fallback-budget exhaustion in OCR provider chains.
+
+- Prometheus metric: `loklingo_ocr_provider_fallback_budget_exhausted_total`
+- Warning threshold (10m delta): `> 0 and < 3`
+- Critical threshold (10m delta): `>= 3`
+
+Quick checks:
+
+```bash
+curl -sS "http://localhost:28080/api/v1/metrics/prometheus" -H "X-Internal-Token: $INTERNAL_TOKEN" | rg "loklingo_ocr_provider_fallback_budget_exhausted_total|loklingo_provider_timeout_total|loklingo_queue_depth|loklingo_queue_retry_backlog"
+bash guide/ops/reliability-recovery.sh provider-history
+bash guide/ops/reliability-recovery.sh provider-policy-snapshot
+```
+
+Immediate actions:
+
+- Confirm `OCR_PROVIDER_TIMEOUT_SECONDS` and `OCR_MAX_FALLBACKS` still match current provider latency behavior.
+- Correlate fallback-budget increases with provider timeout and queue-pressure deltas before changing concurrency.
+- If critical threshold persists across two windows, open Sev 2+ workflow and page OCR owner.
+
 Inspect queue recovery status:
 
 ```bash
