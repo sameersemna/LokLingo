@@ -58,6 +58,28 @@ def extract_index_snapshot(lines: list[str]) -> list[str]:
     return out
 
 
+def extract_fallback_budget_signal(lines: list[str]) -> str | None:
+    for line in lines:
+        if not line.startswith("| OCR Fallback Budget Exhausted Total |"):
+            continue
+        cols = [col.strip() for col in line.strip("|").split("|")]
+        if len(cols) < 3:
+            return None
+        value = cols[1]
+        guidance = cols[2]
+        status = "unknown"
+        try:
+            numeric = float(value)
+            status = "warning" if numeric > 0 else "normal"
+        except ValueError:
+            status = "unknown"
+        return (
+            f"- OCR Fallback Budget Exhausted Signal: total={value}, "
+            f"status={status}, guidance={guidance}"
+        )
+    return None
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(
@@ -77,6 +99,7 @@ def main() -> int:
 
     smoke_snapshot = extract_summary_snapshot(smoke_summary_lines)
     index_snapshot = extract_index_snapshot(artifact_index_lines)
+    fallback_budget_signal = extract_fallback_budget_signal(smoke_summary_lines)
     severity_totals = extract_section(provider_trend_lines, "Severity Totals")
     escalation = extract_section(provider_trend_lines, "Escalation")
     handoff_commands = extract_section(artifact_index_lines, "Operator Handoff Commands")
@@ -95,6 +118,10 @@ def main() -> int:
         lines.extend(index_snapshot)
     else:
         lines.append("- No index snapshot lines were found.")
+    if fallback_budget_signal:
+        lines.append(fallback_budget_signal)
+    else:
+        lines.append("- OCR Fallback Budget Exhausted Signal: unavailable in smoke summary.")
 
     lines.append("")
 

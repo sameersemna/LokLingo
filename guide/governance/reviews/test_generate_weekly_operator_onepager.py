@@ -30,6 +30,12 @@ class GenerateWeeklyOperatorOnepagerTests(unittest.TestCase):
                         "- Generated At: 2026-05-13T00:00:00Z",
                         "- Overall Status: failed",
                         "",
+                        "## Degraded Signal Threshold Reference",
+                        "",
+                        "| Signal | Current Value | Threshold Guidance |",
+                        "| --- | ---: | --- |",
+                        "| OCR Fallback Budget Exhausted Total | 2 | warn delta > 0 and < 3 over 10m, critical delta >= 3 over 10m |",
+                        "",
                         "## Suite Results",
                         "",
                     ]
@@ -89,6 +95,7 @@ class GenerateWeeklyOperatorOnepagerTests(unittest.TestCase):
             self.assertIn("## Operator Triage Snapshot", generated)
             self.assertIn("- Severity Hint: critical", generated)
             self.assertIn("- Recommended First Command: bash guide/ops/reliability-recovery.sh queue-status", generated)
+            self.assertIn("- OCR Fallback Budget Exhausted Signal: total=2, status=warning", generated)
             self.assertIn("## Operator Handoff Commands", generated)
 
 
