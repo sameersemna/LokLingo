@@ -58,15 +58,17 @@ def extract_index_snapshot(lines: list[str]) -> list[str]:
     return out
 
 
-def extract_fallback_budget_signal(lines: list[str]) -> str | None:
+def extract_fallback_budget_signal(lines: list[str]) -> tuple[str | None, str | None]:
     for line in lines:
         if not line.startswith("| OCR Fallback Budget Exhausted Total |"):
             continue
         cols = [col.strip() for col in line.strip("|").split("|")]
         if len(cols) < 3:
-            return None
+            return None, "malformed fallback-budget signal row in smoke summary: expected 3 columns"
         value = cols[1]
         guidance = cols[2]
+        if value == "" or guidance == "":
+            return None, "malformed fallback-budget signal row in smoke summary: missing value or guidance"
         status = "unknown"
         try:
             numeric = float(value)
@@ -76,8 +78,8 @@ def extract_fallback_budget_signal(lines: list[str]) -> str | None:
         return (
             f"- OCR Fallback Budget Exhausted Signal: total={value}, "
             f"status={status}, guidance={guidance}"
-        )
-    return None
+        ), None
+    return None, None
 
 
 def main() -> int:
@@ -99,7 +101,10 @@ def main() -> int:
 
     smoke_snapshot = extract_summary_snapshot(smoke_summary_lines)
     index_snapshot = extract_index_snapshot(artifact_index_lines)
-    fallback_budget_signal = extract_fallback_budget_signal(smoke_summary_lines)
+    fallback_budget_signal, fallback_budget_err = extract_fallback_budget_signal(smoke_summary_lines)
+    if fallback_budget_err:
+        print(fallback_budget_err, file=sys.stderr)
+        return 1
     severity_totals = extract_section(provider_trend_lines, "Severity Totals")
     escalation = extract_section(provider_trend_lines, "Escalation")
     handoff_commands = extract_section(artifact_index_lines, "Operator Handoff Commands")

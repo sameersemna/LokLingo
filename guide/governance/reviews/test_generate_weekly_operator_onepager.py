@@ -98,6 +98,71 @@ class GenerateWeeklyOperatorOnepagerTests(unittest.TestCase):
             self.assertIn("- OCR Fallback Budget Exhausted Signal: total=2, status=warning", generated)
             self.assertIn("## Operator Handoff Commands", generated)
 
+    def test_fails_on_malformed_fallback_signal_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            smoke_summary = tmp / "summary.md"
+            provider_trend = tmp / "trend.md"
+            artifact_index = tmp / "index.md"
+            out = tmp / "onepager.md"
+
+            smoke_summary.write_text(
+                "\n".join(
+                    [
+                        "# Reliability Smoke Ops Summary",
+                        "",
+                        "## Degraded Signal Threshold Reference",
+                        "",
+                        "| Signal | Current Value | Threshold Guidance |",
+                        "| --- | ---: | --- |",
+                        "| OCR Fallback Budget Exhausted Total |",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            provider_trend.write_text(
+                "\n".join(
+                    [
+                        "# Provider Policy Trend",
+                        "",
+                        "## Severity Totals",
+                        "",
+                        "- Critical: 0",
+                        "- Warning: 0",
+                        "- Stable: 1",
+                        "- Improving: 0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            artifact_index.write_text(
+                "\n".join(
+                    [
+                        "# Reliability Artifact Index",
+                        "",
+                        "- Overall Smoke Status: ok",
+                        "- Severity Hint: normal",
+                        "- Recommended First Command: bash guide/ops/reliability-recovery.sh queue-status",
+                        "- Correlation ID: corr-y",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["python3", str(SCRIPT), str(smoke_summary), str(provider_trend), str(artifact_index), str(out)],
+                capture_output=True,
+                text=True,
+                cwd=ROOT,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("malformed fallback-budget signal row", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
