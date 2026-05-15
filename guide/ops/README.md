@@ -144,6 +144,14 @@ python3 guide/governance/reviews/test_run_weekly_review_tests.py
 python3 guide/governance/reviews/test_reliability_automation_workflow.py
 ```
 
+Fallback-row parser contract:
+
+- Fallback-budget signal parsing rules are centralized in `guide/governance/reviews/fallback_signal_parser.py`.
+- Both generator and validator paths consume this parser:
+	- `generate-weekly-operator-onepager.py`
+	- `validate-reliability-artifacts.py`
+- Update parser rules and `test_fallback_signal_parser.py` together to avoid drift.
+
 The mandatory artifact validator now requires the weekly operator one-pager to include
 the triage snapshot markers and operator handoff commands section, preventing structurally incomplete handoff artifacts from passing CI.
 It also requires the provider trend artifact to include severity totals and enforces an escalation section whenever critical regressions are present.

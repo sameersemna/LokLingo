@@ -39,6 +39,34 @@ class FallbackSignalParserTests(unittest.TestCase):
         self.assertIsNotNone(signal_line)
         self.assertIn("status=unknown", signal_line)
 
+    def test_parses_uppercase_na_and_trailing_pipe(self) -> None:
+        lines = [
+            "| OCR Fallback Budget Exhausted Total | N/A | warn delta > 0 and < 3 over 10m, critical delta >= 3 over 10m ||",
+        ]
+
+        parsed = parse_fallback_budget_signal(lines)
+        self.assertTrue(parsed.found)
+        self.assertFalse(parsed.malformed)
+        self.assertEqual(parsed.value, "N/A")
+
+        signal_line = build_onepager_signal_line(parsed)
+        self.assertIsNotNone(signal_line)
+        self.assertIn("status=unknown", signal_line)
+
+    def test_parses_row_with_leading_spaces(self) -> None:
+        lines = [
+            "   | OCR Fallback Budget Exhausted Total | 0 | warn delta > 0 and < 3 over 10m, critical delta >= 3 over 10m |",
+        ]
+
+        parsed = parse_fallback_budget_signal(lines)
+        self.assertTrue(parsed.found)
+        self.assertFalse(parsed.malformed)
+        self.assertEqual(parsed.value, "0")
+
+        signal_line = build_onepager_signal_line(parsed)
+        self.assertIsNotNone(signal_line)
+        self.assertIn("status=normal", signal_line)
+
     def test_detects_malformed_row(self) -> None:
         lines = [
             "| OCR Fallback Budget Exhausted Total |",

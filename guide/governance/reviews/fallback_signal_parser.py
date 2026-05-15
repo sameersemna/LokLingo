@@ -20,9 +20,10 @@ class FallbackBudgetSignal:
 
 def parse_fallback_budget_signal(lines: list[str]) -> FallbackBudgetSignal:
     for line in lines:
-        if not line.startswith(ROW_PREFIX):
+        candidate = line.strip()
+        if not candidate.startswith(ROW_PREFIX):
             continue
-        cols = [col.strip() for col in line.strip("|").split("|")]
+        cols = [col.strip() for col in candidate.strip("|").split("|")]
         if len(cols) < 3:
             return FallbackBudgetSignal(
                 found=True,
