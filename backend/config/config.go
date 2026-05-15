@@ -20,6 +20,8 @@ type Config struct {
 	OpenAICompatModel            string
 	OCRServiceURL                string
 	OCRProvider                  string
+	OCRProviderTimeoutSeconds    int
+	OCRMaxFallbacks              int
 	OCRSharedStorageDir          string
 	RedisURL                     string
 	PostgresDSN                  string // optional; enables Postgres analytics sink when set
@@ -54,6 +56,8 @@ func Load() *Config {
 		OpenAICompatModel:            getEnv("OPENAI_COMPAT_MODEL", ""),
 		OCRServiceURL:                getEnv("OCR_SERVICE_URL", ""),
 		OCRProvider:                  getEnv("OCR_PROVIDER", "paddle"),
+		OCRProviderTimeoutSeconds:    getEnvInt("OCR_PROVIDER_TIMEOUT_SECONDS", 120),
+		OCRMaxFallbacks:              getEnvInt("OCR_MAX_FALLBACKS", 2),
 		OCRSharedStorageDir:          getEnv("OCR_SHARED_STORAGE_DIR", ""),
 		RedisURL:                     resolveRedisURL(appEnv),
 		PostgresDSN:                  getEnv("POSTGRES_DSN", ""),
@@ -108,6 +112,15 @@ func (c *Config) Validate() error {
 		// allowed
 	default:
 		invalid = append(invalid, "OCR_PROVIDER must be one of: paddle, tesseract, ollama")
+	}
+	if c.OCRProviderTimeoutSeconds < 0 {
+		invalid = append(invalid, "OCR_PROVIDER_TIMEOUT_SECONDS must be >= 0")
+	}
+	if c.OCRProviderTimeoutSeconds == 0 {
+		c.OCRProviderTimeoutSeconds = 120
+	}
+	if c.OCRMaxFallbacks < 0 {
+		invalid = append(invalid, "OCR_MAX_FALLBACKS must be >= 0")
 	}
 	if strings.TrimSpace(c.RedisURL) == "" {
 		missing = append(missing, "REDIS_URL")

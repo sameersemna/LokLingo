@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,7 +62,7 @@ func TestChainedOCRClient_FallbackOnProviderFailure(t *testing.T) {
 	chain := &chainedOCRClient{providers: []OCRProvider{
 		&fakeOCRProvider{name: OCRProviderPaddle, pdfErr: errors.New("paddle down")},
 		&fakeOCRProvider{name: OCRProviderTesseract, pdfResult: &OCRResult{Pages: []string{"page 1"}, Confidence: 0.91}},
-	}}
+	}, maxFallbackCount: 2, providerTimeout: time.Second}
 
 	res, err := chain.extractPDFWithFallback(context.Background(), []byte("pdf"), OCRRequest{Lang: "en"})
 	if err != nil {
@@ -78,9 +79,9 @@ func TestChainedOCRClient_FallbackOnProviderFailure(t *testing.T) {
 func TestChainedOCRClient_TimeoutHandling(t *testing.T) {
 	chain := &chainedOCRClient{providers: []OCRProvider{
 		&fakeOCRProvider{name: OCRProviderPaddle, delay: 100 * time.Millisecond, pdfResult: &OCRResult{Pages: []string{"late"}}},
-	}}
+	}, maxFallbackCount: 2, providerTimeout: 30 * time.Millisecond}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	_, err := chain.extractPDFWithFallback(ctx, []byte("pdf"), OCRRequest{Lang: "en"})
@@ -95,10 +96,25 @@ func TestChainedOCRClient_TimeoutHandling(t *testing.T) {
 func TestChainedOCRClient_InvalidOCRResult(t *testing.T) {
 	chain := &chainedOCRClient{providers: []OCRProvider{
 		&fakeOCRProvider{name: OCRProviderPaddle, pdfResult: &OCRResult{}},
-	}}
+	}, maxFallbackCount: 2, providerTimeout: time.Second}
 
 	_, err := chain.extractPDFWithFallback(context.Background(), []byte("pdf"), OCRRequest{Lang: "en"})
 	if err == nil {
 		t.Fatal("expected invalid OCR output error")
+	}
+}
+
+func TestChainedOCRClient_FallbackBudgetStopsChain(t *testing.T) {
+	chain := &chainedOCRClient{providers: []OCRProvider{
+		&fakeOCRProvider{name: OCRProviderOllama, pdfErr: errors.New("not implemented")},
+		&fakeOCRProvider{name: OCRProviderPaddle, pdfResult: &OCRResult{Pages: []string{"ok"}}},
+	}, maxFallbackCount: 0, providerTimeout: time.Second}
+
+	_, err := chain.extractPDFWithFallback(context.Background(), []byte("pdf"), OCRRequest{Lang: "en"})
+	if err == nil {
+		t.Fatal("expected fallback budget error")
+	}
+	if !strings.Contains(err.Error(), "fallback budget exhausted") {
+		t.Fatalf("expected fallback budget exhausted error, got %v", err)
 	}
 }

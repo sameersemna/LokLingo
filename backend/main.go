@@ -82,7 +82,15 @@ func main() {
 	}
 	translationService := services.NewOrchestrator(providerRegistry, services.DefaultOrchestratorConfig)
 	pdfService := internalservices.NewPDFService()
-	ocrClient := internalservices.NewPluggableOCRClient(cfg.OCRServiceURL, cfg.OCRSharedStorageDir, cfg.OCRProvider)
+	ocrClient := internalservices.NewPluggableOCRClient(
+		cfg.OCRServiceURL,
+		cfg.OCRSharedStorageDir,
+		cfg.OCRProvider,
+		internalservices.OCRClientChainOptions{
+			ProviderTimeout:  time.Duration(cfg.OCRProviderTimeoutSeconds) * time.Second,
+			MaxFallbackCount: cfg.OCRMaxFallbacks,
+		},
+	)
 	worker := jobs.NewWorker(jobStore, translationService, pdfService, ocrClient, cfg.MaxPDFPages,
 		jobs.WithTranslateConcurrency(cfg.TranslateConcurrency),
 		jobs.WithMaxLLMConcurrency(cfg.MaxLLMConcurrency),

@@ -214,6 +214,8 @@ func TestLoadReadsLiteLLMRequestTimeoutSeconds(t *testing.T) {
 
 func TestLoadReadsOptionalProviderEnvValues(t *testing.T) {
 	t.Setenv("OCR_PROVIDER", "tesseract")
+	t.Setenv("OCR_PROVIDER_TIMEOUT_SECONDS", "45")
+	t.Setenv("OCR_MAX_FALLBACKS", "1")
 	t.Setenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
 	t.Setenv("OLLAMA_MODEL", "llama3.2")
 	t.Setenv("OPENAI_COMPAT_BASE_URL", "https://example.test/v1")
@@ -238,6 +240,12 @@ func TestLoadReadsOptionalProviderEnvValues(t *testing.T) {
 	}
 	if cfg.OCRProvider != "tesseract" {
 		t.Fatalf("expected OCRProvider=tesseract, got %q", cfg.OCRProvider)
+	}
+	if cfg.OCRProviderTimeoutSeconds != 45 {
+		t.Fatalf("expected OCRProviderTimeoutSeconds=45, got %d", cfg.OCRProviderTimeoutSeconds)
+	}
+	if cfg.OCRMaxFallbacks != 1 {
+		t.Fatalf("expected OCRMaxFallbacks=1, got %d", cfg.OCRMaxFallbacks)
 	}
 }
 
@@ -265,6 +273,38 @@ func TestConfigValidateRejectsInvalidOCRProvider(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "OCR_PROVIDER") {
 		t.Fatalf("expected validation error to mention OCR_PROVIDER, got %q", err.Error())
+	}
+}
+
+func TestConfigValidateRejectsInvalidOCRChainLimits(t *testing.T) {
+	cfg := &Config{
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "ollama/llama3.2:latest",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		OCRProvider:                  "paddle",
+		OCRProviderTimeoutSeconds:    -1,
+		OCRMaxFallbacks:              -1,
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "OCR_PROVIDER_TIMEOUT_SECONDS") {
+		t.Fatalf("expected validation error to mention OCR_PROVIDER_TIMEOUT_SECONDS, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "OCR_MAX_FALLBACKS") {
+		t.Fatalf("expected validation error to mention OCR_MAX_FALLBACKS, got %q", err.Error())
 	}
 }
 

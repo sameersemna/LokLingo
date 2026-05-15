@@ -19,6 +19,8 @@ LokLingo uses a pluggable OCR provider chain in the backend worker while keeping
 
 - Primary provider is selected by `OCR_PROVIDER`.
 - Supported values: `paddle`, `tesseract`, `ollama`.
+- Per-provider attempt timeout is controlled by `OCR_PROVIDER_TIMEOUT_SECONDS`.
+- Fallback budget per OCR request is controlled by `OCR_MAX_FALLBACKS`.
 - If the primary provider fails or returns invalid OCR output, the backend automatically falls back to the next provider.
 - Frontend and API routes remain unchanged.
 

@@ -136,6 +136,8 @@ Important variables:
 * `FRONTEND_HOST_PORT`: host port mapped to frontend container port `80`
 * `OCR_HOST_PORT`: host port mapped to OCR container port `8000`
 * `OCR_PROVIDER`: primary OCR engine for backend fallback chain (`paddle`, `tesseract`, `ollama`), defaults to `paddle`
+* `OCR_PROVIDER_TIMEOUT_SECONDS`: timeout in seconds for each provider attempt before fallback, defaults to `120`
+* `OCR_MAX_FALLBACKS`: max number of provider failovers allowed per OCR request, defaults to `2`
 * `OCR_SHARED_STORAGE_DIR`: shared directory mounted into backend and OCR containers for zero-copy OCR requests, defaults to `/tmp/loklingo`
 * `WRITE_API_TOKEN`: protects write routes (`POST /api/v1/translate*`, `POST /api/v1/jobs*`); required in `production`, optional in `development`
 * `GLOBAL_RATE_LIMIT_PER_MINUTE`: per-IP request cap for non-health routes, defaults to `120`

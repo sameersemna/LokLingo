@@ -43,12 +43,20 @@ type OCRProvider interface {
 }
 
 type chainedOCRClient struct {
-	providers []OCRProvider
+	providers        []OCRProvider
+	providerTimeout  time.Duration
+	maxFallbackCount int
+}
+
+// OCRClientChainOptions configures provider-level timeout and fallback budget.
+type OCRClientChainOptions struct {
+	ProviderTimeout  time.Duration
+	MaxFallbackCount int
 }
 
 // NewPluggableOCRClient creates an OCR client using config-driven provider
 // selection with automatic fallback chain.
-func NewPluggableOCRClient(ocrBaseURL, sharedStorageDir, provider string) OCRClient {
+func NewPluggableOCRClient(ocrBaseURL, sharedStorageDir, provider string, options ...OCRClientChainOptions) OCRClient {
 	primary := normalizeOCRProvider(provider)
 	if primary == "" {
 		primary = normalizeOCRProvider(os.Getenv("OCR_PROVIDER"))
@@ -70,7 +78,25 @@ func NewPluggableOCRClient(ocrBaseURL, sharedStorageDir, provider string) OCRCli
 		}
 	}
 
-	return &chainedOCRClient{providers: providers}
+	chainOpts := OCRClientChainOptions{
+		ProviderTimeout:  120 * time.Second,
+		MaxFallbackCount: len(providers) - 1,
+	}
+	if len(options) > 0 {
+		o := options[0]
+		if o.ProviderTimeout > 0 {
+			chainOpts.ProviderTimeout = o.ProviderTimeout
+		}
+		if o.MaxFallbackCount >= 0 {
+			chainOpts.MaxFallbackCount = o.MaxFallbackCount
+		}
+	}
+
+	return &chainedOCRClient{
+		providers:        providers,
+		providerTimeout:  chainOpts.ProviderTimeout,
+		maxFallbackCount: chainOpts.MaxFallbackCount,
+	}
 }
 
 func normalizeOCRProvider(v string) string {
@@ -158,29 +184,44 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 	retries := 0
 	fallbacks := 0
 	for idx, provider := range c.providers {
+		if c.maxFallbackCount >= 0 && fallbacks > c.maxFallbackCount {
+			return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, lastErr)
+		}
 		slog.Info("ocr_provider_selected", "provider", provider.Name(), "position", idx)
+		providerCtx := ctx
+		cancel := func() {}
+		if c.providerTimeout > 0 {
+			providerCtx, cancel = context.WithTimeout(ctx, c.providerTimeout)
+		}
 		start := time.Now()
-		res, err := provider.ExtractPDFText(ctx, pdf, opts)
+		res, err := provider.ExtractPDFText(providerCtx, pdf, opts)
+		cancel()
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 {
+			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
+				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
 			continue
 		}
 		if err := validateProviderResult(res, true); err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 {
+			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
+				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
 			continue
 		}
@@ -210,29 +251,44 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 	retries := 0
 	fallbacks := 0
 	for idx, provider := range c.providers {
+		if c.maxFallbackCount >= 0 && fallbacks > c.maxFallbackCount {
+			return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, lastErr)
+		}
 		slog.Info("ocr_provider_selected", "provider", provider.Name(), "position", idx)
+		providerCtx := ctx
+		cancel := func() {}
+		if c.providerTimeout > 0 {
+			providerCtx, cancel = context.WithTimeout(ctx, c.providerTimeout)
+		}
 		start := time.Now()
-		res, err := provider.ExtractImageText(ctx, image, opts)
+		res, err := provider.ExtractImageText(providerCtx, image, opts)
+		cancel()
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 {
+			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
+				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
 			continue
 		}
 		if err := validateProviderResult(res, false); err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 {
+			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
 				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
+				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
 			}
 			continue
 		}
