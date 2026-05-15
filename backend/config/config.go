@@ -19,6 +19,7 @@ type Config struct {
 	OpenAICompatAPIKey           string
 	OpenAICompatModel            string
 	OCRServiceURL                string
+	OCRProvider                  string
 	OCRSharedStorageDir          string
 	RedisURL                     string
 	PostgresDSN                  string // optional; enables Postgres analytics sink when set
@@ -52,6 +53,7 @@ func Load() *Config {
 		OpenAICompatAPIKey:           getEnv("OPENAI_COMPAT_API_KEY", ""),
 		OpenAICompatModel:            getEnv("OPENAI_COMPAT_MODEL", ""),
 		OCRServiceURL:                getEnv("OCR_SERVICE_URL", ""),
+		OCRProvider:                  getEnv("OCR_PROVIDER", "paddle"),
 		OCRSharedStorageDir:          getEnv("OCR_SHARED_STORAGE_DIR", ""),
 		RedisURL:                     resolveRedisURL(appEnv),
 		PostgresDSN:                  getEnv("POSTGRES_DSN", ""),
@@ -100,6 +102,12 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.OCRServiceURL) == "" {
 		missing = append(missing, "OCR_SERVICE_URL")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.OCRProvider)) {
+	case "", "paddle", "tesseract", "ollama":
+		// allowed
+	default:
+		invalid = append(invalid, "OCR_PROVIDER must be one of: paddle, tesseract, ollama")
 	}
 	if strings.TrimSpace(c.RedisURL) == "" {
 		missing = append(missing, "REDIS_URL")

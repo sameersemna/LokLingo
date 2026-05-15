@@ -213,6 +213,7 @@ func TestLoadReadsLiteLLMRequestTimeoutSeconds(t *testing.T) {
 }
 
 func TestLoadReadsOptionalProviderEnvValues(t *testing.T) {
+	t.Setenv("OCR_PROVIDER", "tesseract")
 	t.Setenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
 	t.Setenv("OLLAMA_MODEL", "llama3.2")
 	t.Setenv("OPENAI_COMPAT_BASE_URL", "https://example.test/v1")
@@ -234,6 +235,36 @@ func TestLoadReadsOptionalProviderEnvValues(t *testing.T) {
 	}
 	if cfg.OpenAICompatModel != "gpt-4o-mini" {
 		t.Fatalf("expected OpenAICompatModel to be loaded, got %q", cfg.OpenAICompatModel)
+	}
+	if cfg.OCRProvider != "tesseract" {
+		t.Fatalf("expected OCRProvider=tesseract, got %q", cfg.OCRProvider)
+	}
+}
+
+func TestConfigValidateRejectsInvalidOCRProvider(t *testing.T) {
+	cfg := &Config{
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "ollama/llama3.2:latest",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		OCRProvider:                  "bad-provider",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "OCR_PROVIDER") {
+		t.Fatalf("expected validation error to mention OCR_PROVIDER, got %q", err.Error())
 	}
 }
 

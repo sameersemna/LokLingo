@@ -1,6 +1,9 @@
 package observability
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // ReliabilitySnapshot captures in-memory reliability counters for upstream integrations.
 type ReliabilitySnapshot struct {
@@ -22,14 +25,34 @@ type LiteLLMMetrics struct {
 }
 
 type OCRMetrics struct {
-	RetryAttemptsTotal         int64 `json:"retry_attempts_total"`
-	RetryAfterHonoredTotal     int64 `json:"retry_after_honored_total"`
-	RetryCancelledTotal        int64 `json:"retry_cancelled_total"`
-	RetryExhaustedTotal        int64 `json:"retry_exhausted_total"`
-	ResponseRejectedTotal      int64 `json:"response_rejected_total"`
-	ResponseRejectedBodyTotal  int64 `json:"response_rejected_body_total"`
-	ResponseRejectedJSONTotal  int64 `json:"response_rejected_json_total"`
-	ResponseRejectedShapeTotal int64 `json:"response_rejected_shape_total"`
+	RetryAttemptsTotal         int64                      `json:"retry_attempts_total"`
+	RetryAfterHonoredTotal     int64                      `json:"retry_after_honored_total"`
+	RetryCancelledTotal        int64                      `json:"retry_cancelled_total"`
+	RetryExhaustedTotal        int64                      `json:"retry_exhausted_total"`
+	ResponseRejectedTotal      int64                      `json:"response_rejected_total"`
+	ResponseRejectedBodyTotal  int64                      `json:"response_rejected_body_total"`
+	ResponseRejectedJSONTotal  int64                      `json:"response_rejected_json_total"`
+	ResponseRejectedShapeTotal int64                      `json:"response_rejected_shape_total"`
+	ProviderUsage              []OCRProviderUsageSnapshot `json:"provider_usage"`
+	ProviderLatencyMS          OCRAggregateMetric         `json:"provider_latency_ms"`
+	ProviderConfidence         OCRAggregateMetric         `json:"provider_confidence"`
+	ProviderRetriesTotal       int64                      `json:"provider_retries_total"`
+	ProviderFallbackCount      int64                      `json:"provider_fallback_count"`
+}
+
+type OCRProviderUsageSnapshot struct {
+	Provider string `json:"provider"`
+	Count    int64  `json:"count"`
+}
+
+type OCRAggregateMetric struct {
+	Total float64 `json:"total"`
+	Count int64   `json:"count"`
+	Avg   float64 `json:"avg"`
+}
+
+type ocrProviderUsageCounter struct {
+	count atomic.Int64
 }
 
 var (
@@ -52,6 +75,14 @@ var (
 	ocrResponseRejectedBody  atomic.Int64
 	ocrResponseRejectedJSON  atomic.Int64
 	ocrResponseRejectedShape atomic.Int64
+
+	ocrProviderLatencyTotalMS  atomic.Int64
+	ocrProviderLatencyCount    atomic.Int64
+	ocrProviderConfidenceMilli atomic.Int64
+	ocrProviderConfidenceCount atomic.Int64
+	ocrProviderRetriesTotal    atomic.Int64
+	ocrProviderFallbackTotal   atomic.Int64
+	ocrProviderUsageMap        sync.Map
 )
 
 func IncLiteLLMRetryAttempt()     { liteLLMRetryAttempts.Add(1) }
@@ -90,6 +121,63 @@ func IncOCRResponseRejectedShape() {
 	ocrResponseRejectedShape.Add(1)
 }
 
+func getOCRProviderUsageCounter(provider string) *ocrProviderUsageCounter {
+	if provider == "" {
+		provider = "unknown"
+	}
+	v, _ := ocrProviderUsageMap.LoadOrStore(provider, &ocrProviderUsageCounter{})
+	return v.(*ocrProviderUsageCounter)
+}
+
+func IncOCRProviderUsed(provider string) {
+	getOCRProviderUsageCounter(provider).count.Add(1)
+}
+
+func RecordOCRProviderLatency(ms int64) {
+	if ms < 0 {
+		ms = 0
+	}
+	ocrProviderLatencyTotalMS.Add(ms)
+	ocrProviderLatencyCount.Add(1)
+}
+
+func RecordOCRProviderConfidence(confidence float64) {
+	if confidence <= 0 {
+		return
+	}
+	ocrProviderConfidenceMilli.Add(int64(confidence * 1000))
+	ocrProviderConfidenceCount.Add(1)
+}
+
+func IncOCRProviderRetries(n int64) {
+	if n > 0 {
+		ocrProviderRetriesTotal.Add(n)
+	}
+}
+
+func IncOCRProviderFallback() {
+	ocrProviderFallbackTotal.Add(1)
+}
+
+func snapshotOCRProviderUsage() []OCRProviderUsageSnapshot {
+	out := make([]OCRProviderUsageSnapshot, 0, 3)
+	ocrProviderUsageMap.Range(func(k, v any) bool {
+		provider := k.(string)
+		counter := v.(*ocrProviderUsageCounter)
+		out = append(out, OCRProviderUsageSnapshot{Provider: provider, Count: counter.count.Load()})
+		return true
+	})
+	return out
+}
+
+func buildOCRAggregate(total float64, count int64) OCRAggregateMetric {
+	avg := 0.0
+	if count > 0 {
+		avg = total / float64(count)
+	}
+	return OCRAggregateMetric{Total: total, Count: count, Avg: avg}
+}
+
 func SnapshotReliability() ReliabilitySnapshot {
 	return ReliabilitySnapshot{
 		LiteLLM: LiteLLMMetrics{
@@ -113,6 +201,11 @@ func SnapshotReliability() ReliabilitySnapshot {
 			ResponseRejectedBodyTotal:  ocrResponseRejectedBody.Load(),
 			ResponseRejectedJSONTotal:  ocrResponseRejectedJSON.Load(),
 			ResponseRejectedShapeTotal: ocrResponseRejectedShape.Load(),
+			ProviderUsage:              snapshotOCRProviderUsage(),
+			ProviderLatencyMS:          buildOCRAggregate(float64(ocrProviderLatencyTotalMS.Load()), ocrProviderLatencyCount.Load()),
+			ProviderConfidence:         buildOCRAggregate(float64(ocrProviderConfidenceMilli.Load())/1000.0, ocrProviderConfidenceCount.Load()),
+			ProviderRetriesTotal:       ocrProviderRetriesTotal.Load(),
+			ProviderFallbackCount:      ocrProviderFallbackTotal.Load(),
 		},
 	}
 }

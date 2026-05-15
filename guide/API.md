@@ -13,6 +13,44 @@ LokLingo is a multilingual document translation and optical character recognitio
 - **Async Job Management**: Monitor long-running translations with polling or event streaming
 - **Reliability Metrics**: Query provider health, queue depth, and translation performance
 
+## OCR Provider Architecture
+
+LokLingo uses a pluggable OCR provider chain in the backend worker while keeping the same public HTTP APIs.
+
+- Primary provider is selected by `OCR_PROVIDER`.
+- Supported values: `paddle`, `tesseract`, `ollama`.
+- If the primary provider fails or returns invalid OCR output, the backend automatically falls back to the next provider.
+- Frontend and API routes remain unchanged.
+
+```mermaid
+flowchart LR
+  A[Worker OCR request] --> B{Select primary from OCR_PROVIDER}
+  B --> C[PaddleOCRProvider]
+  B --> D[TesseractProvider]
+  B --> E[OllamaVisionProvider stub]
+
+  C --> F{Success?}
+  D --> F
+  E --> F
+
+  F -- yes --> G[ocr_completed]
+  F -- no --> H[ocr_provider_failed]
+  H --> I[ocr_provider_fallback]
+  I --> J[Next provider in chain]
+  J --> F
+
+  G --> K[Metrics: provider, latency, confidence, retries, fallback_count]
+```
+
+### OCR Observability Events
+
+Structured logs emitted by the OCR chain:
+
+- `ocr_provider_selected`
+- `ocr_provider_failed`
+- `ocr_provider_fallback`
+- `ocr_completed`
+
 ## Base URL
 
 ```
