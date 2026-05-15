@@ -32,6 +32,7 @@ if [[ -n "$matrix_file" ]]; then
   done < "$matrix_file"
 else
   test_specs+=("test_generate_weekly_operator_onepager|python3 guide/governance/reviews/test_generate_weekly_operator_onepager.py")
+  test_specs+=("test_generate_smoke_ops_summary|python3 guide/governance/reviews/test_generate_smoke_ops_summary.py")
   test_specs+=("test_validate_reliability_artifacts|python3 guide/governance/reviews/test_validate_reliability_artifacts.py")
   test_specs+=("test_generate_incident_escalation_summary|python3 guide/governance/reviews/test_generate_incident_escalation_summary.py")
   test_specs+=("test_generate_weekly_artifact_summary|python3 guide/governance/reviews/test_generate_weekly_artifact_summary.py")

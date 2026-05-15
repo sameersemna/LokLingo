@@ -44,6 +44,14 @@ Decision hints:
 - If 1h failure/timeout trend is sharply above 24h baseline, escalate to Sev 1 or Sev 2.
 - If OCR service is unhealthy and no fallback path is active, classify as Sev 1.
 
+Fallback-budget exhaustion triage checklist (OCR provider chain):
+
+- Check `increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m])` from Prometheus metrics.
+- Treat `> 0` as warning and `>= 3` as critical in the same 10-minute window.
+- Verify `OCR_PROVIDER_TIMEOUT_SECONDS` and `OCR_MAX_FALLBACKS` are aligned with current provider latency behavior.
+- Correlate with `loklingo_provider_timeout_total` and queue pressure before changing concurrency.
+- If critical threshold repeats for two windows, page OCR owner and open Sev 2+ incident workflow.
+
 ### B) Translation provider outage or failover instability
 
 ```bash

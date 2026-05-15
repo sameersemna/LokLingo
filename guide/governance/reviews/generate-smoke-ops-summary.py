@@ -22,6 +22,11 @@ ALERT_THRESHOLD_GUIDANCE = [
     ("Retry Backlog", "loklingo_queue_retry_backlog", "warn >= 50, critical >= 200"),
     ("Degraded Mode Total", "loklingo_degraded_mode_total", "watch delta > 20 over 10m"),
     ("Render Fallback Total", "loklingo_degraded_render_fallback_total", "watch delta > 5 over 10m"),
+    (
+        "OCR Fallback Budget Exhausted Total",
+        "loklingo_ocr_provider_fallback_budget_exhausted_total",
+        "warn delta > 0 and < 3 over 10m, critical delta >= 3 over 10m",
+    ),
     ("Adaptive Clamp Total", "loklingo_adaptive_concurrency_clamp_total", "watch delta > 10 over 10m"),
 ]
 

@@ -52,6 +52,7 @@ signals = {
   'loklingo_degraded_mode_total': None,
   'loklingo_degraded_render_fallback_total': None,
   'loklingo_degraded_ocr_low_confidence_total': None,
+  'loklingo_ocr_provider_fallback_budget_exhausted_total': None,
   'loklingo_adaptive_concurrency_reduce_total': None,
   'loklingo_adaptive_concurrency_boost_total': None,
   'loklingo_adaptive_concurrency_clamp_total': None,

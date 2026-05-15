@@ -41,6 +41,7 @@ REQUIRED_PROVIDER_SIGNALS = [
     "loklingo_degraded_mode_total",
     "loklingo_degraded_render_fallback_total",
     "loklingo_degraded_ocr_low_confidence_total",
+    "loklingo_ocr_provider_fallback_budget_exhausted_total",
     "loklingo_adaptive_concurrency_reduce_total",
     "loklingo_adaptive_concurrency_boost_total",
     "loklingo_adaptive_concurrency_clamp_total",

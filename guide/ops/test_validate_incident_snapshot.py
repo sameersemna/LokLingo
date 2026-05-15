@@ -28,6 +28,7 @@ def base_payload() -> dict:
                 "loklingo_degraded_mode_total": 0,
                 "loklingo_degraded_render_fallback_total": 0,
                 "loklingo_degraded_ocr_low_confidence_total": 0,
+                "loklingo_ocr_provider_fallback_budget_exhausted_total": 0,
                 "loklingo_adaptive_concurrency_reduce_total": 0,
                 "loklingo_adaptive_concurrency_boost_total": 0,
                 "loklingo_adaptive_concurrency_clamp_total": 0,
