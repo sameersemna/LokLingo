@@ -384,6 +384,7 @@ jobs:
       - name: Run smoke lineage regression harness
         run: python3 guide/ops/test_reliability_smoke_lineage.py
       - name: Run fallback signal parser regression tests
+        # Keep parser-only failures easy to attribute and ensure the weekly review log upload contract stays complete.
         run: python3 guide/governance/reviews/test_fallback_signal_parser.py
       - name: Run weekly review tooling regression tests
         run: |
