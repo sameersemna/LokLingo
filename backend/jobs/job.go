@@ -71,9 +71,9 @@ type Job struct {
 
 	// Stage tracks the fine-grained processing phase for in-progress jobs.
 	// Values are one of the Stage* constants (e.g. StageTranslating).
-	Stage         string  `json:"stage,omitempty"`
-	StageMessage  string  `json:"stage_message,omitempty"`
-	StageProgress float64 `json:"stage_progress,omitempty"`
+	Stage         string   `json:"stage,omitempty"`
+	StageMessage  string   `json:"stage_message,omitempty"`
+	StageProgress float64  `json:"stage_progress,omitempty"`
 	Warnings      []string `json:"warnings,omitempty"`
 	OCRConfidence float64  `json:"ocr_confidence,omitempty"`
 
