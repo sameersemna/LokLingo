@@ -28,6 +28,28 @@ def has_required_onepager_sections(path: Path) -> bool:
     return all(marker in text for marker in required_markers)
 
 
+def extract_smoke_fallback_budget_total(path: Path) -> str | None:
+    if not is_present(path):
+        return None
+    text = path.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if not line.startswith("| OCR Fallback Budget Exhausted Total |"):
+            continue
+        cols = [col.strip() for col in line.strip("|").split("|")]
+        if len(cols) < 3:
+            return None
+        return cols[1]
+    return None
+
+
+def onepager_has_fallback_signal(path: Path, expected_total: str) -> bool:
+    if not is_present(path):
+        return False
+    text = path.read_text(encoding="utf-8")
+    marker = f"- OCR Fallback Budget Exhausted Signal: total={expected_total},"
+    return marker in text
+
+
 def has_valid_provider_trend_structure(path: Path) -> bool:
     if not is_present(path):
         return False
@@ -166,6 +188,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    fallback_total = extract_smoke_fallback_budget_total(smoke_summary)
+    if fallback_total is not None and fallback_total.lower() != "n/a":
+        if not onepager_has_fallback_signal(operator_onepager, fallback_total):
+            print(
+                "weekly operator one-pager is missing required OCR fallback-budget triage signal line",
+                file=sys.stderr,
+            )
+            return 1
 
     if not has_valid_provider_trend_structure(provider_trend):
         print(
