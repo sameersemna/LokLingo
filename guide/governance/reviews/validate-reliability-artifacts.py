@@ -9,6 +9,8 @@ import re
 from datetime import datetime, timezone
 import os
 
+from fallback_signal_parser import parse_fallback_budget_signal
+
 
 def is_present(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
@@ -26,24 +28,6 @@ def has_required_onepager_sections(path: Path) -> bool:
         "## Operator Handoff Commands",
     ]
     return all(marker in text for marker in required_markers)
-
-
-def extract_smoke_fallback_budget_total(path: Path) -> tuple[str | None, bool]:
-    if not is_present(path):
-        return None, False
-    text = path.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if not line.startswith("| OCR Fallback Budget Exhausted Total |"):
-            continue
-        cols = [col.strip() for col in line.strip("|").split("|")]
-        if len(cols) < 3:
-            return None, True
-        value = cols[1]
-        guidance = cols[2]
-        if value == "" or guidance == "":
-            return None, True
-        return value, False
-    return None, False
 
 
 def onepager_has_fallback_signal(path: Path, expected_total: str) -> bool:
@@ -193,16 +177,21 @@ def main() -> int:
         )
         return 1
 
-    fallback_total, fallback_row_malformed = extract_smoke_fallback_budget_total(smoke_summary)
-    if fallback_row_malformed:
+    smoke_lines = smoke_summary.read_text(encoding="utf-8").splitlines()
+    parsed_fallback_signal = parse_fallback_budget_signal(smoke_lines)
+    if parsed_fallback_signal.malformed:
         print(
             "weekly smoke summary has malformed OCR fallback-budget signal row",
             file=sys.stderr,
         )
         return 1
 
-    if fallback_total is not None and fallback_total.lower() != "n/a":
-        if not onepager_has_fallback_signal(operator_onepager, fallback_total):
+    if (
+        parsed_fallback_signal.found
+        and parsed_fallback_signal.value is not None
+        and parsed_fallback_signal.value.lower() != "n/a"
+    ):
+        if not onepager_has_fallback_signal(operator_onepager, parsed_fallback_signal.value):
             print(
                 "weekly operator one-pager is missing required OCR fallback-budget triage signal line",
                 file=sys.stderr,

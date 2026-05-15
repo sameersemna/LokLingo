@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
+from fallback_signal_parser import build_onepager_signal_line, parse_fallback_budget_signal
+
 
 def load_text(path: Path) -> str:
     if not path.exists() or path.stat().st_size == 0:
@@ -58,30 +60,6 @@ def extract_index_snapshot(lines: list[str]) -> list[str]:
     return out
 
 
-def extract_fallback_budget_signal(lines: list[str]) -> tuple[str | None, str | None]:
-    for line in lines:
-        if not line.startswith("| OCR Fallback Budget Exhausted Total |"):
-            continue
-        cols = [col.strip() for col in line.strip("|").split("|")]
-        if len(cols) < 3:
-            return None, "malformed fallback-budget signal row in smoke summary: expected 3 columns"
-        value = cols[1]
-        guidance = cols[2]
-        if value == "" or guidance == "":
-            return None, "malformed fallback-budget signal row in smoke summary: missing value or guidance"
-        status = "unknown"
-        try:
-            numeric = float(value)
-            status = "warning" if numeric > 0 else "normal"
-        except ValueError:
-            status = "unknown"
-        return (
-            f"- OCR Fallback Budget Exhausted Signal: total={value}, "
-            f"status={status}, guidance={guidance}"
-        ), None
-    return None, None
-
-
 def main() -> int:
     if len(sys.argv) != 5:
         print(
@@ -101,10 +79,11 @@ def main() -> int:
 
     smoke_snapshot = extract_summary_snapshot(smoke_summary_lines)
     index_snapshot = extract_index_snapshot(artifact_index_lines)
-    fallback_budget_signal, fallback_budget_err = extract_fallback_budget_signal(smoke_summary_lines)
-    if fallback_budget_err:
-        print(fallback_budget_err, file=sys.stderr)
+    parsed_fallback_signal = parse_fallback_budget_signal(smoke_summary_lines)
+    if parsed_fallback_signal.malformed:
+        print(parsed_fallback_signal.error or "malformed fallback-budget signal row in smoke summary", file=sys.stderr)
         return 1
+    fallback_budget_signal = build_onepager_signal_line(parsed_fallback_signal)
     severity_totals = extract_section(provider_trend_lines, "Severity Totals")
     escalation = extract_section(provider_trend_lines, "Escalation")
     handoff_commands = extract_section(artifact_index_lines, "Operator Handoff Commands")
