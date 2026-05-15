@@ -3,5 +3,16 @@
 
 services:
   loklingo-backend:
+    ports:
+      - "28080:8080"
     environment:
+      OCR_SERVICE_URL: "http://loklingo-ocr:8000"
       REDIS_URL: "${REDIS_URL}"
+
+  loklingo-ocr:
+    ports:
+      - "8000:8000"
+
+  loklingo-frontend:
+    ports:
+      - "3000:80"

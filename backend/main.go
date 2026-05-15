@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -96,9 +98,9 @@ func main() {
 	app.Use(logger.New())
 	app.Use(middleware.RequestID())
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowMethods: "GET,POST,OPTIONS",
-		AllowHeaders: "Content-Type,Authorization",
+		AllowOriginsFunc: allowLANOrigin,
+		AllowMethods:     "GET,POST,OPTIONS",
+		AllowHeaders:     "Content-Type,Authorization",
 	}))
 	app.Use(middleware.GlobalRateLimiter(cfg.GlobalRateLimitPerMinute))
 
@@ -132,9 +134,32 @@ func main() {
 	api.Get("/metrics/lifecycle/events", middleware.InternalToken(cfg.InternalToken), lifecycleEventsHandler.List)
 	api.Get("/metrics/prometheus", middleware.InternalToken(cfg.InternalToken), prometheusMetricsHandler.Expose)
 
-	slog.Info("LokLingo backend starting", "port", cfg.Port)
-	if err := app.Listen(":" + cfg.Port); err != nil {
+	bindAddr := "0.0.0.0:" + cfg.Port
+	slog.Info("LokLingo backend starting", "port", cfg.Port, "bind", bindAddr)
+	if err := app.Listen(bindAddr); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func allowLANOrigin(origin string) bool {
+	if strings.TrimSpace(origin) == "" {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return false
+	}
+	if host == "promaxgb10-6116" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLoopback()
 }

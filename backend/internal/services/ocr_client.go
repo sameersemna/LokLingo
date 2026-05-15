@@ -57,7 +57,8 @@ func NormalizeOCRServiceURL(raw string) string {
 	if err != nil {
 		return trimmed
 	}
-	if parsed.Path == "/ocr" {
+	switch parsed.Path {
+	case "/ocr", "/api/v1/ocr", "/api/v1":
 		parsed.Path = ""
 	}
 	return strings.TrimRight(parsed.String(), "/")
@@ -100,8 +101,8 @@ type ocrImageResponse struct {
 	Blocks []OCRTextBlock `json:"blocks"`
 }
 
-const ocrPDFPath = "/ocr/pdf"
-const ocrImagePath = "/ocr/image"
+const ocrPDFPath = "/api/v1/ocr/pdf"
+const ocrImagePath = "/api/v1/ocr"
 
 var ocrMaxResponseBodyBytes int64 = 8 * 1024 * 1024
 

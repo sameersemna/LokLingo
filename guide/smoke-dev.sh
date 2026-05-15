@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
-frontend_url="${FRONTEND_URL:-http://localhost:13000}"
+frontend_url="${FRONTEND_URL:-http://localhost:3000}"
 backend_url="${BACKEND_URL:-http://localhost:28080}"
-ocr_url="${OCR_URL:-http://localhost:18000}"
+ocr_url="${OCR_URL:-http://localhost:8000}"
 
 echo "Checking backend health: ${backend_url}/health"
 backend_health="$(curl -fsS "${backend_url}/health")"
@@ -35,11 +35,11 @@ rm -f "${pdf_tmp}"
 echo "$pdf_job" | grep '"job_id"' >/dev/null
 
 # ---------------------------------------------------------------------------
-# OCR /ocr/pdf smoke: synthetic multi-page PDF → validate response shape
+# OCR /api/v1/ocr/pdf smoke: synthetic multi-page PDF → validate response shape
 # Requires: python3 with fpdf2 *or* reportlab installed, OR a pre-built PDF.
 # Falls back to a 1-page minimal PDF when neither generator is available.
 # ---------------------------------------------------------------------------
-echo "Checking OCR /ocr/pdf endpoint: POST ${ocr_url}/ocr/pdf"
+echo "Checking OCR /api/v1/ocr/pdf endpoint: POST ${ocr_url}/api/v1/ocr/pdf"
 
 SMOKE_PAGES=3
 
@@ -76,7 +76,7 @@ else
   printf '%%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\nxref\n0 4\n0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\n0000000115 00000 n\ntrailer\n<< /Root 1 0 R /Size 4 >>\nstartxref\n190\n%%%%EOF\n' > "$ocr_pdf_tmp"
 fi
 
-ocr_pdf_resp="$(curl -fsS -X POST "${ocr_url}/ocr/pdf" \
+ocr_pdf_resp="$(curl -fsS -X POST "${ocr_url}/api/v1/ocr/pdf" \
   -F "file=@${ocr_pdf_tmp};type=application/pdf" \
   -F "lang=en" \
   -F "dpi=150")"
@@ -87,12 +87,12 @@ echo "$ocr_pdf_resp" | grep '"text"'  >/dev/null
 echo "$ocr_pdf_resp" | grep '"pages"' >/dev/null
 
 # Validate the pages array contains the expected number of entries
-pages_count="$(echo "$ocr_pdf_resp" | python3 -c "import sys, json; d=json.load(sys.stdin); print(len(d['pages']))")"
+pages_count="$(printf '%s' "$ocr_pdf_resp" | python3 -c "import sys, json; d=json.load(sys.stdin); print(len(d['pages']))")"
 if [ "$pages_count" != "$SMOKE_PAGES" ]; then
   echo "ERROR: expected $SMOKE_PAGES pages in OCR response, got $pages_count"
   exit 1
 fi
-echo "  OCR /ocr/pdf: $pages_count page(s) processed OK"
+echo "  OCR /api/v1/ocr/pdf: $pages_count page(s) processed OK"
 
 # ---------------------------------------------------------------------------
 # Optional RSS gate: only runs when bench_pdf_memory.py + psutil are present
@@ -137,7 +137,7 @@ poll_job() {
   _elapsed=0
   while [ "$_elapsed" -lt "$_timeout" ]; do
     _resp="$(curl -fsS "${backend_url}/api/v1/jobs/${_jid}")"
-    _status="$(echo "$_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")"
+    _status="$(printf '%s' "$_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")"
     if [ "$_status" = "completed" ] || [ "$_status" = "failed" ]; then
       echo "$_status"
       return 0
@@ -165,9 +165,26 @@ for i in range(1, pages + 1):
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
     for line in range(1, 31):
-        pdf.cell(0, 8, f"Page {i}/{pages} – line {line}: The quick brown fox jumps over the lazy dog. Smoke test content.")
+        pdf.cell(0, 8, f"Page {i}/{pages} - line {line}: The quick brown fox jumps over the lazy dog. Smoke test content.")
         pdf.ln()
 pdf.output(out_path)
+PYEOF
+  elif python3 -c "import reportlab" 2>/dev/null; then
+    python3 - "$_out" "$_pages" <<'PYEOF'
+import sys
+from reportlab.pdfgen import canvas
+
+out_path, pages = sys.argv[1], int(sys.argv[2])
+c = canvas.Canvas(out_path)
+for i in range(1, pages + 1):
+    y = 760
+    for line in range(1, 31):
+        c.drawString(36, y, f"Page {i}/{pages} - line {line}: The quick brown fox jumps over the lazy dog. Smoke test content.")
+        y -= 22
+        if y < 72:
+            break
+    c.showPage()
+c.save()
 PYEOF
   else
     echo "  (fpdf2 not found — using minimal skeleton PDF, page count forced to 1)"
@@ -194,7 +211,7 @@ submit_and_time() {
     -F "target=de")"
   rm -f "$_tmp"
 
-  _job_id="$(echo "$_submit_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")"
+  _job_id="$(printf '%s' "$_submit_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")"
   echo "  submitted job_id=${_job_id}"
 
   _final_status="$(poll_job "$_job_id" "$_timeout")"
@@ -233,10 +250,10 @@ if [ -n "${INTERNAL_TOKEN:-}" ]; then
   echo "$reliability_json" | grep '"queue"' >/dev/null
   echo "$providers_json" | grep '"health"' >/dev/null
 
-  retries_total="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('retries_total',0))")"
-  failovers_total="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('failovers_total',0))")"
-  chunk_success="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('chunk_success_rate',0))")"
-  export_success="$(echo "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('export_success_rate',0))")"
+  retries_total="$(printf '%s' "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('retries_total',0))")"
+  failovers_total="$(printf '%s' "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('failovers_total',0))")"
+  chunk_success="$(printf '%s' "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('chunk_success_rate',0))")"
+  export_success="$(printf '%s' "$reliability_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pipeline',{}).get('export_success_rate',0))")"
   echo "  retries_total=${retries_total} failovers_total=${failovers_total} chunk_success_rate=${chunk_success} export_success_rate=${export_success}"
 else
   echo "INTERNAL_TOKEN not set; skipping internal reliability metrics validation"

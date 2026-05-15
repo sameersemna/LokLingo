@@ -58,10 +58,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 3. Open the running services:
 
 ```text
-Frontend: http://localhost:13000
+Frontend: http://localhost:3000
 Backend health: http://localhost:28080/health
 Backend readiness: http://localhost:28080/ready
-OCR health: http://localhost:18000/health
+OCR health: http://localhost:8000/health
 ```
 
 4. Stop the stack when finished:
@@ -69,6 +69,57 @@ OCR health: http://localhost:18000/health
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 ```
+
+## 🌐 LAN Access Setup
+
+LokLingo is configured for LAN access using hostname `promaxgb10-6116` and these endpoints:
+
+```text
+Frontend: http://promaxgb10-6116:3000
+Backend: http://promaxgb10-6116:28080
+OCR: http://promaxgb10-6116:8000
+```
+
+Use the validation helper after bringing the stack up:
+
+```bash
+bash scripts/check-lan-access.sh
+```
+
+Firewall notes:
+
+* Ensure inbound TCP ports `3000`, `28080`, and `8000` are allowed on the host.
+* On Linux hosts with `ufw`, allow access with:
+
+```bash
+sudo ufw allow 3000/tcp
+sudo ufw allow 28080/tcp
+sudo ufw allow 8000/tcp
+```
+
+Hostname troubleshooting:
+
+* Verify hostname resolution from another device:
+
+```bash
+ping promaxgb10-6116
+```
+
+* If hostname lookup fails, use the host LAN IP shown by `scripts/check-lan-access.sh`.
+* If DNS/mDNS is restricted on your network, add a local hosts entry on test devices:
+
+```text
+<LAN_IP> promaxgb10-6116
+```
+
+Android testing instructions:
+
+* Connect Android device to the same WiFi network as the host machine.
+* Open Chrome and navigate to `http://promaxgb10-6116:3000`.
+* If hostname does not resolve on Android, open `http://<LAN_IP>:3000` instead.
+* Confirm backend and OCR health pages load:
+    * `http://promaxgb10-6116:28080/health`
+    * `http://promaxgb10-6116:8000/health`
 
 ## ⚙️ Configuration
 
@@ -111,8 +162,8 @@ Base compose file:
 
 Development overlay:
 
-* `docker-compose.dev.yml` adds a local Redis container
-* It wires the backend to `redis://loklingo-redis:6379`
+* `docker-compose.dev.yml` pins LAN-facing host ports: frontend `3000`, backend `28080`, OCR `8000`
+* It forces backend-to-OCR traffic through the internal Docker DNS name `http://loklingo-ocr:8000`
 
 Observability overlay:
 

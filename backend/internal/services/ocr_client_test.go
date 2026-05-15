@@ -31,6 +31,7 @@ func TestNormalizeOCRServiceURL(t *testing.T) {
 		{name: "plain host", in: "http://localhost:8000", want: "http://localhost:8000"},
 		{name: "trailing slash", in: "http://localhost:8000/", want: "http://localhost:8000"},
 		{name: "ocr suffix", in: "http://localhost:8000/ocr", want: "http://localhost:8000"},
+		{name: "api v1 ocr suffix", in: "http://localhost:8000/api/v1/ocr", want: "http://localhost:8000"},
 		{name: "ocr suffix with slash", in: "http://localhost:8000/ocr/", want: "http://localhost:8000"},
 	}
 
@@ -82,8 +83,8 @@ func TestOCRClient_NormalizesOCRServiceURL(t *testing.T) {
 	const expectedText = "Hello from OCR normalized base"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ocr/pdf" {
-			t.Fatalf("expected path /ocr/pdf, got %s", r.URL.Path)
+		if r.URL.Path != "/api/v1/ocr/pdf" {
+			t.Fatalf("expected path /api/v1/ocr/pdf, got %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -119,8 +120,8 @@ func TestOCRClient_MultipartSuccess(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.Path != "/ocr/pdf" {
-			t.Errorf("expected path /ocr/pdf, got %s", r.URL.Path)
+		if r.URL.Path != "/api/v1/ocr/pdf" {
+			t.Errorf("expected path /api/v1/ocr/pdf, got %s", r.URL.Path)
 		}
 
 		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -300,8 +301,8 @@ func TestOCRClient_Success(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.Path != "/ocr/pdf" {
-			t.Errorf("expected path /ocr/pdf, got %s", r.URL.Path)
+		if r.URL.Path != "/api/v1/ocr/pdf" {
+			t.Errorf("expected path /api/v1/ocr/pdf, got %s", r.URL.Path)
 		}
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 			t.Errorf("expected multipart/form-data request, got %s", r.Header.Get("Content-Type"))

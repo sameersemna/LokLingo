@@ -478,6 +478,19 @@ def _gpu_available() -> bool:
         return False
 
 
+@app.on_event("startup")
+async def log_startup_config() -> None:
+    logger.info(
+        "OCR service startup: host=0.0.0.0 port=8000 shared_dir=%s max_pdf_bytes=%d max_pdf_pages=%d max_pdf_dpi=%d",
+        OCR_SHARED_STORAGE_DIR or "<disabled>",
+        MAX_PDF_UPLOAD_BYTES,
+        MAX_PDF_PAGES,
+        MAX_PDF_DPI,
+    )
+    route_paths = sorted({route.path for route in app.routes})
+    logger.info("OCR routes: %s", ", ".join(route_paths))
+
+
 @app.get("/health")
 def health() -> dict:
     with _cache_lock:
@@ -493,6 +506,7 @@ def health() -> dict:
     }
 
 
+@app.post("/api/v1/ocr", response_model=OCRImageResponse)
 @app.post("/ocr/image", response_model=OCRImageResponse)
 def ocr_image(req: OCRImageRequest) -> OCRImageResponse:
     """Extract text and bounding boxes from a single image."""
@@ -516,6 +530,7 @@ def ocr_image(req: OCRImageRequest) -> OCRImageResponse:
     return OCRImageResponse(text=text, confidence=confidence, blocks=blocks)
 
 
+@app.post("/api/v1/ocr/pdf", response_model=OCRPdfResponse)
 @app.post("/ocr/pdf", response_model=OCRPdfResponse)
 async def ocr_pdf(request: Request) -> OCRPdfResponse:
     """Extract text and bounding boxes from an uploaded PDF or shared file path."""

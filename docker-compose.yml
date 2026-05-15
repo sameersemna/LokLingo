@@ -5,7 +5,7 @@ services:
     container_name: loklingo-backend
     restart: unless-stopped
     ports:
-      - "${BACKEND_HOST_PORT:-8080}:8080"
+      - "${BACKEND_HOST_PORT:-28080}:8080"
     environment:
       APP_ENV: "${APP_ENV:-development}"
       PORT: "8080"
@@ -70,6 +70,12 @@ services:
     depends_on:
       loklingo-backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     networks:
       - loklingo-net
 
