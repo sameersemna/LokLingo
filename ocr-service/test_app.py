@@ -9,6 +9,8 @@ Run:
 """
 from __future__ import annotations
 
+import base64
+import json
 import io
 import os
 import sys
@@ -57,10 +59,10 @@ def _fake_pil_image() -> PIL.Image.Image:
     return PIL.Image.new("RGB", (100, 50), color=(200, 200, 200))
 
 
-def _make_ocr_result(texts: list[str]) -> list[list[tuple]]:
+def _make_ocr_result(texts: list[str], confidence: float = 0.9) -> list[list[tuple]]:
     """Fake PaddleOCR result structure: [page[line(bbox, (text, conf))]]."""
     lines = [
-        ([[0, 0], [10, 0], [10, 10], [0, 10]], (t, 0.9))
+        ([[0, 0], [10, 0], [10, 10], [0, 10]], (t, confidence))
         for t in texts
     ]
     return [lines]
@@ -172,6 +174,46 @@ class TestOCRImageParsingCompatibility(unittest.TestCase):
         self.assertEqual(blocks[0].text, "日本語")
         self.assertEqual(blocks[1].text, "English")
         self.assertEqual(blocks[0].bbox, [10.0, 10.0, 40.0, 30.0])
+        self.assertEqual(blocks[0].reading_order, 1)
+        self.assertEqual(blocks[1].reading_order, 2)
+
+    def test_ocr_pil_image_falls_back_on_low_confidence(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(side_effect=[
+            _make_ocr_result(["uncertain"], confidence=0.25),
+            _make_ocr_result(["rescued"], confidence=0.95),
+        ])
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "auto", source_dpi=200, min_confidence=0.8)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].text, "rescued")
+        self.assertEqual(blocks[0].reading_order, 1)
+
+    def test_ocr_image_can_export_json_and_debug_overlay(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["debuggable"], confidence=0.92))
+        buffer = io.BytesIO()
+        _fake_pil_image().save(buffer, format="PNG")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_debug_dir = os.path.join(temp_dir, "debug")
+            json_path = os.path.join(temp_dir, "ocr.json")
+            req = ocr_app.OCRImageRequest(
+                image_b64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+                lang="auto",
+                min_confidence=0.8,
+                export_json_path=json_path,
+                debug_output_dir=image_debug_dir,
+            )
+            with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+                resp = ocr_app.ocr_image(req)
+
+            self.assertTrue(os.path.exists(resp.exported_json_path or ""))
+            self.assertTrue(os.path.exists(resp.debug_image_path or ""))
+            with open(resp.exported_json_path or "", "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self.assertIn("debuggable", payload["text"])
 
 
 # ---------------------------------------------------------------------------
@@ -196,12 +238,22 @@ class TestOcrPdfFile(unittest.TestCase):
         )
 
     def _patch_convert(self, images_per_call: list[PIL.Image.Image]):
-        """Return exactly one image per convert_from_path call."""
-        call_iter = iter([[img] for img in images_per_call])
+        """Return exactly one rendered page path per convert_from_path call."""
+        self.rendered_paths: list[str] = []
+
+        def capture_convert(*args, **kwargs):
+            render_dir = kwargs["output_folder"]
+            page_num = kwargs["first_page"]
+            image = images_per_call[page_num - 1]
+            path = os.path.join(render_dir, f"page-{page_num}.png")
+            image.save(path)
+            self.rendered_paths.append(path)
+            return [path]
+
         return mock.patch.object(
             ocr_app,
             "convert_from_path",
-            side_effect=lambda *a, **kw: next(call_iter),
+            side_effect=capture_convert,
         )
 
     def _patch_ocr(self, texts_per_page: list[list[str]]):
@@ -245,7 +297,10 @@ class TestOcrPdfFile(unittest.TestCase):
 
         def capture_convert(*args, **kwargs):
             convert_calls.append(kwargs)
-            return [imgs[kwargs["first_page"] - 1]]
+            page_num = kwargs["first_page"]
+            path = os.path.join(kwargs["output_folder"], f"page-{page_num}.png")
+            imgs[page_num - 1].save(path)
+            return [path]
 
         with self._patch_infofn(3), \
              mock.patch.object(ocr_app, "convert_from_path", side_effect=capture_convert), \
@@ -257,26 +312,19 @@ class TestOcrPdfFile(unittest.TestCase):
             self.assertEqual(call["first_page"], i, f"first_page mismatch on iteration {i}")
             self.assertEqual(call["last_page"], i, f"last_page mismatch on iteration {i}")
 
-    # ---- image closed after each page ----
+    # ---- render files cleaned up after each page ----
 
-    def test_pil_image_closed_after_each_page(self):
-        closed: list[bool] = []
-        imgs = []
-        for _ in range(2):
-            img = _fake_pil_image()
-            original_close = img.close
-            def _close(_img=img, _orig=original_close):
-                closed.append(True)
-                _orig()
-            img.close = _close
-            imgs.append(img)
+    def test_rendered_page_files_cleaned_up_after_each_page(self):
+        imgs = [_fake_pil_image() for _ in range(2)]
 
         with self._patch_infofn(2), \
              self._patch_convert(imgs), \
              self._patch_ocr([["X"], ["Y"]]):
             ocr_app._ocr_pdf_file(self.tmp_pdf, "auto", 200)
 
-        self.assertEqual(closed, [True, True], "Expected image.close() called once per page")
+        self.assertEqual(len(self.rendered_paths), 2)
+        for path in self.rendered_paths:
+            self.assertFalse(os.path.exists(path), f"expected render path to be cleaned up: {path}")
 
     # ---- confidence average ----
 
@@ -292,7 +340,7 @@ class TestOcrPdfFile(unittest.TestCase):
         with self._patch_infofn(2), \
              self._patch_convert(imgs), \
              mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
-            result = ocr_app._ocr_pdf_file(self.tmp_pdf, "auto", 200)
+            result = ocr_app._ocr_pdf_file(self.tmp_pdf, "auto", 200, min_confidence=0.0)
 
         self.assertAlmostEqual(result.confidence, 0.5, places=2)
 
@@ -443,6 +491,11 @@ class TestOcrPdfEndpoint(unittest.TestCase):
             data={"lang": lang, "dpi": dpi},
         )
 
+    def _render_page_path(self, temp_dir: str, image: PIL.Image.Image, page_number: int = 1) -> str:
+        path = os.path.join(temp_dir, f"page-{page_number}.png")
+        image.save(path)
+        return path
+
     def test_missing_file_field_returns_400(self):
         # Send as multipart (files= dict forces multipart) but omit the 'file' field
         resp = self.client.post(
@@ -462,15 +515,16 @@ class TestOcrPdfEndpoint(unittest.TestCase):
         self.assertEqual(resp.status_code, 415)
 
     def test_successful_pdf_returns_200_with_expected_fields(self):
-        img = _fake_pil_image()
         p1 = [[([[0,0],[1,0],[1,1],[0,1]], ("Integration test", 0.95))]]
         fake_ocr = mock.MagicMock()
         fake_ocr.ocr = mock.MagicMock(return_value=p1)
 
-        with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
-             mock.patch.object(ocr_app, "convert_from_path", return_value=[img]), \
-             mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
-            resp = self._post_pdf()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page_path = self._render_page_path(temp_dir, _fake_pil_image())
+            with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
+                 mock.patch.object(ocr_app, "convert_from_path", return_value=[page_path]), \
+                 mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+                resp = self._post_pdf()
 
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -492,15 +546,16 @@ class TestOcrPdfEndpoint(unittest.TestCase):
             created.append(path)
             return path
 
-        img = _fake_pil_image()
         fake_ocr = mock.MagicMock()
         fake_ocr.ocr = mock.MagicMock(return_value=[[]])
 
-        with mock.patch.object(ocr_app, "_write_upload_to_temp_pdf", side_effect=tracking_write), \
-             mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
-             mock.patch.object(ocr_app, "convert_from_path", return_value=[img]), \
-             mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
-            self._post_pdf()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page_path = self._render_page_path(temp_dir, _fake_pil_image())
+            with mock.patch.object(ocr_app, "_write_upload_to_temp_pdf", side_effect=tracking_write), \
+                 mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
+                 mock.patch.object(ocr_app, "convert_from_path", return_value=[page_path]), \
+                 mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+                self._post_pdf()
 
         self.assertTrue(len(created) == 1, "Expected exactly one temp file created")
         self.assertFalse(
@@ -529,18 +584,19 @@ class TestOcrPdfEndpoint(unittest.TestCase):
             with open(file_path, "wb") as f:
                 f.write(b"%PDF-1.4")
 
-            img = _fake_pil_image()
             fake_ocr = mock.MagicMock()
             fake_ocr.ocr = mock.MagicMock(return_value=[[([[0,0],[1,0],[1,1],[0,1]], ("Shared path", 0.95))]])
 
-            with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", os.path.realpath(shared_dir)), \
-                 mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
-                 mock.patch.object(ocr_app, "convert_from_path", return_value=[img]), \
-                 mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
-                resp = self.client.post(
-                    "/ocr/pdf",
-                    json={"file_path": file_path, "lang": "en", "dpi": 200},
-                )
+            with tempfile.TemporaryDirectory() as render_dir:
+                page_path = self._render_page_path(render_dir, _fake_pil_image())
+                with mock.patch.object(ocr_app, "OCR_SHARED_STORAGE_DIR", os.path.realpath(shared_dir)), \
+                     mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
+                     mock.patch.object(ocr_app, "convert_from_path", return_value=[page_path]), \
+                     mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+                    resp = self.client.post(
+                        "/ocr/pdf",
+                        json={"file_path": file_path, "lang": "en", "dpi": 200},
+                    )
 
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Shared path", resp.json()["text"])
@@ -556,17 +612,18 @@ class TestOcrPdfEndpoint(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_json_base64_pdf_returns_200(self):
-        img = _fake_pil_image()
         fake_ocr = mock.MagicMock()
         fake_ocr.ocr = mock.MagicMock(return_value=[[([[0,0],[1,0],[1,1],[0,1]], ("Base64 path", 0.9))]])
 
-        with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
-             mock.patch.object(ocr_app, "convert_from_path", return_value=[img]), \
-             mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
-            resp = self.client.post(
-                "/ocr/pdf",
-                json={"pdf_b64": "JVBERi0xLjQKJSVFT0YK", "lang": "en", "dpi": 200},
-            )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page_path = self._render_page_path(temp_dir, _fake_pil_image())
+            with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "1"}), \
+                 mock.patch.object(ocr_app, "convert_from_path", return_value=[page_path]), \
+                 mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr):
+                resp = self.client.post(
+                    "/ocr/pdf",
+                    json={"pdf_b64": "JVBERi0xLjQKJSVFT0YK", "lang": "en", "dpi": 200},
+                )
 
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Base64 path", resp.json()["text"])

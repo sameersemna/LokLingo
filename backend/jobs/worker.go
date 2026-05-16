@@ -900,7 +900,28 @@ func averageOCRBlockConfidence(blocks []internalservices.OCRTextBlock) float64 {
 	return total / float64(count)
 }
 
-func extractOCRPagesAndConfidence(client internalservices.OCRClient, filePath, lang string) ([]string, float64, error) {
+type ocrPageConfidenceExtractorWithOptions interface {
+	ExtractPagesWithConfidenceAndOptions(filePath, lang string, options internalservices.OCRRequestOptions) ([]string, float64, error)
+}
+
+type ocrImageBlockExtractorWithOptions interface {
+	ExtractImageBlocksWithOptions(filePath, lang string, options internalservices.OCRRequestOptions) ([]internalservices.OCRTextBlock, error)
+}
+
+func shouldEnableOCRCorrection(mode Mode) bool {
+	// Keep Fast (overlay) mode low-latency; correction is aimed at Studio (layout)
+	// and OCR-only extraction quality.
+	return mode == ModeLayout || mode == ModeOCROnly
+}
+
+func extractOCRPagesAndConfidence(client internalservices.OCRClient, filePath, lang string, mode Mode) ([]string, float64, error) {
+	options := internalservices.OCRRequestOptions{Mode: string(mode)}
+	enabled := shouldEnableOCRCorrection(mode)
+	options.CorrectionEnabled = &enabled
+
+	if withOptions, ok := client.(ocrPageConfidenceExtractorWithOptions); ok {
+		return withOptions.ExtractPagesWithConfidenceAndOptions(filePath, lang, options)
+	}
 	if withConfidence, ok := client.(ocrPageConfidenceExtractor); ok {
 		return withConfidence.ExtractPagesWithConfidence(filePath, lang)
 	}
@@ -1106,7 +1127,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
-			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang)
+			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang, effectiveJobMode)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
@@ -1174,7 +1195,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			ocrTriggered = true
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
-			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang)
+			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang, effectiveJobMode)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
@@ -1267,7 +1288,16 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 
 		ocrStart := time.Now()
-		blocks, err := w.ocrClient.ExtractImageBlocks(job.FilePath, job.Lang)
+		ocrOptions := internalservices.OCRRequestOptions{Mode: string(effectiveJobMode)}
+		enabled := shouldEnableOCRCorrection(effectiveJobMode)
+		ocrOptions.CorrectionEnabled = &enabled
+		var blocks []internalservices.OCRTextBlock
+		var err error
+		if withOptions, ok := w.ocrClient.(ocrImageBlockExtractorWithOptions); ok {
+			blocks, err = withOptions.ExtractImageBlocksWithOptions(job.FilePath, job.Lang, ocrOptions)
+		} else {
+			blocks, err = w.ocrClient.ExtractImageBlocks(job.FilePath, job.Lang)
+		}
 		ocrMS = time.Since(ocrStart).Milliseconds()
 		observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 		if err != nil {
@@ -1475,9 +1505,14 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 		renderBlocks := make([]internalservices.ImageTextBlock, len(blocks))
 		for i, b := range blocks {
-			renderBlocks[i] = internalservices.ImageTextBlock{Text: b.Text, Bbox: b.Bbox}
+			renderBlocks[i] = internalservices.ImageTextBlock{Text: b.Text, Bbox: b.Bbox, RegionClass: b.RegionClass}
 		}
 		renderOpts := internalservices.DefaultOverlayOptions()
+		if effectiveJobMode == ModeLayout {
+			// Studio mode: use high-quality options as the base. Individual job
+			// fields (BgAlpha, TextPadding, JPEGQuality) can still override.
+			renderOpts = internalservices.DefaultStudioOptions()
+		}
 		if effectiveJobMode == ModeLayout {
 			// Layout mode keeps original OCR geometry and uses minimal internal
 			// padding so text does not touch bbox edges.

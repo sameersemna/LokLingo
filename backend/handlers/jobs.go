@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"loklingo/backend/internal/observability"
+	internalservices "loklingo/backend/internal/services"
 	"loklingo/backend/jobs"
 )
 
@@ -28,6 +29,8 @@ type queueStatsProvider interface {
 type JobsHandler struct {
 	store             jobs.Store
 	maxPDFUploadBytes int64
+	pdfService        internalservices.PDFService
+	maxPDFPages       int
 }
 
 type deadLetterLister interface {
@@ -44,6 +47,12 @@ func NewJobsHandler(store jobs.Store, maxPDFUploadBytes int64) *JobsHandler {
 		maxPDFUploadBytes = 25 * 1024 * 1024
 	}
 	return &JobsHandler{store: store, maxPDFUploadBytes: maxPDFUploadBytes}
+}
+
+// SetPDFGuard enables early PDF page-count rejection before jobs enter the queue.
+func (h *JobsHandler) SetPDFGuard(pdfService internalservices.PDFService, maxPDFPages int) {
+	h.pdfService = pdfService
+	h.maxPDFPages = maxPDFPages
 }
 
 // CreateJob handles POST /api/v1/jobs.
@@ -321,6 +330,20 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	if err := c.SaveFile(file, filePath); err != nil {
 		slog.Error("failed to save uploaded pdf", "err", err)
 		return errResponse(c, fiber.StatusInternalServerError, "failed to save uploaded file")
+	}
+
+	if h.pdfService != nil && h.maxPDFPages > 0 {
+		pageCount, pageErr := h.pdfService.PageCount(filePath)
+		if pageErr != nil {
+			_ = os.Remove(filePath)
+			slog.Warn("pdf page count failed before enqueue", "request_id", c.Locals("requestID"), "err", pageErr)
+			return errResponse(c, fiber.StatusBadRequest, "invalid PDF document")
+		}
+		if pageCount > h.maxPDFPages {
+			_ = os.Remove(filePath)
+			slog.Warn("pdf upload rejected due to page cap", "request_id", c.Locals("requestID"), "page_count", pageCount, "max_pdf_pages", h.maxPDFPages)
+			return errResponse(c, fiber.StatusRequestEntityTooLarge, fmt.Sprintf("pdf has %d pages; max allowed is %d", pageCount, h.maxPDFPages))
+		}
 	}
 
 	now := time.Now()

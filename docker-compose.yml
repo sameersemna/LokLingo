@@ -50,16 +50,43 @@ services:
       OCR_SHARED_STORAGE_DIR: "${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}"
       MAX_PDF_UPLOAD_BYTES: "${MAX_PDF_UPLOAD_BYTES:-104857600}"
       MAX_PDF_PAGES: "${MAX_PDF_PAGES:-200}"
+      OLLAMA_BASE_URL: "${OCR_OLLAMA_BASE_URL:-http://loklingo-ollama:11434}"
+      OCR_CORRECTION_ENABLED: "${OCR_CORRECTION_ENABLED:-false}"
+      OCR_CORRECTION_MODEL: "${OCR_CORRECTION_MODEL:-Keyvan/german-ocr}"
+      OCR_CORRECTION_TIMEOUT: "${OCR_CORRECTION_TIMEOUT:-8.0}"
+      OCR_CORRECTION_RETRIES: "${OCR_CORRECTION_RETRIES:-1}"
+      OCR_CORRECTION_LOW_CONFIDENCE_THRESHOLD: "${OCR_CORRECTION_LOW_CONFIDENCE_THRESHOLD:-0.78}"
+      OCR_CORRECTION_MAX_CHUNK_BLOCKS: "${OCR_CORRECTION_MAX_CHUNK_BLOCKS:-24}"
     volumes:
       - pdf_uploads:${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}:ro
     ports:
       - "${OCR_HOST_PORT:-8000}:8000"
+    depends_on:
+      loklingo-ollama:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 20s
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - loklingo-net
+
+  loklingo-ollama:
+    image: ollama/ollama:latest
+    container_name: loklingo-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
     networks:
       - loklingo-net
 
@@ -88,3 +115,4 @@ networks:
 
 volumes:
   pdf_uploads:
+  ollama_data:

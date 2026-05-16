@@ -92,12 +92,28 @@ async function parseErrorBody(res: Response): Promise<{ error?: string; request_
 
 async function fetchWithTimeout(input: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  const callerSignal = init?.signal
+  let timedOut = false
+  const handleCallerAbort = () => controller.abort()
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort()
+    } else {
+      callerSignal.addEventListener('abort', handleCallerAbort, { once: true })
+    }
+  }
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
   try {
     return await fetch(input, { ...init, signal: controller.signal })
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error('Request timed out. Please try again.', { cause: err })
+      if (timedOut) {
+        throw new Error('Request timed out. Please try again.', { cause: err })
+      }
+      throw err
     }
     if (err instanceof Error) {
       throw new Error('Network request failed.', { cause: err })
@@ -105,6 +121,9 @@ async function fetchWithTimeout(input: string, init?: RequestInit, timeoutMs = R
     throw new Error('Network request failed.', { cause: err })
   } finally {
     clearTimeout(timeoutId)
+    if (callerSignal) {
+      callerSignal.removeEventListener('abort', handleCallerAbort)
+    }
   }
 }
 
@@ -275,6 +294,7 @@ export async function translateImage(
   target: string,
   mode = 'overlay',
   onProgress?: (job: JobProgressUpdate) => void,
+  signal?: AbortSignal,
 ): Promise<TranslateResponse> {
   const form = new FormData()
   form.append('file', file)
@@ -285,6 +305,7 @@ export async function translateImage(
   const enqueue = await fetchJsonOrThrow<{ job_id: string }>('/api/v1/jobs/image', {
     method: 'POST',
     body: form,
+    signal,
   }, IMAGE_REQUEST_TIMEOUT_MS)
 
   const unsubscribe = subscribeJobEvents(

@@ -53,6 +53,27 @@ Structured logs emitted by the OCR chain:
 - `ocr_provider_fallback`
 - `ocr_completed`
 
+### OCR Correction (Local Ollama)
+
+LokLingo OCR service supports optional low-confidence post-correction using local Ollama models.
+
+- Correction is local-only (no remote inference endpoints).
+- Recommended German models:
+  - `Keyvan/german-ocr`
+  - `Keyvan/german-ocr-3.1`
+  - `qwen2.5-vl`
+  - `minicpm-v`
+- Requests gracefully degrade to raw OCR when correction is unavailable or times out.
+
+Environment controls:
+
+- `OCR_CORRECTION_ENABLED`
+- `OCR_CORRECTION_MODEL`
+- `OCR_CORRECTION_TIMEOUT`
+- `OCR_CORRECTION_RETRIES`
+- `OCR_CORRECTION_LOW_CONFIDENCE_THRESHOLD`
+- `OCR_CORRECTION_MAX_CHUNK_BLOCKS`
+
 ## Base URL
 
 ```
@@ -98,6 +119,8 @@ curl https://api.loklingo.example.com/api/v1/metrics/providers \
 
 In development (`APP_ENV=development`), authentication is optional for write routes. In production, both `WRITE_API_TOKEN` and `INTERNAL_TOKEN` are required.
 
+Every request includes an `X-Request-ID` response header, and error responses include the same identifier as `request_id` so logs and browser failures can be correlated.
+
 ## Health & Status Endpoints
 
 ### Health Check
@@ -134,6 +157,30 @@ Returns readiness status including dependencies (Redis, providers, OCR service).
 }
 ```
 
+### Central Health Dashboard
+```
+GET /api/v1/health/dashboard
+```
+
+Returns aggregated backend, OCR, Ollama, DB, and queue health for LAN operators and monitoring scripts.
+
+**Response (200 OK):**
+```json
+{
+  "service": "loklingo-backend",
+  "status": "ok",
+  "timestamp": "2026-05-15T12:34:56.789Z",
+  "uptime_seconds": 1234,
+  "dependencies": {
+    "backend": {"status": "ok"},
+    "queues": {"status": "ok", "details": {"queue_depth": 0, "stuck_jobs": 0, "retry_backlog": 0, "dead_letter_count": 0}},
+    "ocr": {"status": "ok", "latency_ms": 42},
+    "ollama": {"status": "disabled"},
+    "db": {"status": "ok", "latency_ms": 5}
+  }
+}
+```
+
 ## Core Translation Endpoints
 
 ### Synchronous Text Translation
@@ -153,6 +200,19 @@ POST /api/v1/translate
   "target": "es"
 }
 ```
+
+OCR request options (internal OCR service):
+
+- `mode`: `overlay` | `layout` | `ocr_only`
+- `ocr_correction_enabled`: boolean override for this request
+- `ocr_correction_model`: model override for this request
+- `visual_diff_mode`: include `raw_text` and unified `correction_diff` in response
+
+When `visual_diff_mode` is enabled, OCR responses may include:
+
+- `raw_text`: text before correction
+- `correction_diff`: unified diff between raw and corrected text
+- `correction`: metadata such as `applied`, `model`, `latency_ms`, `changed_characters`, and `confidence_delta`
 
 **Parameters:**
 - `text` (string, required): Text to translate (max ~5000 words)

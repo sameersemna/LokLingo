@@ -121,6 +121,36 @@ Android testing instructions:
     * `http://promaxgb10-6116:28080/health`
     * `http://promaxgb10-6116:8000/health`
 
+## 🧭 LAN Operations
+
+Recommended production-style LAN workflow:
+
+```bash
+bash scripts/start-lan.sh
+bash scripts/check-health.sh
+bash scripts/monitor-lan.sh
+bash scripts/stop-lan.sh
+```
+
+The stack is started with the production compose overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production up -d --build
+```
+
+The centralized health dashboard is exposed at:
+
+```text
+http://promaxgb10-6116:28080/api/v1/health/dashboard
+```
+
+Recovery docs:
+
+- [OCR crash](guide/recovery/ocr-crash.md)
+- [Ollama unavailable](guide/recovery/ollama-unavailable.md)
+- [Queue corruption](guide/recovery/queue-corruption.md)
+- [Stuck jobs](guide/recovery/stuck-jobs.md)
+
 ## ⚙️ Configuration
 
 LokLingo reads all runtime settings from environment variables.
@@ -139,6 +169,13 @@ Important variables:
 * `OCR_PROVIDER_TIMEOUT_SECONDS`: timeout in seconds for each provider attempt before fallback, defaults to `120`
 * `OCR_MAX_FALLBACKS`: max number of provider failovers allowed per OCR request, defaults to `2`
 * `OCR_SHARED_STORAGE_DIR`: shared directory mounted into backend and OCR containers for zero-copy OCR requests, defaults to `/tmp/loklingo`
+* `OCR_OLLAMA_BASE_URL`: OCR service Ollama endpoint for correction (`http://loklingo-ollama:11434` in compose)
+* `OCR_CORRECTION_ENABLED`: enables LLM post-correction for low-confidence OCR segments (default `false`)
+* `OCR_CORRECTION_MODEL`: correction model name, default `Keyvan/german-ocr`
+* `OCR_CORRECTION_TIMEOUT`: per-correction call timeout in seconds (default `8.0`)
+* `OCR_CORRECTION_RETRIES`: retry attempts for correction calls (default `1`)
+* `OCR_CORRECTION_LOW_CONFIDENCE_THRESHOLD`: confidence threshold used to select candidate blocks for correction (default `0.78`)
+* `OCR_CORRECTION_MAX_CHUNK_BLOCKS`: max OCR blocks per correction chunk (default `24`)
 * `WRITE_API_TOKEN`: protects write routes (`POST /api/v1/translate*`, `POST /api/v1/jobs*`); required in `production`, optional in `development`
 * `GLOBAL_RATE_LIMIT_PER_MINUTE`: per-IP request cap for non-health routes, defaults to `120`
 * `WRITE_RATE_LIMIT_PER_MINUTE`: per-IP cap for authenticated write requests, defaults to `40`
@@ -183,7 +220,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 Production command:
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production up -d
 ```
 
 Development with observability:
@@ -207,6 +244,36 @@ sh guide/smoke-observability.sh
 ```
 
 In production, `REDIS_URL` must point to an external Redis instance.
+
+## 🤖 Local OCR Correction With Ollama
+
+OCR correction is local-only and designed to improve German scanned document quality by correcting only low-confidence OCR regions.
+
+Pull required local models:
+
+```bash
+docker compose exec loklingo-ollama ollama pull Keyvan/german-ocr
+docker compose exec loklingo-ollama ollama pull Keyvan/german-ocr-3.1
+docker compose exec loklingo-ollama ollama pull qwen2.5-vl
+docker compose exec loklingo-ollama ollama pull minicpm-v
+```
+
+Enable correction in `.env`:
+
+```bash
+OCR_CORRECTION_ENABLED=true
+OCR_CORRECTION_MODEL=Keyvan/german-ocr
+OCR_OLLAMA_BASE_URL=http://loklingo-ollama:11434
+```
+
+Quick model availability check:
+
+```bash
+docker compose exec loklingo-ollama ollama list
+curl http://localhost:8000/health
+```
+
+The OCR health payload includes correction status, selected model, and cumulative correction metrics. If Ollama is unavailable or the model is missing, OCR falls back to raw PaddleOCR output without failing the request.
 
 ## ✅ Smoke Test
 

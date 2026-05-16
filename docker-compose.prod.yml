@@ -1,0 +1,18 @@
+services:
+  loklingo-backend:
+    profiles:
+      - production
+    environment:
+      APP_ENV: "production"
+
+  loklingo-ocr:
+    profiles:
+      - production
+
+  loklingo-ollama:
+    profiles:
+      - production
+
+  loklingo-frontend:
+    profiles:
+      - production

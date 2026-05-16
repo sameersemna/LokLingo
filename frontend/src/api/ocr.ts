@@ -3,6 +3,7 @@ const OCR_BASE = ''
 export interface TextBlock {
   text: string
   confidence: number
+  reading_order: number
   /** Axis-aligned bounding box [x1, y1, x2, y2] */
   bbox: [number, number, number, number]
 }
@@ -11,6 +12,8 @@ export interface OCRImageResponse {
   text: string
   confidence: number
   blocks: TextBlock[]
+  debug_image_path?: string | null
+  exported_json_path?: string | null
 }
 
 export interface PageResult {
@@ -18,12 +21,14 @@ export interface PageResult {
   text: string
   confidence: number
   blocks: TextBlock[]
+  debug_image_path?: string | null
 }
 
 export interface OCRPdfResponse {
   text: string
   confidence: number
   pages: PageResult[]
+  exported_json_path?: string | null
 }
 
 export async function extractTextFromImage(

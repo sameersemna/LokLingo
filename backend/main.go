@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -13,7 +15,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
 
 	"loklingo/backend/config"
 	"loklingo/backend/handlers"
@@ -98,13 +99,21 @@ func main() {
 	)
 	go worker.Run(ctx)
 
+	startupCtx, startupCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer startupCancel()
+	if err := handlers.CheckStartupDependencies(startupCtx, cfg, jobStore, pgPool); err != nil {
+		slog.Error("startup dependency check failed", "err", err)
+		os.Exit(1)
+	}
+
 	// --- HTTP server ---
+	startedAt := time.Now()
 	app := fiber.New(fiber.Config{
 		AppName: "LokLingo API",
 	})
 
-	app.Use(logger.New())
 	app.Use(middleware.RequestID())
+	app.Use(middleware.HTTPLogger())
 	app.Use(cors.New(cors.Config{
 		AllowOriginsFunc: allowLANOrigin,
 		AllowMethods:     "GET,POST,OPTIONS",
@@ -117,6 +126,7 @@ func main() {
 
 	translateHandler := handlers.NewTranslateHandler(translationService, jobStore)
 	jobsHandler := handlers.NewJobsHandler(jobStore, cfg.MaxPDFUploadBytes)
+	jobsHandler.SetPDFGuard(pdfService, cfg.MaxPDFPages)
 	ocrMetricsHandler := handlers.NewOCRMetricsHandler(pgPool)
 	providerMetricsHandler := handlers.NewProviderMetricsHandler(translationService)
 	reliabilityMetricsHandler := handlers.NewReliabilityMetricsHandler(jobStore)
@@ -124,6 +134,7 @@ func main() {
 	prometheusMetricsHandler := handlers.NewPrometheusMetricsHandler(jobStore, translationService)
 
 	api := app.Group("/api/v1")
+	api.Get("/health/dashboard", handlers.NewHealthDashboardHandler(cfg, jobStore, pgPool, startedAt))
 	writeAPI := api.Group("", middleware.WriteAPIAuth(cfg.AppEnv, cfg.WriteAPIToken), middleware.WriteRateLimiter(cfg.WriteRateLimitPerMinute), middleware.UploadRateLimiter(cfg.UploadRateLimitPerMinute))
 	writeAPI.Post("/translate", translateHandler.Translate)
 	writeAPI.Post("/translate/image", middleware.InflightGate(cfg.SyncImageMaxInflight, "/api/v1/translate/image"), translateHandler.TranslateImage)
@@ -144,9 +155,26 @@ func main() {
 
 	bindAddr := "0.0.0.0:" + cfg.Port
 	slog.Info("LokLingo backend starting", "port", cfg.Port, "bind", bindAddr)
-	if err := app.Listen(bindAddr); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
+	listenErrCh := make(chan error, 1)
+	go func() {
+		listenErrCh <- app.Listen(bindAddr)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer shutdownCancel()
+		if err := app.ShutdownWithContext(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Warn("graceful shutdown failed", "err", err)
+		}
+		if err := <-listenErrCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server error", "err", err)
+		}
+	case err := <-listenErrCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
 	}
 }
 

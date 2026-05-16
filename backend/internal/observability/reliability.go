@@ -39,6 +39,10 @@ type OCRMetrics struct {
 	ProviderRetriesTotal                 int64                      `json:"provider_retries_total"`
 	ProviderFallbackCount                int64                      `json:"provider_fallback_count"`
 	ProviderFallbackBudgetExhaustedTotal int64                      `json:"provider_fallback_budget_exhausted_total"`
+	CorrectionAppliedTotal               int64                      `json:"correction_applied_total"`
+	CorrectionLatencyMS                  OCRAggregateMetric         `json:"correction_latency_ms"`
+	CorrectionChangedCharactersTotal     int64                      `json:"correction_changed_characters_total"`
+	CorrectionConfidenceDelta            OCRAggregateMetric         `json:"correction_confidence_delta"`
 }
 
 type OCRProviderUsageSnapshot struct {
@@ -85,6 +89,13 @@ var (
 	ocrProviderFallbackTotal                atomic.Int64
 	ocrProviderFallbackBudgetExhaustedTotal atomic.Int64
 	ocrProviderUsageMap                     sync.Map
+
+	ocrCorrectionAppliedTotal           atomic.Int64
+	ocrCorrectionLatencyTotalMilli      atomic.Int64
+	ocrCorrectionLatencyCount           atomic.Int64
+	ocrCorrectionChangedCharactersTotal atomic.Int64
+	ocrCorrectionConfidenceDeltaMilli   atomic.Int64
+	ocrCorrectionConfidenceDeltaCount   atomic.Int64
 )
 
 func IncLiteLLMRetryAttempt()     { liteLLMRetryAttempts.Add(1) }
@@ -165,6 +176,33 @@ func IncOCRProviderFallbackBudgetExhausted() {
 	ocrProviderFallbackBudgetExhaustedTotal.Add(1)
 }
 
+func IncOCRCorrectionApplied() {
+	ocrCorrectionAppliedTotal.Add(1)
+}
+
+func RecordOCRCorrectionLatency(ms float64) {
+	if ms <= 0 {
+		return
+	}
+	ocrCorrectionLatencyTotalMilli.Add(int64(ms * 1000))
+	ocrCorrectionLatencyCount.Add(1)
+}
+
+func AddOCRCorrectionChangedCharacters(count int64) {
+	if count <= 0 {
+		return
+	}
+	ocrCorrectionChangedCharactersTotal.Add(count)
+}
+
+func RecordOCRCorrectionConfidenceDelta(delta float64) {
+	if delta == 0 {
+		return
+	}
+	ocrCorrectionConfidenceDeltaMilli.Add(int64(delta * 1000))
+	ocrCorrectionConfidenceDeltaCount.Add(1)
+}
+
 func snapshotOCRProviderUsage() []OCRProviderUsageSnapshot {
 	out := make([]OCRProviderUsageSnapshot, 0, 3)
 	ocrProviderUsageMap.Range(func(k, v any) bool {
@@ -213,6 +251,10 @@ func SnapshotReliability() ReliabilitySnapshot {
 			ProviderRetriesTotal:                 ocrProviderRetriesTotal.Load(),
 			ProviderFallbackCount:                ocrProviderFallbackTotal.Load(),
 			ProviderFallbackBudgetExhaustedTotal: ocrProviderFallbackBudgetExhaustedTotal.Load(),
+			CorrectionAppliedTotal:               ocrCorrectionAppliedTotal.Load(),
+			CorrectionLatencyMS:                  buildOCRAggregate(float64(ocrCorrectionLatencyTotalMilli.Load())/1000.0, ocrCorrectionLatencyCount.Load()),
+			CorrectionChangedCharactersTotal:     ocrCorrectionChangedCharactersTotal.Load(),
+			CorrectionConfidenceDelta:            buildOCRAggregate(float64(ocrCorrectionConfidenceDeltaMilli.Load())/1000.0, ocrCorrectionConfidenceDeltaCount.Load()),
 		},
 	}
 }

@@ -362,6 +362,7 @@ function App() {
   const [result, setResult] = useState("")
   const [resultKind, setResultKind] = useState<"translation" | "ocr">("translation")
   const [resultImageUrl, setResultImageUrl] = useState<string | null>(null)
+  const [resultImageLarge, setResultImageLarge] = useState(false)
   const [compareOriginalUrl, setCompareOriginalUrl] = useState<string | null>(null)
   const [compareOverlayUrl, setCompareOverlayUrl] = useState<string | null>(null)
   const [compareLayoutUrl, setCompareLayoutUrl] = useState<string | null>(null)
@@ -451,12 +452,33 @@ function App() {
   const demoModeTimerRef = useRef<number | null>(null)
   const compareRevealKeyRef = useRef<string | null>(null)
   const backendImageProgressActiveRef = useRef(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     return () => {
       if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
     }
   }, [compareOriginalUrl])
+
+  useEffect(() => {
+    let cancelled = false
+    setResultImageLarge(false)
+    if (!resultImageUrl) return
+    const checkSize = async () => {
+      try {
+        const response = await fetch(resultImageUrl)
+        const blob = await response.blob()
+        if (cancelled) return
+        setResultImageLarge(blob.size > 20 * 1024 * 1024)
+      } catch {
+        if (!cancelled) setResultImageLarge(false)
+      }
+    }
+    void checkSize()
+    return () => {
+      cancelled = true
+    }
+  }, [resultImageUrl])
 
   useEffect(() => {
     return () => {
@@ -878,6 +900,21 @@ function App() {
     setComparisonModalFlashTarget(focus === "overlay" ? "overlay" : "layout")
     setComparisonModalSliderPercent(50)
     setComparisonModalView(hasComparison ? "slider" : "gallery")
+    setComparisonQuickToggle(false)
+    setComparisonModalZoom(1)
+    setComparisonModalPan({ x: 0, y: 0 })
+    setComparisonModalPanning(false)
+    setComparisonModalOpen(true)
+  }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl])
+
+  const openComparisonSliderModal = useCallback((focus: ComparisonFocus = "layout") => {
+    const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
+    if (!hasComparison && !resultImageUrl) return
+    setComparisonModalFocus(hasComparison ? focus : "layout")
+    setComparisonModalSliderTarget(focus === "overlay" ? "overlay" : "layout")
+    setComparisonModalFlashTarget(focus === "overlay" ? "overlay" : "layout")
+    setComparisonModalSliderPercent(50)
+    setComparisonModalView("slider")
     setComparisonQuickToggle(false)
     setComparisonModalZoom(1)
     setComparisonModalPan({ x: 0, y: 0 })
@@ -1470,6 +1507,9 @@ function App() {
     resetOCRVisualization()
     setOcrConfidence(null)
 
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     let ocrBlocks: TextBlock[] = []
     let translatedOverlayText = ""
     const ocrExtractionPromise = extractTextFromImage(file, src)
@@ -1500,7 +1540,7 @@ function App() {
       const requestMode = PRODUCT_MODE_BACKEND_MAP[mode]
 
       if (requestMode === "ocr_only") {
-        const ocrRes = await translateImage(file, src, tgt, requestMode, handleImageJobProgress)
+        const ocrRes = await translateImage(file, src, tgt, requestMode, handleImageJobProgress, controller.signal)
         translatedOverlayText = ocrRes.translated_text ?? ""
         if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
           revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
@@ -1520,8 +1560,8 @@ function App() {
         return
       }
 
-      const overlayRes = await translateImage(file, src, tgt, "overlay", handleImageJobProgress)
-      const layoutRes = await translateImage(file, src, tgt, "layout", handleImageJobProgress)
+      const overlayRes = await translateImage(file, src, tgt, "overlay", handleImageJobProgress, controller.signal)
+      const layoutRes = await translateImage(file, src, tgt, "layout", handleImageJobProgress, controller.signal)
 
       if (!overlayRes.image_url || !layoutRes.image_url) {
         throw new Error("Image comparison requires both overlay and layout outputs")
@@ -1551,6 +1591,11 @@ function App() {
       completeImageProgress()
       pushToast("Image translated", "success")
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setPipelineWarning("Translation cancelled.")
+        failImageProgress()
+        return
+      }
       const friendlyWarning = getPipelineHelpMessage(err) ?? "Translation engine recovering. Please retry in a moment if processing does not complete."
       setPipelineWarning(friendlyWarning)
       failImageProgress()
@@ -1558,6 +1603,9 @@ function App() {
     } finally {
       void ocrExtractionPromise
       setOcrLoading(false)
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null
+      }
       if (fileRef.current) {
         fileRef.current.value = ""
         fileRef.current.accept = "image/*,application/pdf"
@@ -2789,13 +2837,7 @@ function App() {
                 <button
                   type="button"
                   className="icon-btn"
-                  onClick={() => {
-                    setComparisonModalFocus("layout")
-                    setComparisonModalSliderTarget("layout")
-                    setComparisonModalFlashTarget("layout")
-                    setComparisonModalView("slider")
-                    setComparisonModalOpen(true)
-                  }}
+                  onClick={() => openComparisonSliderModal("layout")}
                 >
                   Fullscreen
                 </button>
@@ -3097,12 +3139,16 @@ function App() {
                     <div className="result-image-wrap">
                       <img
                         className="result-image compare-clickable"
+                        style={resultImageLarge ? { maxWidth: "min(100%, 960px)" } : undefined}
                         src={resultImageUrl}
                         alt="Translated output preview"
                         loading="lazy"
                         onClick={() => openComparisonModal("layout")}
                       />
                     </div>
+                  )}
+                  {resultImageLarge && resultImageUrl && (
+                    <p className="text-mode-hint">Large preview detected; the output image is capped for smoother Studio mode rendering.</p>
                   )}
                 </>
               )}
@@ -3145,6 +3191,15 @@ function App() {
               ? "Ctrl+Enter to translate text"
               : "Image/PDF upload starts processing automatically"}
           </span>
+          {ocrLoading && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => abortControllerRef.current?.abort()}
+            >
+              Cancel
+            </button>
+          )}
           <button
             className="translate-btn"
             onClick={handleTranslate}

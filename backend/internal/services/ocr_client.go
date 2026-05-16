@@ -44,6 +44,16 @@ type ocrClient struct {
 	httpClient       *http.Client
 }
 
+// OCRRequestOptions carries optional request hints for OCR service features
+// that should not break legacy call sites.
+type OCRRequestOptions struct {
+	Mode               string
+	CorrectionEnabled  *bool
+	CorrectionModel    string
+	VisualDiffMode     bool
+	CorrectionTimeoutS int
+}
+
 // NormalizeOCRServiceURL removes a trailing /ocr path segment so callers can
 // configure either http://host:port or http://host:port/ocr without double-
 // prefixing request paths.
@@ -81,13 +91,27 @@ type ocrPDFResponse struct {
 	Text       string          `json:"text"`
 	Pages      []ocrPageResult `json:"pages"`
 	Confidence float64         `json:"confidence,omitempty"`
+	Correction *ocrCorrection  `json:"correction,omitempty"`
+}
+
+type ocrCorrection struct {
+	Applied           bool    `json:"applied"`
+	Model             string  `json:"model,omitempty"`
+	LatencyMS         float64 `json:"latency_ms,omitempty"`
+	ChangedCharacters int64   `json:"changed_characters,omitempty"`
+	ConfidenceDelta   float64 `json:"confidence_delta,omitempty"`
+	Retries           int64   `json:"retries,omitempty"`
 }
 
 // OCRTextBlock mirrors TextBlock from the OCR service.
 type OCRTextBlock struct {
-	Text       string    `json:"text"`
-	Bbox       []float64 `json:"bbox"` // [x1, y1, x2, y2]
-	Confidence float64   `json:"confidence,omitempty"`
+	Text           string    `json:"text"`
+	Bbox           []float64 `json:"bbox"` // [x1, y1, x2, y2]
+	Confidence     float64   `json:"confidence,omitempty"`
+	ReadingOrder   int       `json:"reading_order,omitempty"`
+	RegionClass    string    `json:"region_class,omitempty"`    // "title", "heading", "body", "code", etc.
+	HierarchyLevel int       `json:"hierarchy_level,omitempty"` // 0=body, 1=title, 2=heading, 3=subheading
+	ColumnID       int       `json:"column_id,omitempty"`       // 0-based column index in multi-column layouts
 }
 
 type ocrPageResult struct {
@@ -97,8 +121,9 @@ type ocrPageResult struct {
 }
 
 type ocrImageResponse struct {
-	Text   string         `json:"text"`
-	Blocks []OCRTextBlock `json:"blocks"`
+	Text       string         `json:"text"`
+	Blocks     []OCRTextBlock `json:"blocks"`
+	Correction *ocrCorrection `json:"correction,omitempty"`
 }
 
 const ocrPDFPath = "/api/v1/ocr/pdf"
@@ -108,7 +133,7 @@ var ocrMaxResponseBodyBytes int64 = 8 * 1024 * 1024
 
 // fetchOCRResponse routes the PDF through shared-path → multipart → JSON-stream
 // strategies and returns the decoded OCR response.
-func (c *ocrClient) fetchOCRResponse(filePath, lang string) (ocrPDFResponse, error) {
+func (c *ocrClient) fetchOCRResponse(filePath, lang string, options OCRRequestOptions) (ocrPDFResponse, error) {
 	if c.baseURL == "" {
 		return ocrPDFResponse{}, fmt.Errorf("ocr: service URL is not configured")
 	}
@@ -127,7 +152,7 @@ func (c *ocrClient) fetchOCRResponse(filePath, lang string) (ocrPDFResponse, err
 	)
 
 	if useShared {
-		resp, status, err := c.extractOCRSharedPath(filePath, lang)
+		resp, status, err := c.extractOCRSharedPath(filePath, lang, options)
 		if err == nil {
 			slog.Info("ocr_request_strategy", "file", filePath, "strategy", "shared_path")
 			return resp, nil
@@ -142,7 +167,7 @@ func (c *ocrClient) fetchOCRResponse(filePath, lang string) (ocrPDFResponse, err
 		)
 	}
 
-	resp, status, err := c.extractOCRMultipart(filePath, lang)
+	resp, status, err := c.extractOCRMultipart(filePath, lang, options)
 	if err == nil {
 		slog.Info("ocr_request_strategy", "file", filePath, "strategy", "multipart_upload")
 		return resp, nil
@@ -156,7 +181,7 @@ func (c *ocrClient) fetchOCRResponse(filePath, lang string) (ocrPDFResponse, err
 			"status", status,
 			"err", err,
 		)
-		jsonResp, jsonErr := c.extractOCRJSONStream(filePath, lang)
+		jsonResp, jsonErr := c.extractOCRJSONStream(filePath, lang, options)
 		if jsonErr == nil {
 			slog.Info("ocr_request_strategy", "file", filePath, "strategy", "json_base64")
 		}
@@ -170,7 +195,7 @@ func (c *ocrClient) fetchOCRResponse(filePath, lang string) (ocrPDFResponse, err
 // concatenated text. It first tries multipart/form-data, then falls back
 // to streamed JSON base64 for compatibility.
 func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
-	resp, err := c.fetchOCRResponse(filePath, lang)
+	resp, err := c.fetchOCRResponse(filePath, lang, OCRRequestOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -185,7 +210,7 @@ func (c *ocrClient) ExtractText(filePath, lang string) (string, error) {
 // element's text is returned. Otherwise the full text is wrapped in a
 // single-element slice for backward compatibility with older service versions.
 func (c *ocrClient) ExtractPages(filePath, lang string) ([]string, error) {
-	resp, err := c.fetchOCRResponse(filePath, lang)
+	resp, err := c.fetchOCRResponse(filePath, lang, OCRRequestOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +232,44 @@ func (c *ocrClient) ExtractPages(filePath, lang string) ([]string, error) {
 // confidence score when available. It is intentionally an extra method (not
 // part of OCRClient) so existing callers can type-assert support gradually.
 func (c *ocrClient) ExtractPagesWithConfidence(filePath, lang string) ([]string, float64, error) {
-	resp, err := c.fetchOCRResponse(filePath, lang)
+	resp, err := c.fetchOCRResponse(filePath, lang, OCRRequestOptions{})
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(resp.Pages) > 0 {
+		pages := make([]string, len(resp.Pages))
+		confidenceTotal := 0.0
+		confidenceCount := 0
+		for i, p := range resp.Pages {
+			pages[i] = p.Text
+			if p.Confidence > 0 {
+				confidenceTotal += p.Confidence
+				confidenceCount++
+				continue
+			}
+			for _, b := range p.Blocks {
+				if b.Confidence > 0 {
+					confidenceTotal += b.Confidence
+					confidenceCount++
+				}
+			}
+		}
+		avg := 0.0
+		if confidenceCount > 0 {
+			avg = confidenceTotal / float64(confidenceCount)
+		} else if resp.Confidence > 0 {
+			avg = resp.Confidence
+		}
+		return pages, avg, nil
+	}
+	if resp.Text == "" {
+		return nil, 0, fmt.Errorf("ocr: service returned empty response")
+	}
+	return []string{resp.Text}, resp.Confidence, nil
+}
+
+func (c *ocrClient) ExtractPagesWithConfidenceAndOptions(filePath, lang string, options OCRRequestOptions) ([]string, float64, error) {
+	resp, err := c.fetchOCRResponse(filePath, lang, options)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -244,6 +306,10 @@ func (c *ocrClient) ExtractPagesWithConfidence(filePath, lang string) ([]string,
 }
 
 func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, error) {
+	return c.ExtractImageBlocksWithOptions(filePath, lang, OCRRequestOptions{})
+}
+
+func (c *ocrClient) ExtractImageBlocksWithOptions(filePath, lang string, options OCRRequestOptions) ([]OCRTextBlock, error) {
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("ocr: service URL is not configured")
 	}
@@ -256,10 +322,26 @@ func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, e
 	}
 	mimeType := http.DetectContentType(raw)
 	body, err := json.Marshal(map[string]interface{}{
-		"image_b64": base64.StdEncoding.EncodeToString(raw),
-		"mime_type": mimeType,
-		"lang":      lang,
+		"image_b64":        base64.StdEncoding.EncodeToString(raw),
+		"mime_type":        mimeType,
+		"lang":             lang,
+		"mode":             options.Mode,
+		"visual_diff_mode": options.VisualDiffMode,
 	})
+	if options.CorrectionEnabled != nil {
+		var temp map[string]interface{}
+		if err := json.Unmarshal(body, &temp); err != nil {
+			return nil, fmt.Errorf("ocr: decode image request body for options: %w", err)
+		}
+		temp["ocr_correction_enabled"] = *options.CorrectionEnabled
+		if strings.TrimSpace(options.CorrectionModel) != "" {
+			temp["ocr_correction_model"] = strings.TrimSpace(options.CorrectionModel)
+		}
+		body, err = json.Marshal(temp)
+		if err != nil {
+			return nil, fmt.Errorf("ocr: rebuild image request body with options: %w", err)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ocr: build image OCR request body: %w", err)
 	}
@@ -302,6 +384,14 @@ func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, e
 	}
 	if len(decoded.Blocks) == 0 {
 		return nil, fmt.Errorf("ocr: image response returned no blocks")
+	}
+	if decoded.Correction != nil {
+		observability.RecordOCRCorrectionLatency(decoded.Correction.LatencyMS)
+		observability.AddOCRCorrectionChangedCharacters(decoded.Correction.ChangedCharacters)
+		observability.RecordOCRCorrectionConfidenceDelta(decoded.Correction.ConfidenceDelta)
+		if decoded.Correction.Applied {
+			observability.IncOCRCorrectionApplied()
+		}
 	}
 	return decoded.Blocks, nil
 }
@@ -414,12 +504,28 @@ func readBodyLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 	return b, nil
 }
 
-func (c *ocrClient) extractOCRSharedPath(filePath, lang string) (ocrPDFResponse, int, error) {
+func (c *ocrClient) extractOCRSharedPath(filePath, lang string, options OCRRequestOptions) (ocrPDFResponse, int, error) {
 	body, err := json.Marshal(map[string]interface{}{
-		"file_path": filePath,
-		"lang":      lang,
-		"dpi":       200,
+		"file_path":        filePath,
+		"lang":             lang,
+		"dpi":              200,
+		"mode":             options.Mode,
+		"visual_diff_mode": options.VisualDiffMode,
 	})
+	if options.CorrectionEnabled != nil {
+		var temp map[string]interface{}
+		if err := json.Unmarshal(body, &temp); err != nil {
+			return ocrPDFResponse{}, 0, fmt.Errorf("ocr: decode shared-path body for options: %w", err)
+		}
+		temp["ocr_correction_enabled"] = *options.CorrectionEnabled
+		if strings.TrimSpace(options.CorrectionModel) != "" {
+			temp["ocr_correction_model"] = strings.TrimSpace(options.CorrectionModel)
+		}
+		body, err = json.Marshal(temp)
+		if err != nil {
+			return ocrPDFResponse{}, 0, fmt.Errorf("ocr: rebuild shared-path body with options: %w", err)
+		}
+	}
 	if err != nil {
 		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: build shared-path request body: %w", err)
 	}
@@ -450,7 +556,7 @@ func (c *ocrClient) extractOCRSharedPath(filePath, lang string) (ocrPDFResponse,
 	return ocrResp, httpResp.StatusCode, nil
 }
 
-func (c *ocrClient) extractOCRMultipart(filePath, lang string) (ocrPDFResponse, int, error) {
+func (c *ocrClient) extractOCRMultipart(filePath, lang string, options OCRRequestOptions) (ocrPDFResponse, int, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return ocrPDFResponse{}, 0, fmt.Errorf("ocr: read file %q: %w", filePath, err)
@@ -470,6 +576,30 @@ func (c *ocrClient) extractOCRMultipart(filePath, lang string) (ocrPDFResponse, 
 		if err := mw.WriteField("dpi", "200"); err != nil {
 			_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart dpi field: %w", err))
 			return
+		}
+		if strings.TrimSpace(options.Mode) != "" {
+			if err := mw.WriteField("mode", strings.TrimSpace(options.Mode)); err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart mode field: %w", err))
+				return
+			}
+		}
+		if options.VisualDiffMode {
+			if err := mw.WriteField("visual_diff_mode", "true"); err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart visual_diff_mode field: %w", err))
+				return
+			}
+		}
+		if options.CorrectionEnabled != nil {
+			if err := mw.WriteField("ocr_correction_enabled", strconv.FormatBool(*options.CorrectionEnabled)); err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart correction flag: %w", err))
+				return
+			}
+			if strings.TrimSpace(options.CorrectionModel) != "" {
+				if err := mw.WriteField("ocr_correction_model", strings.TrimSpace(options.CorrectionModel)); err != nil {
+					_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart correction model: %w", err))
+					return
+				}
+			}
 		}
 
 		part, err := mw.CreateFormFile("file", filepath.Base(filePath))
@@ -510,7 +640,7 @@ func (c *ocrClient) extractOCRMultipart(filePath, lang string) (ocrPDFResponse, 
 	return ocrResp, httpResp.StatusCode, nil
 }
 
-func (c *ocrClient) extractOCRJSONStream(filePath, lang string) (ocrPDFResponse, error) {
+func (c *ocrClient) extractOCRJSONStream(filePath, lang string, options OCRRequestOptions) (ocrPDFResponse, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return ocrPDFResponse{}, fmt.Errorf("ocr: read file %q: %w", filePath, err)
@@ -539,7 +669,20 @@ func (c *ocrClient) extractOCRJSONStream(filePath, lang string) (ocrPDFResponse,
 			return
 		}
 
-		tail := `","lang":` + strconv.Quote(lang) + `,"dpi":200}`
+		tail := `","lang":` + strconv.Quote(lang) + `,"dpi":200`
+		if strings.TrimSpace(options.Mode) != "" {
+			tail += `,"mode":` + strconv.Quote(strings.TrimSpace(options.Mode))
+		}
+		if options.VisualDiffMode {
+			tail += `,"visual_diff_mode":true`
+		}
+		if options.CorrectionEnabled != nil {
+			tail += `,"ocr_correction_enabled":` + strconv.FormatBool(*options.CorrectionEnabled)
+			if strings.TrimSpace(options.CorrectionModel) != "" {
+				tail += `,"ocr_correction_model":` + strconv.Quote(strings.TrimSpace(options.CorrectionModel))
+			}
+		}
+		tail += `}`
 		if _, err := bw.WriteString(tail); err != nil {
 			_ = pw.CloseWithError(fmt.Errorf("ocr: write json tail: %w", err))
 			return
@@ -589,6 +732,14 @@ func decodeOCRResponse(r io.Reader) (ocrPDFResponse, error) {
 	}
 	if result.Text == "" && len(result.Pages) == 0 {
 		return ocrPDFResponse{}, fmt.Errorf("ocr: service returned empty response")
+	}
+	if result.Correction != nil {
+		observability.RecordOCRCorrectionLatency(result.Correction.LatencyMS)
+		observability.AddOCRCorrectionChangedCharacters(result.Correction.ChangedCharacters)
+		observability.RecordOCRCorrectionConfidenceDelta(result.Correction.ConfidenceDelta)
+		if result.Correction.Applied {
+			observability.IncOCRCorrectionApplied()
+		}
 	}
 	return result, nil
 }
