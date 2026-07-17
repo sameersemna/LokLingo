@@ -25,6 +25,18 @@ services:
       REDIS_URL: "${REDIS_URL:-}"
       POSTGRES_DSN: "${POSTGRES_DSN}"
       INTERNAL_TOKEN: "${INTERNAL_TOKEN:-}"
+      WRITE_API_TOKEN: "${WRITE_API_TOKEN:-}"
+      GLOBAL_RATE_LIMIT_PER_MINUTE: "${GLOBAL_RATE_LIMIT_PER_MINUTE:-120}"
+      WRITE_RATE_LIMIT_PER_MINUTE: "${WRITE_RATE_LIMIT_PER_MINUTE:-40}"
+      UPLOAD_RATE_LIMIT_PER_MINUTE: "${UPLOAD_RATE_LIMIT_PER_MINUTE:-12}"
+      SYNC_IMAGE_MAX_INFLIGHT: "${SYNC_IMAGE_MAX_INFLIGHT:-8}"
+      MAX_PDF_UPLOAD_BYTES: "${MAX_PDF_UPLOAD_BYTES:-104857600}"
+      MAX_PDF_PAGES: "${MAX_PDF_PAGES:-200}"
+      TRANSLATE_CONCURRENCY: "${TRANSLATE_CONCURRENCY:-3}"
+      MAX_LLM_CONCURRENCY: "${MAX_LLM_CONCURRENCY:-10}"
+      TRANSLATE_CHUNK_MIN_WORDS: "${TRANSLATE_CHUNK_MIN_WORDS:-80}"
+      TRANSLATE_CHUNK_MAX_WORDS: "${TRANSLATE_CHUNK_MAX_WORDS:-150}"
+      LITELLM_REQUEST_TIMEOUT_SECONDS: "${LITELLM_REQUEST_TIMEOUT_SECONDS:-300}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -95,13 +107,14 @@ services:
       context: ./frontend
     container_name: loklingo-frontend
     restart: unless-stopped
+    # Non-root nginx listens on 8080 inside the container (see frontend/Dockerfile).
     ports:
-      - "${FRONTEND_HOST_PORT:-3000}:80"
+      - "${FRONTEND_HOST_PORT:-3000}:8080"
     depends_on:
       loklingo-backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
       interval: 20s
       timeout: 10s
       retries: 3

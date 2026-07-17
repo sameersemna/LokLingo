@@ -361,6 +361,94 @@ func TestConfigValidate_ProductionRequiresWriteAPIToken(t *testing.T) {
 	}
 }
 
+func TestConfigValidate_ProductionRequiresInternalToken(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                       "production",
+		WriteAPIToken:                "this-is-a-strong-write-api-token-32",
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "gpt-4o-mini",
+		LiteLLMAPIKey:                "prod-litellm-key-not-example",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for missing INTERNAL_TOKEN in production")
+	}
+	if !strings.Contains(err.Error(), "INTERNAL_TOKEN") {
+		t.Fatalf("expected validation error to mention INTERNAL_TOKEN, got %q", err.Error())
+	}
+}
+
+func TestConfigValidate_ProductionRejectsWeakTokens(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                       "production",
+		WriteAPIToken:                "replace-with-strong-random-token",
+		InternalToken:                "dev-internal-token",
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "gpt-4o-mini",
+		LiteLLMAPIKey:                "sk-loklingo",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for weak production secrets")
+	}
+	msg := err.Error()
+	for _, key := range []string{"WRITE_API_TOKEN", "INTERNAL_TOKEN", "LITELLM_API_KEY"} {
+		if !strings.Contains(msg, key) {
+			t.Fatalf("expected validation error to mention %s, got %q", key, msg)
+		}
+	}
+}
+
+func TestConfigValidate_ProductionAcceptsStrongTokens(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                       "production",
+		WriteAPIToken:                "this-is-a-strong-write-api-token-32",
+		InternalToken:                "this-is-a-strong-internal-token-32",
+		LiteLLMBaseURL:               "http://latitude:11435",
+		LiteLLMModel:                 "gpt-4o-mini",
+		LiteLLMAPIKey:                "prod-litellm-key-not-example",
+		OCRServiceURL:                "http://loklingo-ocr:8000",
+		RedisURL:                     "redis://loklingo-redis:6379",
+		TranslateConcurrency:         3,
+		MaxLLMConcurrency:            10,
+		TranslateChunkMinWords:       80,
+		TranslateChunkMaxWords:       150,
+		LiteLLMRequestTimeoutSeconds: 300,
+		GlobalRateLimitPerMinute:     120,
+		WriteRateLimitPerMinute:      40,
+		UploadRateLimitPerMinute:     12,
+		SyncImageMaxInflight:         8,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid production config with strong tokens, got %v", err)
+	}
+}
+
 func TestConfigValidate_DevelopmentAllowsMissingWriteAPIToken(t *testing.T) {
 	cfg := &Config{
 		AppEnv:                       "development",

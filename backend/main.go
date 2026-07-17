@@ -15,6 +15,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 
 	"loklingo/backend/config"
 	"loklingo/backend/handlers"
@@ -108,16 +109,34 @@ func main() {
 
 	// --- HTTP server ---
 	startedAt := time.Now()
+	// BodyLimit: cap raw request bodies to PDF upload max + 1 MiB headroom for multipart overhead.
+	bodyLimit := int(cfg.MaxPDFUploadBytes) + (1 << 20)
+	if bodyLimit < 2<<20 {
+		bodyLimit = 2 << 20
+	}
 	app := fiber.New(fiber.Config{
-		AppName: "LokLingo API",
+		AppName:               "LokLingo API",
+		BodyLimit:             bodyLimit,
+		DisableStartupMessage: cfg.AppEnv == "production",
+		// Reduce fingerprinting; keep meaningful error messages for clients.
+		ServerHeader: "",
+		// Do NOT trust X-Forwarded-For by default: backend host port is LAN-exposed and
+		// clients could spoof IPs to bypass rate limits. Rate limit on RemoteAddr.
 	})
 
+	// Recover first so panics become 500s instead of process crashes.
+	app.Use(recover.New(recover.Config{
+		EnableStackTrace: cfg.AppEnv != "production",
+	}))
 	app.Use(middleware.RequestID())
+	app.Use(middleware.SecurityHeaders())
 	app.Use(middleware.HTTPLogger())
 	app.Use(cors.New(cors.Config{
 		AllowOriginsFunc: allowLANOrigin,
 		AllowMethods:     "GET,POST,OPTIONS",
-		AllowHeaders:     "Content-Type,Authorization",
+		AllowHeaders:     "Content-Type,Authorization,X-API-Token,X-Internal-Token,X-Request-Id",
+		ExposeHeaders:    "X-Request-Id,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset",
+		MaxAge:           600,
 	}))
 	app.Use(middleware.GlobalRateLimiter(cfg.GlobalRateLimitPerMinute))
 

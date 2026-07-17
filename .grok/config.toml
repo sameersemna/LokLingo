@@ -1,0 +1,7 @@
+[project]
+name = "LokLingo"
+description = "Self-hosted multilingual translation platform"
+
+[context]
+include = ["**/*.go", "**/*.tsx", "**/*.md", "docker-compose*.yml"]
+exclude = ["node_modules", "dist", "*.log"]

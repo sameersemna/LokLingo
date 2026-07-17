@@ -355,3 +355,20 @@ Verification snapshot:
 
 Publish status:
 - Pushed to origin/main at 670d668.
+
+
+
+
+
+grok mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking
+grok mcp add memory -- npx -y @modelcontextprotocol/server-memory
+grok mcp add architect -- uvx mcp-architect
+grok mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+grok mcp add playwright -- npx @playwright/mcp@latest
+
+Added stdio MCP server 'playwright' with command: npx @playwright/mcp@latest to user config
+File modified: ~/.grok/config.toml
+
+grok mcp list
+grok mcp doctor
+grok inspect

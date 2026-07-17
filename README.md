@@ -150,6 +150,22 @@ Recovery docs:
 - [Ollama unavailable](guide/recovery/ollama-unavailable.md)
 - [Queue corruption](guide/recovery/queue-corruption.md)
 - [Stuck jobs](guide/recovery/stuck-jobs.md)
+- [Security hardening](guide/security-hardening.md)
+
+Self-heal / backup:
+
+```bash
+bash scripts/self-heal.sh              # one-shot recovery
+bash scripts/self-heal.sh --watch      # continuous healing loop
+bash scripts/backup-restore.sh backup  # Redis/Postgres/uploads snapshot
+```
+
+Playwright E2E (stack must be up):
+
+```bash
+cd e2e && npm install && npx playwright install chromium
+npx playwright test
+```
 
 ## ⚙️ Configuration
 

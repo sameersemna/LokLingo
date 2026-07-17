@@ -1,18 +1,116 @@
+# Production overlay — security, resource limits, and self-healing defaults.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production up -d --build
+#
+# Requires a hardened .env (copy from .env.production / .env.example and replace ALL placeholders).
+
 services:
   loklingo-backend:
     profiles:
       - production
     environment:
       APP_ENV: "production"
+      WRITE_API_TOKEN: "${WRITE_API_TOKEN:?WRITE_API_TOKEN is required in production}"
+      INTERNAL_TOKEN: "${INTERNAL_TOKEN:?INTERNAL_TOKEN is required in production}"
+      GLOBAL_RATE_LIMIT_PER_MINUTE: "${GLOBAL_RATE_LIMIT_PER_MINUTE:-60}"
+      WRITE_RATE_LIMIT_PER_MINUTE: "${WRITE_RATE_LIMIT_PER_MINUTE:-20}"
+      UPLOAD_RATE_LIMIT_PER_MINUTE: "${UPLOAD_RATE_LIMIT_PER_MINUTE:-6}"
+      SYNC_IMAGE_MAX_INFLIGHT: "${SYNC_IMAGE_MAX_INFLIGHT:-4}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    mem_limit: 2g
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
 
   loklingo-ocr:
     profiles:
       - production
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    mem_limit: 6g
+    cpus: "4.0"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
 
   loklingo-ollama:
     profiles:
       - production
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    mem_limit: 8g
+    cpus: "4.0"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
 
   loklingo-frontend:
     profiles:
       - production
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=64m,mode=1777
+      - /var/run:size=8m,mode=1777
+    ports:
+      # Non-root nginx listens on 8080 inside the container.
+      - "${FRONTEND_HOST_PORT:-3000}:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 256m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      loklingo-backend:
+        condition: service_healthy
+      loklingo-ocr:
+        condition: service_healthy

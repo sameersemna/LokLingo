@@ -142,7 +142,7 @@ groups:
           summary: OCR provider fallback budget exhausted
           description: OCR fallback budget was exhausted at least once in the last 10 minutes.
 
-      - alert: LokLingoOCRFallbackBudgetExhausted
+      - alert: LokLingoOCRFallbackBudgetExhaustedCritical
         expr: increase(loklingo_ocr_provider_fallback_budget_exhausted_total[10m]) >= 3
         for: 5m
         labels:
@@ -151,3 +151,33 @@ groups:
         annotations:
           summary: OCR provider fallback budget repeatedly exhausted
           description: OCR fallback budget exhaustion occurred three or more times in the last 10 minutes.
+
+      - alert: LokLingoCircuitBreakerOpen
+        expr: increase(loklingo_litellm_circuit_opened_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: loklingo
+        annotations:
+          summary: LiteLLM circuit breaker opened
+          description: Translation circuit breaker opened at least once in the last 10 minutes — check LiteLLM/Ollama health.
+
+      - alert: LokLingoCircuitRejectSpike
+        expr: increase(loklingo_litellm_circuit_reject_total[5m]) > 30
+        for: 5m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: Translation requests rejected by open circuit breaker
+          description: More than 30 circuit rejections in 5 minutes indicates sustained provider outage.
+
+      - alert: LokLingoBackendDown
+        expr: up{job="loklingo-metrics-proxy"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: loklingo
+        annotations:
+          summary: LokLingo metrics endpoint is down
+          description: Prometheus cannot scrape LokLingo metrics proxy — backend or proxy may be unavailable.

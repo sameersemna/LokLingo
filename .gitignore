@@ -10,6 +10,8 @@
 .env.*.local
 .env.development
 .env.production
+# Local backups may contain secrets
+.backups/
 *.pem
 
 # --- Go (Backend) ---

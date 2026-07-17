@@ -125,8 +125,17 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.RedisURL) == "" {
 		missing = append(missing, "REDIS_URL")
 	}
-	if strings.EqualFold(strings.TrimSpace(c.AppEnv), "production") && strings.TrimSpace(c.WriteAPIToken) == "" {
-		missing = append(missing, "WRITE_API_TOKEN")
+	if strings.EqualFold(strings.TrimSpace(c.AppEnv), "production") {
+		if strings.TrimSpace(c.WriteAPIToken) == "" {
+			missing = append(missing, "WRITE_API_TOKEN")
+		}
+		if strings.TrimSpace(c.InternalToken) == "" {
+			missing = append(missing, "INTERNAL_TOKEN")
+		}
+		// Reject well-known placeholders / weak defaults that ship in example files.
+		for _, weak := range weakProductionSecrets(c) {
+			invalid = append(invalid, weak)
+		}
 	}
 
 	if c.TranslateConcurrency <= 0 {
@@ -178,6 +187,65 @@ func resolveRedisURL(appEnv string) string {
 		return v
 	}
 	return os.Getenv("REDIS_URL")
+}
+
+// weakProductionSecrets returns human-readable validation errors for secrets
+// that must never be used in production (placeholders from .env.example/.env.production templates).
+func weakProductionSecrets(c *Config) []string {
+	weak := make([]string, 0, 4)
+	writeToken := strings.TrimSpace(c.WriteAPIToken)
+	internalToken := strings.TrimSpace(c.InternalToken)
+
+	placeholderTokens := map[string]struct{}{
+		"replace-with-strong-random-token": {},
+		"replace-me-for-local-dev":         {},
+		"changeme":                         {},
+		"secret":                           {},
+		"password":                         {},
+		"admin":                            {},
+		"dev-internal-token":               {},
+		"sk-loklingo":                      {},
+	}
+
+	if isPlaceholderSecret(writeToken, placeholderTokens) {
+		weak = append(weak, "WRITE_API_TOKEN must not use a documented placeholder value")
+	}
+	if len(writeToken) > 0 && len(writeToken) < 24 {
+		weak = append(weak, "WRITE_API_TOKEN must be at least 24 characters in production")
+	}
+	if isPlaceholderSecret(internalToken, placeholderTokens) {
+		weak = append(weak, "INTERNAL_TOKEN must not use a documented placeholder value")
+	}
+	if len(internalToken) > 0 && len(internalToken) < 24 {
+		weak = append(weak, "INTERNAL_TOKEN must be at least 24 characters in production")
+	}
+	liteKey := strings.TrimSpace(c.LiteLLMAPIKey)
+	if isPlaceholderSecret(liteKey, placeholderTokens) || strings.EqualFold(liteKey, "sk-loklingo") {
+		weak = append(weak, "LITELLM_API_KEY must not use the default example key in production")
+	}
+	return weak
+}
+
+func isPlaceholderSecret(value string, exact map[string]struct{}) bool {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return false
+	}
+	lower := strings.ToLower(v)
+	if _, ok := exact[lower]; ok {
+		return true
+	}
+	// Catch template strings like CHANGE_ME_... or replace-with-...
+	if strings.HasPrefix(lower, "change_me") || strings.HasPrefix(lower, "changeme") {
+		return true
+	}
+	if strings.HasPrefix(lower, "replace-") || strings.HasPrefix(lower, "replace_") {
+		return true
+	}
+	if strings.Contains(lower, "generate_with") || strings.Contains(lower, "openssl_rand") {
+		return true
+	}
+	return false
 }
 
 func getEnv(key, fallback string) string {

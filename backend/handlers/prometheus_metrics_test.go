@@ -65,4 +65,10 @@ func TestPrometheusMetricsExpose_ReturnsTextFormat(t *testing.T) {
 	if !strings.Contains(body, "loklingo_ocr_provider_fallback_budget_exhausted_total") {
 		t.Fatal("expected fallback budget exhausted metric in output")
 	}
+	if !strings.Contains(body, "loklingo_litellm_circuit_opened_total") {
+		t.Fatal("expected litellm circuit opened metric in output")
+	}
+	if !strings.Contains(body, "loklingo_litellm_circuit_reject_total") {
+		t.Fatal("expected litellm circuit reject metric in output")
+	}
 }

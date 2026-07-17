@@ -162,6 +162,20 @@ func (h *PrometheusMetricsHandler) Expose(c *fiber.Ctx) error {
 	b.WriteString("# TYPE loklingo_adaptive_concurrency_clamp_total counter\n")
 	fmt.Fprintf(&b, "loklingo_adaptive_concurrency_clamp_total %d\n", degraded.AdaptiveClampEvents)
 
+	// LiteLLM / translation circuit breaker + retry reliability signals.
+	b.WriteString("# TYPE loklingo_litellm_circuit_reject_total counter\n")
+	fmt.Fprintf(&b, "loklingo_litellm_circuit_reject_total %d\n", reliability.LiteLLM.CircuitRejectTotal)
+	b.WriteString("# TYPE loklingo_litellm_circuit_opened_total counter\n")
+	fmt.Fprintf(&b, "loklingo_litellm_circuit_opened_total %d\n", reliability.LiteLLM.CircuitOpenedTotal)
+	b.WriteString("# TYPE loklingo_litellm_circuit_recovered_total counter\n")
+	fmt.Fprintf(&b, "loklingo_litellm_circuit_recovered_total %d\n", reliability.LiteLLM.CircuitRecoveredTotal)
+	b.WriteString("# TYPE loklingo_litellm_retry_attempts_total counter\n")
+	fmt.Fprintf(&b, "loklingo_litellm_retry_attempts_total %d\n", reliability.LiteLLM.RetryAttemptsTotal)
+	b.WriteString("# TYPE loklingo_litellm_retry_exhausted_total counter\n")
+	fmt.Fprintf(&b, "loklingo_litellm_retry_exhausted_total %d\n", reliability.LiteLLM.RetryExhaustedTotal)
+	b.WriteString("# TYPE loklingo_litellm_response_rejected_total counter\n")
+	fmt.Fprintf(&b, "loklingo_litellm_response_rejected_total %d\n", reliability.LiteLLM.ResponseRejectedTotal)
+
 	c.Set(fiber.HeaderContentType, "text/plain; version=0.0.4; charset=utf-8")
 	return c.SendString(b.String())
 }
