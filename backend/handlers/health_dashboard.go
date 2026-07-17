@@ -23,11 +23,11 @@ type healthComponent struct {
 }
 
 type healthDashboardPayload struct {
-	Service       string                    `json:"service"`
-	Status        string                    `json:"status"`
-	Timestamp     time.Time                 `json:"timestamp"`
-	UptimeSeconds int64                     `json:"uptime_seconds,omitempty"`
-	RequestID     string                    `json:"request_id,omitempty"`
+	Service       string                     `json:"service"`
+	Status        string                     `json:"status"`
+	Timestamp     time.Time                  `json:"timestamp"`
+	UptimeSeconds int64                      `json:"uptime_seconds,omitempty"`
+	RequestID     string                     `json:"request_id,omitempty"`
 	Dependencies  map[string]healthComponent `json:"dependencies"`
 }
 
@@ -89,7 +89,7 @@ func collectHealthDashboard(ctx context.Context, cfg *config.Config, store jobs.
 		"backend": {Status: "ok"},
 		"queues":  probeQueues(ctx, store),
 		"ocr":     probeOCR(ctx, cfg, client),
-		"ollama":   probeOllama(ctx, cfg, client),
+		"ollama":  probeOllama(ctx, cfg, client),
 		"db":      probeDB(ctx, cfg, pgPool),
 	}
 
@@ -118,7 +118,9 @@ func collectHealthDashboard(ctx context.Context, cfg *config.Config, store jobs.
 }
 
 func probeQueues(ctx context.Context, store jobs.Store) healthComponent {
-	provider, ok := store.(interface{ QueueStats(context.Context) (jobs.QueueStats, error) })
+	provider, ok := store.(interface {
+		QueueStats(context.Context) (jobs.QueueStats, error)
+	})
 	if !ok {
 		return healthComponent{Status: "disabled"}
 	}
@@ -139,10 +141,10 @@ func probeQueues(ctx context.Context, store jobs.Store) healthComponent {
 		LatencyMS: latency,
 		Details: map[string]any{
 			"queue_depth":       stats.QueueDepth,
-			"inflight_depth":     stats.InflightDepth,
-			"stuck_jobs":         stats.StuckJobs,
-			"retry_backlog":      stats.RetryBacklog,
-			"dead_letter_count":  stats.DeadLetterCount,
+			"inflight_depth":    stats.InflightDepth,
+			"stuck_jobs":        stats.StuckJobs,
+			"retry_backlog":     stats.RetryBacklog,
+			"dead_letter_count": stats.DeadLetterCount,
 		},
 	}
 }

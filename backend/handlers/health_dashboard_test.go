@@ -19,11 +19,17 @@ import (
 type dashboardTestStore struct{}
 
 func (s *dashboardTestStore) Enqueue(context.Context, *jobs.Job) error { return nil }
-func (s *dashboardTestStore) Get(context.Context, string) (*jobs.Job, error) { return nil, jobs.ErrNotFound }
-func (s *dashboardTestStore) Update(context.Context, *jobs.Job) error { return nil }
+func (s *dashboardTestStore) Get(context.Context, string) (*jobs.Job, error) {
+	return nil, jobs.ErrNotFound
+}
+func (s *dashboardTestStore) Update(context.Context, *jobs.Job) error    { return nil }
 func (s *dashboardTestStore) Dequeue(context.Context) (*jobs.Job, error) { return nil, nil }
-func (s *dashboardTestStore) GetCached(context.Context, string, string, string) (string, error) { return "", jobs.ErrNotFound }
-func (s *dashboardTestStore) SetCached(context.Context, string, string, string, string) error { return nil }
+func (s *dashboardTestStore) GetCached(context.Context, string, string, string) (string, error) {
+	return "", jobs.ErrNotFound
+}
+func (s *dashboardTestStore) SetCached(context.Context, string, string, string, string) error {
+	return nil
+}
 func (s *dashboardTestStore) QueueStats(context.Context) (jobs.QueueStats, error) {
 	return jobs.QueueStats{QueueDepth: 2, InflightDepth: 1, StuckJobs: 0, RetryBacklog: 0, DeadLetterCount: 0}, nil
 }
@@ -36,16 +42,16 @@ func TestHealthDashboardAndStartupChecks(t *testing.T) {
 	defer depServer.Close()
 
 	cfg := &config.Config{
-		AppEnv:                  "development",
-		OCRServiceURL:           depServer.URL,
-		OllamaBaseURL:           depServer.URL,
-		OllamaModel:             "qwen2.5-vl",
-		PostgresDSN:             "",
-		RedisURL:                "redis://localhost:6379/0",
+		AppEnv:                   "development",
+		OCRServiceURL:            depServer.URL,
+		OllamaBaseURL:            depServer.URL,
+		OllamaModel:              "qwen2.5-vl",
+		PostgresDSN:              "",
+		RedisURL:                 "redis://localhost:6379/0",
 		GlobalRateLimitPerMinute: 120,
-		WriteRateLimitPerMinute: 40,
+		WriteRateLimitPerMinute:  40,
 		UploadRateLimitPerMinute: 12,
-		SyncImageMaxInflight:    8,
+		SyncImageMaxInflight:     8,
 	}
 	store := &dashboardTestStore{}
 
@@ -82,9 +88,9 @@ func TestHealthDashboardAndStartupChecks(t *testing.T) {
 
 func TestCheckStartupDependenciesReturnsErrorOnFailure(t *testing.T) {
 	cfg := &config.Config{
-		AppEnv:     "development",
+		AppEnv:        "development",
 		OCRServiceURL: "http://127.0.0.1:1",
-		RedisURL:    "redis://localhost:6379/0",
+		RedisURL:      "redis://localhost:6379/0",
 	}
 	store := &dashboardTestStore{}
 
