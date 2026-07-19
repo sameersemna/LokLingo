@@ -9,7 +9,6 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 
-# Drop default site; run as non-root (nginx user uid 101 in alpine image).
 RUN rm -f /etc/nginx/conf.d/default.conf \
     && mkdir -p /var/cache/nginx /var/run /var/log/nginx \
     && chown -R nginx:nginx /var/cache/nginx /var/run /var/log/nginx /usr/share/nginx/html \
@@ -19,7 +18,6 @@ RUN rm -f /etc/nginx/conf.d/default.conf \
 COPY --from=builder --chown=nginx:nginx /app/dist /usr/share/nginx/html
 COPY --chown=nginx:nginx nginx.conf /etc/nginx/conf.d/default.conf
 
-# Listen on 8080 as non-root (port 80 requires capabilities).
 RUN sed -i 's/listen 80;/listen 8080;/' /etc/nginx/conf.d/default.conf \
     && sed -i 's|pid\s\+/run/nginx.pid;|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf \
     && sed -i '/user\s\+nginx;/d' /etc/nginx/nginx.conf

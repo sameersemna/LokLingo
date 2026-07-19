@@ -56,3 +56,6 @@ PROJECT_OVERVIEW.md
 *.prs
 !NOTES.prs
 __pycache__
+e2e/playwright-report/
+e2e/tests/visual-regression.spec.ts-snapshots/
+ocr-service/__pycache__/

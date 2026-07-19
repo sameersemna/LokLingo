@@ -15,7 +15,12 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
     });
     page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
 
-    const resp = await page.goto('/', { waitUntil: 'networkidle', timeout: 30_000 });
+    // Suppress first-visit auto-demo to avoid network noise
+    await page.addInitScript(() => {
+      localStorage.setItem('loklingo-first-visit', 'false');
+    });
+
+    const resp = await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
     expect(resp?.status()).toBeLessThan(400);
 
     // Wait for readiness chip to settle.
@@ -68,7 +73,7 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
   });
 
   test('readiness chip shows status and is clickable for detail', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'networkidle' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500);
 
     // Find the readiness/status chip.
@@ -82,19 +87,20 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
   });
 
   test('text translation flow with a non-empty input', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'networkidle' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
 
-    // Switch to text workflow.
-    const textTab = page.getByRole('button', { name: /^text/i }).first();
-    if (await textTab.isVisible().catch(() => false)) {
-      await textTab.click();
+    // Switch to text workflow by clicking the Text workflow card.
+    const textWorkflowBtn = page.locator('.workflow-card').filter({ hasText: 'Text' }).first();
+    if (await textWorkflowBtn.isVisible().catch(() => false)) {
+      await textWorkflowBtn.click();
+      await page.waitForTimeout(500);
     }
 
     const textarea = page.locator('textarea').first();
     await textarea.fill('Hello, this is a hardening smoke test.');
     await page.waitForTimeout(300);
 
-    const translateBtn = page.getByRole('button', { name: /^translate/i }).first();
+    const translateBtn = page.locator('button.translate-btn').first();
     if (await translateBtn.isEnabled()) {
       await translateBtn.click();
       // Wait up to 30s for the result block to populate.
@@ -140,8 +146,8 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
         failed.push(`${resp.status()} ${resp.url()}`);
       }
     });
-    await page.goto('/', { waitUntil: 'networkidle' });
-    await page.waitForTimeout(1500);
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2000);
 
     // Filter expected 4xx/5xx (the SPA may not have a favicon route, and the metrics
     // endpoint may 401/403 without a token — those are intentional and tested elsewhere).

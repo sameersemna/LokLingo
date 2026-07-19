@@ -1627,7 +1627,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: #1a3d8f;
   border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border) 50%);
   border-radius: 999px;
   padding: 0.12rem 0.35rem;
