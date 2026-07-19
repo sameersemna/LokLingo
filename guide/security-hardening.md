@@ -87,6 +87,61 @@ Frontend nginx runs as non-root user and listens on container port **8080** (hos
 - [ ] Postgres uses `sslmode=require` when off-host
 - [ ] Redis requires a password and is not bound to `0.0.0.0` without ACL
 
+## Ollama port exposure (LAN risk)
+
+The `loklingo-ollama` container is published on the host at
+`${OLLAMA_HOST_PORT:-11434}:11434`. By default it is reachable from any
+host that can reach the LAN.
+
+**Why this matters**
+
+- Ollama's HTTP API has **no built-in authentication**. Anyone who can
+  reach the port can list models, pull new ones, run inference, and
+  consume GPU/CPU.
+- Pulling a model can be expensive (multi-GB downloads) and can be used
+  to exhaust disk or bandwidth.
+- Running arbitrary prompts on your GPU leaks hardware to third-party
+  traffic and may be used as a pivot for further abuse.
+
+**Recommended mitigations** (apply in order of preference)
+
+1. **LAN-only is the baseline.** Bind Ollama to a private IP only:
+   `OLLAMA_HOST_PORT` should not be published beyond the LAN, and the
+   host firewall should block external traffic to it.
+2. **Drop the host port entirely if not needed.** Edit
+   `docker-compose.yml` and remove the `ports:` mapping for
+   `loklingo-ollama`. The OCR service and backend will still reach it
+   over the `loklingo-net` Docker network. The frontend never needs to
+   talk to Ollama directly.
+3. **Restrict with iptables/nftables.** Example for an internal-only
+   `11434`:
+   ```bash
+   iptables -A INPUT -p tcp --dport 11434 -s 192.168.0.0/16 -j ACCEPT
+   iptables -A INPUT -p tcp --dport 11434 -j DROP
+   ```
+4. **Reverse proxy with auth.** Front Ollama with Caddy/nginx and
+   require HTTP basic auth. (LokLingo does not ship this; document any
+   custom addition in `guide/reliability-runbook.md`.)
+5. **Move Ollama off the LAN host entirely.** Run on a separate
+   workstation that is only reachable over a private link.
+
+**Detection**
+
+- `scripts/check-lan-access.sh` confirms the LAN reachability of
+  published ports; integrate it into your change-control.
+- Watch for unexpected `ollama list` or `ollama pull` activity in
+  container logs (`docker logs loklingo-ollama`). Ollama logs every
+  request to stdout.
+
+**Recovery if exposed**
+
+1. Block external traffic at the host firewall.
+2. Audit `ollama list` output to confirm no unauthorized model was
+   pulled.
+3. Rotate any model caches that may have been overwritten.
+4. Document the incident under `guide/incidents/` per the governance
+   flow.
+
 ## Related runbooks
 
 - [Reliability runbook](reliability-runbook.md)
