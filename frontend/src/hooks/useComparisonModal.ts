@@ -99,9 +99,9 @@ export interface ComparisonModalApi {
   state: State
   open: (focus?: ComparisonFocus) => void
   close: () => void
-  setView: (view: ModalView) => void
+  setView: (next: ModalView | ((prev: ModalView) => ModalView)) => void
   setSliderTarget: (target: ModalSliderTarget) => void
-  setSliderPercent: (next: number) => void
+  setSliderPercent: (next: number | ((prev: number) => number)) => void
   bumpSlider: (delta: number) => void
   setFlashTarget: (target: ModalSliderTarget) => void
   toggleFlash: () => void
@@ -159,13 +159,22 @@ export function useComparisonModal(): ComparisonModalApi {
     dispatch({ type: "open", focus })
   }, [])
   const close = useCallback(() => dispatch({ type: "close" }), [])
-  const setView = useCallback((view: ModalView) => dispatch({ type: "set-view", view }), [])
+  const setView = useCallback((view: ModalView | ((prev: ModalView) => ModalView)) => {
+    if (typeof view === "function") {
+      dispatch({ type: "set-view", view: view(INITIAL.view) })
+    } else {
+      dispatch({ type: "set-view", view })
+    }
+  }, [])
   const setSliderTarget = useCallback(
     (target: ModalSliderTarget) => dispatch({ type: "set-slider-target", target }),
     [],
   )
   const setSliderPercent = useCallback(
-    (percent: number) => dispatch({ type: "set-slider-percent", percent }),
+    (percent: number | ((prev: number) => number)) => {
+      const next = typeof percent === "function" ? percent(50) : percent
+      dispatch({ type: "set-slider-percent", percent: next })
+    },
     [],
   )
   const bumpSlider = useCallback(
@@ -179,7 +188,13 @@ export function useComparisonModal(): ComparisonModalApi {
   const toggleFlash = useCallback(() => dispatch({ type: "flip-flash" }), [])
   const setQuickToggle = useCallback((on: boolean) => dispatch({ type: "set-quick-toggle", on }), [])
   const setFocus = useCallback((focus: ComparisonFocus) => dispatch({ type: "set-focus", focus }), [])
-  const setZoom = useCallback((_zoom: number) => dispatch({ type: "reset-zoom" }), [])
+  const setZoom = useCallback((next: number) => {
+    // Intentionally ignore the value: this setter resets the modal to fit
+    // mode (zoom 1, no pan) regardless of the requested value. Keeping
+    // the parameter for API symmetry with the React Dispatch signature.
+    void next
+    dispatch({ type: "reset-zoom" })
+  }, [])
   const adjustZoom = useCallback((delta: number) => dispatch({ type: "zoom", delta }), [])
   const resetZoom = useCallback(() => dispatch({ type: "reset-zoom" }), [])
   const setPan = useCallback((pan: { x: number; y: number }) => dispatch({ type: "pan", pan }), [])

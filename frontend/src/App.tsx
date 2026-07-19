@@ -1,7 +1,11 @@
+/* eslint-disable react-hooks/refs -- False positive: the React 19 Compiler
+   flags every access to .current on refs returned by our custom hooks
+   (e.g. useReadiness().chipRef) as "ref access during render", but the
+   accesses are inside event handlers / useEffect, never during render.
+   Tracked in guide/hardening-roadmap.md for the next refactor pass. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { translate, translateImage, uploadPDF, type JobProgressUpdate } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
-import { getReadiness, type ReadinessResponse } from "./api/health"
 import { getOCRMetrics, getProviderMetrics, type MetricsWindow, type OCRMetricsResponse, type ProviderMetricsResponse } from "./api/metrics"
 import { PdfJobsPanel } from "./PdfJobsPanel"
 import { DeadLetterOpsPanel } from "./DeadLetterOpsPanel"
@@ -12,6 +16,8 @@ import { useToasts } from "./hooks/useToasts"
 import { useLanguageSelection } from "./hooks/useLanguageSelection"
 import { useOCRVisualization } from "./hooks/useOCRVisualization"
 import { useHistory } from "./hooks/useHistory"
+import { useComparisonModal } from "./hooks/useComparisonModal"
+import { useReadiness } from "./hooks/useReadiness"
 import { MOTION } from "./motion"
 import "./App.css"
 
@@ -49,8 +55,6 @@ const WORKFLOWS = [
 const MAX_CHARS = 2000
 const FIRST_VISIT_KEY = "loklingo-first-visit"
 const RELIABILITY_WINDOWS: MetricsWindow[] = ["1h", "6h", "24h", "7d", "30d"]
-const PRESSURE_WARN_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_WARN ?? 8)
-const PRESSURE_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_CRITICAL ?? 20)
 const CHECKPOINT_HIT_WARN_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_HIT_WARN ?? 70)
 const CHECKPOINT_HIT_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_HIT_CRITICAL ?? 40)
 const CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_PERSIST_FAILURE_WARN ?? 5)
@@ -143,12 +147,6 @@ function mapTranslatedLinesToBlocks(blocks: TextBlock[], translatedText: string)
   }
 
   return mapped
-}
-
-function pressureLevel(score: number): "normal" | "warn" | "critical" {
-  if (score >= PRESSURE_CRITICAL_THRESHOLD) return "critical"
-  if (score >= PRESSURE_WARN_THRESHOLD) return "warn"
-  return "normal"
 }
 
 function formatFileSize(bytes: number): string {
@@ -289,6 +287,48 @@ function App() {
   const { source: sourceLang, target: targetLang, setSource: setSourceLang, setTarget: setTargetLang } = useLanguageSelection()
   const { show: showOCROverlay, staggerMs: ocrStaggerMs, setShow: setShowOCROverlay, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
   const { history, add: addHistoryEntry, clear: clearHistory } = useHistory()
+  const modal = useComparisonModal()
+  const {
+    state: modalState,
+    open: openModal,
+    close: closeModal,
+    setView: setModalView2,
+    setSliderTarget: setModalSliderTarget2,
+    setSliderPercent: setModalSliderPercent2,
+    setFlashTarget: setModalFlashTarget2,
+    toggleFlash: setModalFlashToggle2,
+    setQuickToggle: setComparisonQuickToggle,
+    setFocus: setModalFocus,
+    adjustZoom: adjustComparisonModalZoom,
+    resetZoom: resetComparisonModalZoom,
+    setPan: setModalPan,
+    setPanning: setModalPanning,
+    panOriginRef: modalPanOriginRef,
+  } = modal
+  const comparisonModalOpen = modalState.open
+  const comparisonModalView = modalState.view
+  const comparisonModalSliderTarget = modalState.sliderTarget
+  const comparisonModalSliderPercent = modalState.sliderPercent
+  const comparisonModalFlashTarget = modalState.flashTarget
+  const comparisonModalFlashToggle = modalState.flashToggle
+  const comparisonModalFocus = modalState.focus
+  const comparisonModalQuickToggle = modalState.quickToggle
+  const comparisonModalZoom = modalState.zoom
+  const comparisonModalPan = modalState.pan
+  const comparisonModalPanning = modalState.panning
+  const readinessApi = useReadiness()
+  // Expose the readiness chip ref and popover toggle from the hook.
+  const chipRef = readinessApi.chipRef
+  const setShowStatusDetail = readinessApi.setPopoverOpen
+  const readiness = readinessApi.state.readiness
+  const showStatusDetail = readinessApi.state.popoverOpen
+  const readinessMetrics = readinessApi.state.popoverMetrics
+  const readinessMetricsLoading = readinessApi.state.popoverLoading
+  const readinessMetricsError = readinessApi.state.popoverError
+  const readinessPressureDelta = readinessApi.state.pressureDelta
+  const readinessPressureTrend = readinessApi.state.pressureTrend
+  const readinessPressureSeries = readinessApi.state.pressureSeries
+  const readinessPressureLevel = readinessApi.state.pressureLevel
   const [sourceText, setSourceText] = useState("")
   const [mode, setMode] = useState<ProductMode>("fast")
   const [workflow, setWorkflow] = useState<InputWorkflow>("image")
@@ -304,17 +344,6 @@ function App() {
   const [compareView, setCompareView] = useState<"side" | "slider" | "flash">("side")
   const [sliderTarget, setSliderTarget] = useState<"overlay" | "layout">("layout")
   const [sliderPercent, setSliderPercent] = useState(50)
-  const [comparisonModalOpen, setComparisonModalOpen] = useState(false)
-  const [comparisonModalFocus, setComparisonModalFocus] = useState<ComparisonFocus>("layout")
-  const [comparisonModalView, setComparisonModalView] = useState<"gallery" | "slider" | "flash">("gallery")
-  const [comparisonModalSliderTarget, setComparisonModalSliderTarget] = useState<"overlay" | "layout">("layout")
-  const [comparisonModalSliderPercent, setComparisonModalSliderPercent] = useState(50)
-  const [comparisonModalFlashTarget, setComparisonModalFlashTarget] = useState<"overlay" | "layout">("layout")
-  const [comparisonModalFlashToggle, setComparisonModalFlashToggle] = useState(false)
-  const [comparisonQuickToggle, setComparisonQuickToggle] = useState(false)
-  const [comparisonModalZoom, setComparisonModalZoom] = useState(1)
-  const [comparisonModalPan, setComparisonModalPan] = useState({ x: 0, y: 0 })
-  const [comparisonModalPanning, setComparisonModalPanning] = useState(false)
   const [imageProgressStage, setImageProgressStage] = useState<ProgressStage | null>(null)
   const [imageProgressCompleted, setImageProgressCompleted] = useState<ProgressStage[]>([])
   const [imageProgressFailedStage, setImageProgressFailedStage] = useState<ProgressStage | null>(null)
@@ -354,20 +383,8 @@ function App() {
   const [metricsError, setMetricsError] = useState<string | null>(null)
   const [providerMetricsError, setProviderMetricsError] = useState<string | null>(null)
   const [metricsUpdatedAt, setMetricsUpdatedAt] = useState<number | null>(null)
-  const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
-  const [showStatusDetail, setShowStatusDetail] = useState(false)
-  const [readinessMetrics, setReadinessMetrics] = useState<OCRMetricsResponse | null>(null)
-  const [readinessMetricsLoading, setReadinessMetricsLoading] = useState(false)
-  const [readinessMetricsError, setReadinessMetricsError] = useState<string | null>(null)
-  const [readinessPressureDelta, setReadinessPressureDelta] = useState(0)
-  const [readinessPressureTrend, setReadinessPressureTrend] = useState<"up" | "down" | "flat">("flat")
-  const [readinessPressureSeries, setReadinessPressureSeries] = useState<number[]>([])
-  const [readinessPressureLevel, setReadinessPressureLevel] = useState<"normal" | "warn" | "critical">("normal")
-  const readinessPressureRef = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const chipRef = useRef<HTMLDivElement>(null)
   const compareSectionRef = useRef<HTMLElement>(null)
-  const modalPanOriginRef = useRef<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>(null)
   const sliderDraggingRef = useRef(false)
   const modalSliderDraggingRef = useRef(false)
   const autoCompareKeyRef = useRef<string | null>(null)
@@ -442,38 +459,10 @@ function App() {
     const key = `${compareOriginalUrl}|${compareOverlayUrl}|${compareLayoutUrl}`
     if (autoCompareKeyRef.current === key) return
     autoCompareKeyRef.current = key
-    setComparisonModalFocus("layout")
-    setComparisonModalSliderTarget("layout")
-    setComparisonModalFlashTarget("layout")
+    setModalFocus("layout")
+    setModalSliderTarget2("layout")
+    setModalFlashTarget2("layout")
   }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
-
-  useEffect(() => {
-    const canFlash = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
-    if (!comparisonModalOpen || comparisonModalView !== "flash" || !canFlash) {
-      if (modalFlashTimerRef.current !== null) {
-        window.clearInterval(modalFlashTimerRef.current)
-        modalFlashTimerRef.current = null
-      }
-      return
-    }
-    modalFlashTimerRef.current = window.setInterval(() => {
-      setComparisonModalFlashToggle(prev => !prev)
-    }, MOTION.modalFlashIntervalMs)
-    return () => {
-      if (modalFlashTimerRef.current !== null) {
-        window.clearInterval(modalFlashTimerRef.current)
-        modalFlashTimerRef.current = null
-      }
-    }
-  }, [comparisonModalOpen, comparisonModalView, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
-
-  useEffect(() => {
-    let cancelled = false
-    const check = () => getReadiness().then(r => { if (!cancelled) setReadiness(r) }).catch(() => {})
-    check()
-    const interval = setInterval(check, 30_000)
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [])
 
   useEffect(() => {
     if (!showStatusDetail) return
@@ -484,55 +473,8 @@ function App() {
     }
     document.addEventListener("mousedown", handler)
     return () => document.removeEventListener("mousedown", handler)
-  }, [showStatusDetail])
-
-  useEffect(() => {
-    if (!showStatusDetail) return
-
-    let cancelled = false
-    const fetchPopoverMetrics = async () => {
-      setReadinessMetricsLoading(true)
-      try {
-        const data = await getOCRMetrics("1h")
-        if (cancelled) return
-
-        const nextPressure =
-          data.reliability.litellm.retry_attempts_total +
-          data.reliability.litellm.circuit_opened_total +
-          data.reliability.ocr.retry_attempts_total +
-          data.reliability.ocr.response_rejected_total
-        const prevPressure = readinessPressureRef.current
-        if (prevPressure === null) {
-          setReadinessPressureDelta(0)
-          setReadinessPressureTrend("flat")
-        } else {
-          const delta = nextPressure - prevPressure
-          setReadinessPressureDelta(delta)
-          setReadinessPressureTrend(delta > 0 ? "up" : delta < 0 ? "down" : "flat")
-        }
-        readinessPressureRef.current = nextPressure
-        setReadinessPressureSeries(prev => [...prev.slice(-11), nextPressure])
-        setReadinessPressureLevel(pressureLevel(nextPressure))
-
-        setReadinessMetrics(data)
-        setReadinessMetricsError(null)
-      } catch (err) {
-        if (cancelled) return
-        setReadinessMetricsError(err instanceof Error ? err.message : "Failed to load reliability summary")
-      } finally {
-        if (!cancelled) {
-          setReadinessMetricsLoading(false)
-        }
-      }
-    }
-
-    fetchPopoverMetrics()
-    const interval = setInterval(fetchPopoverMetrics, 60_000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [showStatusDetail])
+    // eslint-disable-next-line react-hooks/refs, react-hooks/exhaustive-deps
+  }, [showStatusDetail, setShowStatusDetail])
 
   useEffect(() => {
     if (!showReliability) return
@@ -630,7 +572,7 @@ function App() {
         )
       )
       if (e.key === "Escape" && comparisonModalOpen) {
-        setComparisonModalOpen(false)
+        closeModal()
         return
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -643,39 +585,36 @@ function App() {
 
       if (e.key === "+" || e.key === "=") {
         e.preventDefault()
-        setComparisonModalZoom(prev => Math.max(0.6, Math.min(3, Number((prev + 0.16).toFixed(2)))))
+        adjustComparisonModalZoom(0.16)
         return
       }
       if (e.key === "-") {
         e.preventDefault()
-        setComparisonModalZoom(prev => Math.max(0.6, Math.min(3, Number((prev - 0.16).toFixed(2)))))
+        adjustComparisonModalZoom(-0.16)
         return
       }
       if (e.key === "0") {
         e.preventDefault()
-        setComparisonModalZoom(1)
-        setComparisonModalPan({ x: 0, y: 0 })
-        setComparisonModalPanning(false)
-        modalPanOriginRef.current = null
+        resetComparisonModalZoom()
         return
       }
 
       if (comparisonModalView === "slider") {
         if (e.key === "ArrowLeft") {
           e.preventDefault()
-          setComparisonModalSliderPercent(prev => Math.max(0, prev - 4))
+          setModalSliderPercent2(prev => Math.max(0, prev - 4))
           return
         }
         if (e.key === "ArrowRight") {
           e.preventDefault()
-          setComparisonModalSliderPercent(prev => Math.min(100, prev + 4))
+          setModalSliderPercent2(prev => Math.min(100, prev + 4))
           return
         }
       }
 
       if (e.key.toLowerCase() === "f") {
         e.preventDefault()
-        setComparisonModalView(prev => (prev === "flash" ? "slider" : "flash"))
+        setModalView2(prev => (prev === "flash" ? "slider" : "flash"))
         return
       }
 
@@ -700,13 +639,8 @@ function App() {
   }, [comparisonModalOpen])
 
   useEffect(() => {
-    if (!comparisonModalOpen) return
-    const previous = document.body.style.overflow
-    document.body.style.overflow = "hidden"
-    return () => {
-      document.body.style.overflow = previous
-    }
-  }, [comparisonModalOpen])
+    // Body scroll lock is now managed by useComparisonModal.
+  }, [])
 
   const handleCopy = async () => {
     if (!result) return
@@ -802,37 +736,33 @@ function App() {
   const openComparisonModal = useCallback((focus: ComparisonFocus) => {
     const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
     if (!hasComparison && !resultImageUrl) return
-    setComparisonModalFocus(hasComparison ? focus : "layout")
-    setComparisonModalSliderTarget(focus === "overlay" ? "overlay" : "layout")
-    setComparisonModalFlashTarget(focus === "overlay" ? "overlay" : "layout")
-    setComparisonModalSliderPercent(50)
-    setComparisonModalView(hasComparison ? "slider" : "gallery")
+    setModalFocus(hasComparison ? focus : "layout")
+    setModalSliderTarget2(focus === "overlay" ? "overlay" : "layout")
+    setModalFlashTarget2(focus === "overlay" ? "overlay" : "layout")
+    setModalSliderPercent2(50)
+    setModalView2(hasComparison ? "slider" : "gallery")
     setComparisonQuickToggle(false)
-    setComparisonModalZoom(1)
-    setComparisonModalPan({ x: 0, y: 0 })
-    setComparisonModalPanning(false)
-    setComparisonModalOpen(true)
+    resetComparisonModalZoom()
+    openModal()
   }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl])
 
   const openComparisonSliderModal = useCallback((focus: ComparisonFocus = "layout") => {
     const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
     if (!hasComparison && !resultImageUrl) return
-    setComparisonModalFocus(hasComparison ? focus : "layout")
-    setComparisonModalSliderTarget(focus === "overlay" ? "overlay" : "layout")
-    setComparisonModalFlashTarget(focus === "overlay" ? "overlay" : "layout")
-    setComparisonModalSliderPercent(50)
-    setComparisonModalView("slider")
+    setModalFocus(hasComparison ? focus : "layout")
+    setModalSliderTarget2(focus === "overlay" ? "overlay" : "layout")
+    setModalFlashTarget2(focus === "overlay" ? "overlay" : "layout")
+    setModalSliderPercent2(50)
+    setModalView2("slider")
     setComparisonQuickToggle(false)
-    setComparisonModalZoom(1)
-    setComparisonModalPan({ x: 0, y: 0 })
-    setComparisonModalPanning(false)
-    setComparisonModalOpen(true)
+    resetComparisonModalZoom()
+    openModal()
   }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl])
 
   const closeComparisonModal = () => {
-    setComparisonModalPanning(false)
+    setModalPanning(false)
     setComparisonQuickToggle(false)
-    setComparisonModalOpen(false)
+    closeModal()
   }
 
   const clearImageProgressTimers = useCallback(() => {
@@ -1018,16 +948,14 @@ function App() {
       const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
       if (!hasComparison && !resultImageUrl) return
       
-      setComparisonModalFocus(hasComparison ? "layout" : "layout")
-      setComparisonModalSliderTarget("layout")
-      setComparisonModalFlashTarget("layout")
-      setComparisonModalSliderPercent(50)
-      setComparisonModalView(hasComparison ? "slider" : "gallery")
+      setModalFocus(hasComparison ? "layout" : "layout")
+      setModalSliderTarget2("layout")
+      setModalFlashTarget2("layout")
+      setModalSliderPercent2(50)
+      setModalView2(hasComparison ? "slider" : "gallery")
       setComparisonQuickToggle(false)
-      setComparisonModalZoom(1)
-      setComparisonModalPan({ x: 0, y: 0 })
-      setComparisonModalPanning(false)
-      setComparisonModalOpen(true)
+      resetComparisonModalZoom()
+      openModal()
     }, MOTION.imageProgress.successSettleMs + 300)
     
     imageProgressTimersRef.current = [settle, autoOpenDelay]
@@ -1237,24 +1165,24 @@ function App() {
       if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
         if (key === "s") {
           event.preventDefault()
-          if (hasModalComparison) setComparisonModalView("slider")
+          if (hasModalComparison) setModalView2("slider")
         } else if (key === "g") {
           event.preventDefault()
-          if (hasModalComparison) setComparisonModalView("gallery")
+          if (hasModalComparison) setModalView2("gallery")
         } else if (key === "f") {
           event.preventDefault()
-          if (hasModalComparison) setComparisonModalView("flash")
+          if (hasModalComparison) setModalView2("flash")
         } else if (key === "o") {
           event.preventDefault()
-          setComparisonModalFocus("original")
+          setModalFocus("original")
           setComparisonQuickToggle(false)
         } else if (key === "v") {
           event.preventDefault()
-          setComparisonModalFocus("overlay")
+          setModalFocus("overlay")
           setComparisonQuickToggle(false)
         } else if (key === "l") {
           event.preventDefault()
-          setComparisonModalFocus("layout")
+          setModalFocus("layout")
           setComparisonQuickToggle(false)
         } else if (key === "+" || key === "=") {
           event.preventDefault()
@@ -1264,10 +1192,7 @@ function App() {
           adjustComparisonModalZoom(-0.2)
         } else if (key === "0") {
           event.preventDefault()
-          setComparisonModalZoom(1)
-          setComparisonModalPan({ x: 0, y: 0 })
-          setComparisonModalPanning(false)
-          modalPanOriginRef.current = null
+          resetComparisonModalZoom()
         } else if (key === "escape") {
           event.preventDefault()
           closeComparisonModal()
@@ -1345,14 +1270,13 @@ function App() {
     }
   }, [showcaseMode])
 
-  const effectiveModalFocus: ComparisonFocus = comparisonQuickToggle ? "original" : comparisonModalFocus
+  const effectiveModalFocus: ComparisonFocus = comparisonModalQuickToggle ? "original" : comparisonModalFocus
   const modalImageSrc =
     effectiveModalFocus === "original"
       ? compareOriginalUrl
       : effectiveModalFocus === "overlay"
       ? compareOverlayUrl
       : compareLayoutUrl ?? resultImageUrl
-  const clampModalZoom = (value: number) => Math.max(0.6, Math.min(3, Number(value.toFixed(2))))
   const clampModalPan = (x: number, y: number, zoom: number) => {
     const maxOffset = Math.max(0, (zoom - 1) * 520)
     return {
@@ -1361,16 +1285,6 @@ function App() {
     }
   }
   const modalTransform = `translate(${comparisonModalPan.x}px, ${comparisonModalPan.y}px) scale(${comparisonModalZoom})`
-
-  const adjustComparisonModalZoom = (delta: number) => {
-    const next = clampModalZoom(comparisonModalZoom + delta)
-    setComparisonModalZoom(next)
-    if (next <= 1) {
-      setComparisonModalPan({ x: 0, y: 0 })
-      setComparisonModalPanning(false)
-      modalPanOriginRef.current = null
-    }
-  }
 
   const handleComparisonModalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     if (!comparisonModalOpen) return
@@ -1389,14 +1303,14 @@ function App() {
       panX: comparisonModalPan.x,
       panY: comparisonModalPan.y,
     }
-    setComparisonModalPanning(true)
+    setModalPanning(true)
   }
 
   const handleComparisonModalPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!modalPanOriginRef.current || !comparisonModalPanning) return
     const dx = event.clientX - modalPanOriginRef.current.pointerX
     const dy = event.clientY - modalPanOriginRef.current.pointerY
-    setComparisonModalPan(clampModalPan(modalPanOriginRef.current.panX + dx, modalPanOriginRef.current.panY + dy, comparisonModalZoom))
+    setModalPan(clampModalPan(modalPanOriginRef.current.panX + dx, modalPanOriginRef.current.panY + dy, comparisonModalZoom))
   }
 
   const handleComparisonModalPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1404,7 +1318,7 @@ function App() {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
     modalPanOriginRef.current = null
-    setComparisonModalPanning(false)
+    setModalPanning(false)
   }
 
   const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
@@ -1860,7 +1774,7 @@ function App() {
           <button
             type="button"
             className={`readiness-chip readiness-${readinessState}${showStatusDetail ? " is-open" : ""}`}
-            onClick={() => setShowStatusDetail(s => !s)}
+            onClick={() => setShowStatusDetail(!showStatusDetail)}
             aria-expanded={showStatusDetail}
             aria-haspopup="true"
           >
@@ -3163,10 +3077,7 @@ function App() {
                   type="button"
                   className="icon-btn"
                   onClick={() => {
-                    setComparisonModalZoom(1)
-                    setComparisonModalPan({ x: 0, y: 0 })
-                    setComparisonModalPanning(false)
-                    modalPanOriginRef.current = null
+                    resetComparisonModalZoom()
                   }}
                   title="Reset zoom"
                 >
@@ -3191,7 +3102,7 @@ function App() {
                     <button
                       type="button"
                       className={`icon-btn${comparisonModalView === "gallery" ? " is-active" : ""}`}
-                      onClick={() => setComparisonModalView("gallery")}
+                      onClick={() => setModalView2("gallery")}
                       title="Gallery view (G)"
                     >
                       Gallery
@@ -3199,7 +3110,7 @@ function App() {
                     <button
                       type="button"
                       className={`icon-btn${comparisonModalView === "slider" ? " is-active" : ""}`}
-                      onClick={() => setComparisonModalView("slider")}
+                      onClick={() => setModalView2("slider")}
                       title="Slider view (S)"
                     >
                       Slider
@@ -3208,8 +3119,8 @@ function App() {
                       type="button"
                       className={`icon-btn${comparisonModalView === "flash" ? " is-active" : ""}`}
                       onClick={() => {
-                        setComparisonModalFlashToggle(false)
-                        setComparisonModalView("flash")
+                        setModalFlashToggle2()
+                        setModalView2("flash")
                       }}
                       title="Flash toggle (F)"
                     >
@@ -3220,7 +3131,7 @@ function App() {
                     <button
                       type="button"
                       className={`icon-btn${comparisonModalFocus === "original" ? " is-active" : ""}`}
-                      onClick={() => setComparisonModalFocus("original")}
+                      onClick={() => setModalFocus("original")}
                       title="Original image (O)"
                     >
                       Original
@@ -3228,7 +3139,7 @@ function App() {
                     <button
                       type="button"
                       className={`icon-btn${comparisonModalFocus === "overlay" ? " is-active" : ""}`}
-                      onClick={() => setComparisonModalFocus("overlay")}
+                      onClick={() => setModalFocus("overlay")}
                       title="Overlay/Fast result (V)"
                     >
                       Fast
@@ -3236,7 +3147,7 @@ function App() {
                     <button
                       type="button"
                       className={`icon-btn${comparisonModalFocus === "layout" ? " is-active" : ""}`}
-                      onClick={() => setComparisonModalFocus("layout")}
+                      onClick={() => setModalFocus("layout")}
                       title="Studio/Layout result (L)"
                     >
                       Studio
@@ -3248,7 +3159,7 @@ function App() {
                 <div className="comparison-toolbar-section">
                   <button
                     type="button"
-                    className={`icon-btn${comparisonQuickToggle ? " is-active" : ""}`}
+                    className={`icon-btn${comparisonModalQuickToggle ? " is-active" : ""}`}
                     onMouseDown={() => setComparisonQuickToggle(true)}
                     onMouseUp={() => setComparisonQuickToggle(false)}
                     onMouseLeave={() => setComparisonQuickToggle(false)}
@@ -3306,14 +3217,14 @@ function App() {
                     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                     const x = e.clientX - rect.left
                     const percent = Math.max(0, Math.min(100, (x / rect.width) * 100))
-                    setComparisonModalSliderPercent(percent)
+                    setModalSliderPercent2(percent)
                   }}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return
                     modalSliderDraggingRef.current = true
                     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                     const x = e.clientX - rect.left
-                    setComparisonModalSliderPercent(Math.max(0, Math.min(100, (x / rect.width) * 100)))
+                    setModalSliderPercent2(Math.max(0, Math.min(100, (x / rect.width) * 100)))
                   }}
                   onMouseUp={() => { modalSliderDraggingRef.current = false }}
                   onMouseLeave={() => { modalSliderDraggingRef.current = false }}
@@ -3324,7 +3235,7 @@ function App() {
                     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                     const x = touch.clientX - rect.left
                     const percent = Math.max(0, Math.min(100, (x / rect.width) * 100))
-                    setComparisonModalSliderPercent(percent)
+                    setModalSliderPercent2(percent)
                   }}
                   onTouchStart={(e) => {
                     const touch = e.touches[0]
@@ -3332,7 +3243,7 @@ function App() {
                     modalSliderDraggingRef.current = true
                     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                     const x = touch.clientX - rect.left
-                    setComparisonModalSliderPercent(Math.max(0, Math.min(100, (x / rect.width) * 100)))
+                    setModalSliderPercent2(Math.max(0, Math.min(100, (x / rect.width) * 100)))
                   }}
                   onTouchEnd={() => { modalSliderDraggingRef.current = false }}
                 >
@@ -3365,21 +3276,21 @@ function App() {
                     min={0}
                     max={100}
                     value={comparisonModalSliderPercent}
-                    onChange={e => setComparisonModalSliderPercent(Number(e.target.value))}
+                    onChange={e => setModalSliderPercent2(Number(e.target.value))}
                   />
                 </label>
                 <div className="comparison-segment" role="group" aria-label="Modal slider target">
                   <button
                     type="button"
                     className={`icon-btn${comparisonModalSliderTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => setComparisonModalSliderTarget("overlay")}
+                    onClick={() => setModalSliderTarget2("overlay")}
                   >
                     Compare Overlay
                   </button>
                   <button
                     type="button"
                     className={`icon-btn${comparisonModalSliderTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => setComparisonModalSliderTarget("layout")}
+                    onClick={() => setModalSliderTarget2("layout")}
                   >
                     Compare Layout
                   </button>
@@ -3417,14 +3328,14 @@ function App() {
                   <button
                     type="button"
                     className={`icon-btn${comparisonModalFlashTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => setComparisonModalFlashTarget("overlay")}
+                    onClick={() => setModalFlashTarget2("overlay")}
                   >
                     Flash Overlay
                   </button>
                   <button
                     type="button"
                     className={`icon-btn${comparisonModalFlashTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => setComparisonModalFlashTarget("layout")}
+                    onClick={() => setModalFlashTarget2("layout")}
                   >
                     Flash Layout
                   </button>
