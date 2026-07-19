@@ -1,5 +1,13 @@
 # Development overlay — wires the backend to the Redis instance on the host (latitude).
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# SECURITY NOTE: as of 2026-07-19, the base compose no longer publishes the
+# Ollama HTTP port to the host (it has no built-in auth and the host port
+# is a documented security risk). To bring it up locally for development,
+# use the separate opt-in overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     -f docker-compose.ollama-host.yml up
+# See guide/security-hardening.md for context.
 
 services:
   loklingo-backend:

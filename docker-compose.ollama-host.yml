@@ -1,0 +1,16 @@
+# Opt-in overlay to re-publish the Ollama HTTP port to the host for local
+# development or debugging. By default the base compose does NOT publish
+# the port (Ollama has no built-in authentication).
+#
+# Usage (from project root):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     -f docker-compose.ollama-host.yml up
+#
+# Always pair this with the host firewall rule that restricts 11434 to
+# trusted LAN IPs. See guide/security-hardening.md ("Ollama port
+# exposure") for the full mitigation ladder.
+
+services:
+  loklingo-ollama:
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"

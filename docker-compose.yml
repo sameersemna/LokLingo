@@ -89,8 +89,14 @@ services:
     image: ollama/ollama:latest
     container_name: loklingo-ollama
     restart: unless-stopped
-    ports:
-      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    # Ollama has no built-in authentication; its HTTP API is exposed on
+    # the host by default. To avoid the unauthenticated host port, the
+    # base compose does NOT publish any host port — the container is
+    # reachable from the other LokLingo services over loklingo-net only.
+    # For local development you can opt in to host exposure with:
+    #   docker compose --profile ollama-host up ...
+    # See guide/security-hardening.md ("Ollama port exposure") for
+    # context, detection, and recovery.
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
