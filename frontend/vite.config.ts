@@ -12,6 +12,12 @@ export default defineConfig({
         target: process.env.VITE_BACKEND_PROXY_TARGET ?? 'http://localhost:28080',
         changeOrigin: true,
       },
+      '/ocr': {
+        // Dev parity with production nginx.conf. The OCR service listens on
+        // OCR_HOST_PORT (default 8000) when running locally outside Docker.
+        target: process.env.VITE_OCR_PROXY_TARGET ?? 'http://localhost:18000',
+        changeOrigin: true,
+      },
     },
   },
 })

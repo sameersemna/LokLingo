@@ -7,6 +7,12 @@ import { PdfJobsPanel } from "./PdfJobsPanel"
 import { DeadLetterOpsPanel } from "./DeadLetterOpsPanel"
 import { saveStoredJob } from "./pdfJobsStorage"
 import { checkpointOperatorHint, formatPercent, levelLabel, safePercent, type CheckpointThresholds } from "./checkpointReliability"
+import { useTheme } from "./hooks/useTheme"
+import { useToasts } from "./hooks/useToasts"
+import { useLanguageSelection } from "./hooks/useLanguageSelection"
+import { useOCRVisualization } from "./hooks/useOCRVisualization"
+import { useHistory } from "./hooks/useHistory"
+import { MOTION } from "./motion"
 import "./App.css"
 
 const LANGUAGES = [
@@ -41,9 +47,6 @@ const WORKFLOWS = [
   { value: "text", label: "Text", detail: "Translate pasted or typed text", icon: "✍" },
 ] as const
 const MAX_CHARS = 2000
-const HISTORY_KEY = "loklingo-history"
-const MAX_HISTORY = 10
-const OCR_VIS_KEY = "loklingo-ocr-visual-controls"
 const FIRST_VISIT_KEY = "loklingo-first-visit"
 const RELIABILITY_WINDOWS: MetricsWindow[] = ["1h", "6h", "24h", "7d", "30d"]
 const PRESSURE_WARN_THRESHOLD = Number(import.meta.env.VITE_RELIABILITY_PRESSURE_WARN ?? 8)
@@ -71,16 +74,6 @@ const DEMO_PRESETS = [
   // PDFs (using same images as proxy)
   { id: "document",   label: "Documents/PDFs",  emoji: "📄", category: "PDFs", src: "/samples/realworld_overlay.jpg",   source: "auto", target: "en" },
 ] as const
-
-interface Toast { id: number; msg: string; type: "success" | "error" }
-interface HistoryEntry {
-  id: number
-  sourceText: string
-  sourceLang: string
-  targetLang: string
-  result: string
-  ts: number
-}
 
 type InputWorkflow = "image" | "pdf" | "text"
 
@@ -125,30 +118,6 @@ const OCR_STAGGER_PRESETS = [
   { id: "slow", label: "Slow", ms: 140 },
 ] as const
 
-const MOTION = {
-  animatedCounterMs: 520,
-  toastMs: 3500,
-  flashIntervalMs: 1100,
-  modalFlashIntervalMs: 950,
-  overlaySwapLabelMs: 420,
-  overlayDemo: {
-    toTranslationMs: 550,
-    clearSwapMs: 900,
-    toRenderingMs: 1020,
-    settleMs: 1520,
-  },
-  imageProgress: {
-    toLayoutMs: 620,
-    toLanguagesMs: 1220,
-    toTranslationMs: 1880,
-    toTypographyMs: 2760,
-    toRenderingMs: 3600,
-    successSettleMs: 3600,
-    errorSettleMs: 4200,
-  },
-  demoCycleMs: 5200,
-} as const
-
 function isRenderableOCRBlock(block: TextBlock): boolean {
   const [x1, y1, x2, y2] = block.bbox
   return Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(x2) && Number.isFinite(y2) && Math.abs(x2 - x1) >= 4 && Math.abs(y2 - y1) >= 4
@@ -174,38 +143,6 @@ function mapTranslatedLinesToBlocks(blocks: TextBlock[], translatedText: string)
   }
 
   return mapped
-}
-
-function loadHistory(): HistoryEntry[] {
-  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]") } catch { return [] }
-}
-function saveHistory(h: HistoryEntry[]) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0, MAX_HISTORY)))
-}
-
-const LANG_KEY = "loklingo-langs"
-
-function loadLangs() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(LANG_KEY) ?? "{}")
-    const src = LANGUAGES.find(l => l.code === saved.source)?.code ?? "auto"
-    const tgt = TARGET_LANGUAGES.find(l => l.code === saved.target)?.code ?? "de"
-    return { source: src, target: tgt }
-  } catch { return { source: "auto", target: "de" } }
-}
-
-function loadOCRVisualizationControls(): { show: boolean; staggerMs: number } {
-  try {
-    const raw = JSON.parse(localStorage.getItem(OCR_VIS_KEY) ?? "{}") as { show?: unknown; staggerMs?: unknown }
-    const show = typeof raw.show === "boolean" ? raw.show : true
-    const parsedStagger = Number(raw.staggerMs)
-    const staggerMs = Number.isFinite(parsedStagger)
-      ? Math.max(20, Math.min(220, Math.round(parsedStagger)))
-      : 70
-    return { show, staggerMs }
-  } catch {
-    return { show: true, staggerMs: 70 }
-  }
 }
 
 function pressureLevel(score: number): "normal" | "warn" | "critical" {
@@ -347,14 +284,12 @@ function useAnimatedCount(target: number, durationMs = MOTION.animatedCounterMs)
 }
 
 function App() {
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    const saved = localStorage.getItem("loklingo-theme")
-    if (saved === "light" || saved === "dark") return saved
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-  })
+  const [theme, setTheme] = useTheme()
+  const { toasts, push: pushToast } = useToasts()
+  const { source: sourceLang, target: targetLang, setSource: setSourceLang, setTarget: setTargetLang } = useLanguageSelection()
+  const { show: showOCROverlay, staggerMs: ocrStaggerMs, setShow: setShowOCROverlay, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
+  const { history, add: addHistoryEntry, clear: clearHistory } = useHistory()
   const [sourceText, setSourceText] = useState("")
-  const [sourceLang, setSourceLang] = useState(() => loadLangs().source)
-  const [targetLang, setTargetLang] = useState(() => loadLangs().target)
   const [mode, setMode] = useState<ProductMode>("fast")
   const [workflow, setWorkflow] = useState<InputWorkflow>("image")
   const [uploadSelection, setUploadSelection] = useState<UploadSelection | null>(null)
@@ -398,8 +333,6 @@ function App() {
   const [overlayLabelSwapActive, setOverlayLabelSwapActive] = useState(false)
   const [overlayDemoRunning, setOverlayDemoRunning] = useState(false)
   const [overlayDemoPhase, setOverlayDemoPhase] = useState<"ocr" | "translation" | "rendering" | null>(null)
-  const [showOCROverlay, setShowOCROverlay] = useState(() => loadOCRVisualizationControls().show)
-  const [ocrStaggerMs, setOcrStaggerMs] = useState(() => loadOCRVisualizationControls().staggerMs)
   const [demoModeActive, setDemoModeActive] = useState(false)
   const [demoModeIndex, setDemoModeIndex] = useState(0)
   const [detectedLang, setDetectedLang] = useState("")
@@ -421,8 +354,6 @@ function App() {
   const [metricsError, setMetricsError] = useState<string | null>(null)
   const [providerMetricsError, setProviderMetricsError] = useState<string | null>(null)
   const [metricsUpdatedAt, setMetricsUpdatedAt] = useState<number | null>(null)
-  const [history, setHistory] = useState<HistoryEntry[]>(loadHistory)
-  const [toasts, setToasts] = useState<Toast[]>([])
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
   const [showStatusDetail, setShowStatusDetail] = useState(false)
   const [readinessMetrics, setReadinessMetrics] = useState<OCRMetricsResponse | null>(null)
@@ -433,8 +364,6 @@ function App() {
   const [readinessPressureSeries, setReadinessPressureSeries] = useState<number[]>([])
   const [readinessPressureLevel, setReadinessPressureLevel] = useState<"normal" | "warn" | "critical">("normal")
   const readinessPressureRef = useRef<number | null>(null)
-  const toastId = useRef(0)
-  const histId = useRef(history.length)
   const fileRef = useRef<HTMLInputElement>(null)
   const chipRef = useRef<HTMLDivElement>(null)
   const compareSectionRef = useRef<HTMLElement>(null)
@@ -537,19 +466,6 @@ function App() {
       }
     }
   }, [comparisonModalOpen, comparisonModalView, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme)
-    localStorage.setItem("loklingo-theme", theme)
-  }, [theme])
-
-  useEffect(() => {
-    localStorage.setItem(LANG_KEY, JSON.stringify({ source: sourceLang, target: targetLang }))
-  }, [sourceLang, targetLang])
-
-  useEffect(() => {
-    localStorage.setItem(OCR_VIS_KEY, JSON.stringify({ show: showOCROverlay, staggerMs: ocrStaggerMs }))
-  }, [showOCROverlay, ocrStaggerMs])
 
   useEffect(() => {
     let cancelled = false
@@ -664,12 +580,6 @@ function App() {
     }
   }, [showReliability, metricsWindow])
 
-  const pushToast = useCallback((msg: string, type: "success" | "error") => {
-    const id = ++toastId.current
-    setToasts(t => [...t, { id, msg, type }])
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), MOTION.toastMs)
-  }, [])
-
   const handleTranslate = useCallback(async () => {
     if (!sourceText.trim()) return
     setLoading(true)
@@ -695,21 +605,18 @@ function App() {
       if (sourceLang === "auto" && res.source && res.source !== "auto") {
         setDetectedLang(res.source)
       }
-      const entry: HistoryEntry = {
-        id: ++histId.current,
+      addHistoryEntry({
         sourceText,
         sourceLang,
         targetLang,
         result: res.translated_text,
-        ts: Date.now(),
-      }
-      setHistory(h => { const next = [entry, ...h].slice(0, MAX_HISTORY); saveHistory(next); return next })
+      })
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Translation failed", "error")
     } finally {
       setLoading(false)
     }
-  }, [sourceText, sourceLang, targetLang, mode, workflow, pushToast, compareOriginalUrl])
+  }, [sourceText, sourceLang, targetLang, mode, workflow, pushToast, compareOriginalUrl, addHistoryEntry])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -2327,7 +2234,7 @@ function App() {
           <div className="history-header">
             <span>Recent translations</span>
             {history.length > 0 && (
-              <button className="icon-btn" onClick={() => { setHistory([]); saveHistory([]) }}>
+              <button className="icon-btn" onClick={() => { clearHistory() }}>
                 Clear all
               </button>
             )}

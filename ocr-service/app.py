@@ -74,9 +74,21 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://loklingo-ollama:11434").s
 OCR_SHARED_STORAGE_DIR = os.path.realpath(os.getenv("OCR_SHARED_STORAGE_DIR", "")) if os.getenv("OCR_SHARED_STORAGE_DIR", "") else ""
 
 try:
-    _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
-except AttributeError:  # pragma: no cover - older Pillow fallback
-    _RESAMPLE_LANCZOS = Image.LANCZOS
+    # Pillow <10: Image.LANCZOS. Pillow >=10: Image.Resampling.LANCZOS enum exists
+    # but the value is no longer accepted by Image.rotate/resize — using it raises
+    # `ValueError: Image.Resampling.LANCZOS (1) cannot be used`. Fall back to BICUBIC
+    # (high quality, valid in both Pillow 9 and 10+).
+    _PILLOW_VERSION = tuple(int(x) for x in Image.__version__.split('.')[:2])
+except Exception:  # pragma: no cover - defensive default
+    _PILLOW_VERSION = (0, 0)
+
+if _PILLOW_VERSION >= (10, 0):
+    _RESAMPLE_LANCZOS = Image.Resampling.BICUBIC
+else:
+    try:
+        _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
+    except AttributeError:  # pragma: no cover - older Pillow fallback
+        _RESAMPLE_LANCZOS = Image.LANCZOS
 
 app = FastAPI(title="LokLingo OCR Service", version="2.0.0")
 
