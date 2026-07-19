@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+from collections.abc import AsyncIterator
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import io
 import logging
@@ -90,7 +92,42 @@ else:
     except AttributeError:  # pragma: no cover - older Pillow fallback
         _RESAMPLE_LANCZOS = Image.LANCZOS
 
-app = FastAPI(title="LokLingo OCR Service", version="2.0.0")
+@asynccontextmanager
+async def _log_startup_config(app: FastAPI) -> AsyncIterator[None]:
+    """Log the configured runtime parameters and verify the optional
+    OCR-correction model is reachable.
+
+    Replaces the deprecated ``@app.on_event("startup")`` hook. Runs once
+    at process start; raises if the model check fails when correction is
+    enabled (fail-fast, so the orchestrator can re-route traffic).
+    """
+    logger.info(
+        "OCR service startup: host=0.0.0.0 port=8000 shared_dir=%s max_pdf_bytes=%d max_pdf_pages=%d max_pdf_dpi=%d",
+        OCR_SHARED_STORAGE_DIR or "<disabled>",
+        MAX_PDF_UPLOAD_BYTES,
+        MAX_PDF_PAGES,
+        MAX_PDF_DPI,
+    )
+    route_paths = sorted({route.path for route in app.routes})
+    logger.info("OCR routes: %s", ", ".join(route_paths))
+    provider = _get_correction_provider(None)
+    if provider.name() == "noop":
+        logger.info("OCR correction provider disabled")
+        yield
+        return
+    available, reason = _check_model_available_cached(provider, OCR_CORRECTION_MODEL, OCR_CORRECTION_TIMEOUT)
+    if available:
+        logger.info("OCR correction model is available", extra={"provider": provider.name(), "model": OCR_CORRECTION_MODEL})
+    else:
+        logger.warning("OCR correction model unavailable", extra={"provider": provider.name(), "model": OCR_CORRECTION_MODEL, "reason": reason})
+    yield
+
+
+app = FastAPI(
+    title="LokLingo OCR Service",
+    version="2.0.0",
+    lifespan=_log_startup_config,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1422,28 +1459,6 @@ def _gpu_available() -> bool:
         return bool(paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0)
     except Exception:
         return False
-
-
-@app.on_event("startup")
-async def log_startup_config() -> None:
-    logger.info(
-        "OCR service startup: host=0.0.0.0 port=8000 shared_dir=%s max_pdf_bytes=%d max_pdf_pages=%d max_pdf_dpi=%d",
-        OCR_SHARED_STORAGE_DIR or "<disabled>",
-        MAX_PDF_UPLOAD_BYTES,
-        MAX_PDF_PAGES,
-        MAX_PDF_DPI,
-    )
-    route_paths = sorted({route.path for route in app.routes})
-    logger.info("OCR routes: %s", ", ".join(route_paths))
-    provider = _get_correction_provider(None)
-    if provider.name() == "noop":
-        logger.info("OCR correction provider disabled")
-        return
-    available, reason = _check_model_available_cached(provider, OCR_CORRECTION_MODEL, OCR_CORRECTION_TIMEOUT)
-    if available:
-        logger.info("OCR correction model is available", extra={"provider": provider.name(), "model": OCR_CORRECTION_MODEL})
-    else:
-        logger.warning("OCR correction model unavailable", extra={"provider": provider.name(), "model": OCR_CORRECTION_MODEL, "reason": reason})
 
 
 @app.get("/health")
