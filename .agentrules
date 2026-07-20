@@ -1,0 +1,113 @@
+# LokLingo Agent Context File
+
+## Structural Changes Summary
+
+### Frontend (`frontend/src/`)
+
+**Created:**
+- `utils/errors.ts` — Unified error handling: `getErrorMessage()`, `parseApiErrorBody()`, `buildApiError()`
+- `utils/http.ts` — Unified HTTP client: `apiFetch<T>()`, `buildInternalHeaders()`, `resolveInternalToken()`
+- `utils/storage.ts` — Centralized localStorage: `STORAGE_KEYS` constant object, `getStorageItem()`, `setStorageItem()`, `removeStorageItem()`
+- `utils/index.ts` — Barrel export for all utils
+
+**Refactored:**
+- `api/translate.ts` — Uses `apiFetch` from utils/http instead of local `fetchWithTimeout`/`parseErrorBody`/`buildTranslateError`
+- `api/ocr.ts` — Uses `apiFetch` with proper timeouts; removed dead `OCR_BASE = ''` constant
+- `api/metrics.ts` — Uses `apiFetch` + `buildInternalHeaders`; removed local `parseErrorMessage` and duplicate header construction
+- `api/deadletter.ts` — Uses `apiFetch` + `buildInternalHeaders`; removed local `resolveInternalToken`/`buildHeaders`/`parseApiError`
+- `api/health.ts` — Cleaned up, uses `apiFetch` pattern
+- `App.tsx` — Imports 19 constants/types from `constants.ts` instead of duplicating them; uses `getErrorMessage()` from utils; removed empty `useEffect` (body scroll lock managed by hook)
+- `DeadLetterOpsPanel.tsx` — Fixed double-fetch on mount (duplicate `useEffect` removed); uses `getErrorMessage()`
+- `hooks/useComparisonModal.ts` — Fixed `setView` and `setSliderPercent` functional updater bugs (now reads `stateRef.current` instead of hardcoded `INITIAL.view`/`50`)
+
+**Removed:**
+- `hooks/useImageProgress.ts` — Entirely unused dead code (226 lines)
+- No-op SSE subscription callback in `translate()` (kept subscription, removed misleading comment)
+- `void ocrExtractionPromise` in `App.tsx` (misleading no-op)
+
+### Backend (`backend/`)
+
+**Created:**
+- `services/interface.go` — Extracted `TranslationService` interface and `TranslationInput` struct from dead code
+- `internal/httputil/httputil.go` — Shared HTTP utilities: `ReadBodyLimited()`, `IsTransientStatus()`
+
+**Refactored:**
+- `internal/services/ocr_client.go` — Uses `httputil.ReadBodyLimited` instead of local duplicate; removed local `readBodyLimited` function
+- `cmd/gen_realworld/main.go` — Uses `log/slog` instead of stdlib `log`
+- `cmd/gen_samples/main.go` — Uses `log/slog` instead of stdlib `log`
+- `main.go` — Fixed early slog calls using `slog.New(jsonHandler)` instead of package-level default before `SetDefault`
+
+**Removed:**
+- `services/translation_service.go` — Dead code (~280 lines): duplicate `langName`, `readBodyLimited`, `isTransientStatus`, circuit breaker, retry logic, and LiteLLM request types (all superseded by `Orchestrator` and `providers/openai_chat.go`)
+- `services/translation_service_test.go` — Tests for removed dead code
+
+## Enforced Paradigms & Coding Standards
+
+### Frontend (TypeScript/React)
+
+1. **Shared utilities first**: All API modules must use `utils/http.ts` (`apiFetch`) for HTTP requests. No local `fetch()` wrappers.
+2. **Unified error handling**: Use `getErrorMessage(err, fallback)` from `utils/errors.ts` everywhere. No `err instanceof Error ? err.message : fallback` patterns.
+3. **Centralized storage keys**: All localStorage keys must be defined in `utils/storage.ts` (`STORAGE_KEYS`). No inline string literals.
+4. **Constants from constants.ts**: All shared constants, types, and config values must be imported from `constants.ts`. No local redefinitions.
+5. **Import style**: Double quotes for all imports. No single quotes.
+6. **Error handling**: No silent `.catch(() => {})` blocks. All errors must be reported via toast or logged.
+7. **API layer**: All API calls go through `api/` modules. No raw `fetch()` calls in components.
+8. **Component size**: Keep components under 500 lines. Extract business logic into hooks or utils.
+
+### Backend (Go)
+
+1. **Structured logging**: All code must use `log/slog`. No stdlib `log` package in new code.
+2. **Shared utilities**: Use `internal/httputil` for shared HTTP helpers. No duplicate `readBodyLimited` or `isTransientStatus` functions.
+3. **Error wrapping**: Use `fmt.Errorf("...: %w", err)` to preserve error chains. No `%v` for error wrapping.
+4. **Config access**: All config must go through `config.Load()`. No direct `os.Getenv()` calls.
+5. **Dependency injection**: Use constructor injection. No two-phase initialization (`NewX` + `SetY` pattern).
+6. **Interface extraction**: Keep interfaces in separate files. No mixing interface definitions with concrete implementations.
+7. **Package structure**: `internal/` for private packages, `services/` for public service interfaces, `handlers/` for HTTP handlers, `middleware/` for Fiber middleware.
+
+## Optimized System Instruction for Future Agents
+
+```
+You are maintaining LokLingo, a self-hosted multilingual translation platform.
+
+ARCHITECTURE:
+- Frontend: React 19 + Vite 8 + TypeScript 6 (frontend/src/)
+- Backend: Go 1.26 + Fiber v2 (backend/)
+- OCR: Python Flask service (ocr-service/)
+- E2E: Playwright (e2e/)
+- Infrastructure: Docker Compose with dev/prod/observability overlays
+
+CODING STANDARDS (MANDATORY):
+
+Frontend:
+1. All HTTP requests use apiFetch<T>() from src/utils/http.ts — never raw fetch()
+2. Error handling uses getErrorMessage(err, fallback) from src/utils/errors.ts
+3. All localStorage keys are in STORAGE_KEYS (src/utils/storage.ts)
+4. All shared constants/types are imported from src/constants.ts — never redefined
+5. Double quotes for all imports
+6. No silent catch blocks — errors must be reported via toast or logged
+7. API calls go through src/api/ modules — no raw fetch in components
+8. Keep components under 500 lines; extract logic into hooks or utils
+
+Backend:
+1. All logging uses log/slog — never stdlib log
+2. Shared HTTP helpers from internal/httputil — no local duplicates
+3. Error wrapping uses %w, not %v
+4. Config via config.Load() — no direct os.Getenv
+5. Constructor injection — no two-phase init patterns
+6. Interfaces in separate files from implementations
+7. Package roles: internal/ (private), services/ (interfaces), handlers/ (HTTP), middleware/ (Fiber)
+
+REFACTORING RULES:
+- Before structural changes, use sequential thinking to map side effects
+- Verify dependency versions with context7 before using library APIs
+- Research modern patterns with exa when uncertain about architecture
+- Update AGENTS.md when adding new architectural conventions
+- Run `go build ./...` in backend/ and `npm run build` in frontend/ after changes
+- Run `npm test` in frontend/ and `go test ./...` in backend/ to verify
+
+DO NOT:
+- Add conversational/meta-commentary (TODO, FIXME, HACK, "we should", "I think")
+- Create new files without checking if existing utilities cover the need
+- Bypass the shared HTTP client or error handling utilities
+- Use global mutable state for testability (use dependency injection instead)
+```

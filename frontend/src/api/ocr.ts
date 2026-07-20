@@ -1,10 +1,9 @@
-const OCR_BASE = ''
+import { apiFetch } from "../utils/http"
 
 export interface TextBlock {
   text: string
   confidence: number
   reading_order: number
-  /** Axis-aligned bounding box [x1, y1, x2, y2] */
   bbox: [number, number, number, number]
 }
 
@@ -33,42 +32,33 @@ export interface OCRPdfResponse {
 
 export async function extractTextFromImage(
   file: File,
-  lang = 'auto',
+  lang = "auto",
 ): Promise<OCRImageResponse> {
   const b64 = await fileToBase64(file)
-  const res = await fetch(`${OCR_BASE}/ocr/image`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image_b64: b64, mime_type: file.type || 'image/png', lang }),
+  return apiFetch<OCRImageResponse>("/ocr/image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image_b64: b64, mime_type: file.type || "image/png", lang }),
+    timeoutMs: 30_000,
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'OCR failed' }))
-    throw new Error(err.detail ?? `HTTP ${res.status}`)
-  }
-  return res.json()
 }
 
 export async function extractTextFromPdf(
   file: File,
-  lang = 'auto',
+  lang = "auto",
   dpi = 200,
 ): Promise<OCRPdfResponse> {
   const b64 = await fileToBase64(file)
-  const res = await fetch(`${OCR_BASE}/ocr/pdf`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  return apiFetch<OCRPdfResponse>("/ocr/pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pdf_b64: b64, lang, dpi }),
+    timeoutMs: 60_000,
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'PDF OCR failed' }))
-    throw new Error(err.detail ?? `HTTP ${res.status}`)
-  }
-  return res.json()
 }
 
-/** Auto-dispatches to image or PDF extractor based on file MIME type. */
-export async function extractText(file: File, lang = 'auto'): Promise<{ text: string; confidence: number }> {
-  if (file.type === 'application/pdf') {
+export async function extractText(file: File, lang = "auto"): Promise<{ text: string; confidence: number }> {
+  if (file.type === "application/pdf") {
     const result = await extractTextFromPdf(file, lang)
     return { text: result.text, confidence: result.confidence }
   }
@@ -80,10 +70,9 @@ function fileToBase64(file: File): Promise<string> {
     const reader = new FileReader()
     reader.onload = () => {
       const result = reader.result as string
-      // strip the data URL prefix "data:...;base64,"
-      resolve(result.split(',')[1])
+      resolve(result.split(",")[1])
     }
-    reader.onerror = () => reject(new Error('Failed to read file'))
+    reader.onerror = () => reject(new Error("Failed to read file"))
     reader.readAsDataURL(file)
   })
 }

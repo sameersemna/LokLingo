@@ -1,4 +1,6 @@
-export type MetricsWindow = '1h' | '6h' | '24h' | '7d' | '30d'
+import { apiFetch, buildInternalHeaders } from "../utils/http"
+
+export type MetricsWindow = "1h" | "6h" | "24h" | "7d" | "30d"
 
 export interface ReliabilitySnapshotCounterGroup {
   retry_attempts_total: number
@@ -87,52 +89,16 @@ export interface ProviderMetricsResponse {
   checkpoints: CheckpointMetricsSnapshot
 }
 
-function parseErrorMessage(status: number, payload: unknown): string {
-  if (typeof payload === 'object' && payload !== null && 'error' in payload) {
-    const v = (payload as { error?: unknown }).error
-    if (typeof v === 'string' && v.trim()) {
-      return v
-    }
-  }
-  return `Metrics request returned HTTP ${status}`
-}
-
 export async function getOCRMetrics(window: MetricsWindow): Promise<OCRMetricsResponse> {
-  const internalToken = import.meta.env.VITE_INTERNAL_TOKEN as string | undefined
-  const headers: HeadersInit = {}
-  if (internalToken && internalToken.trim()) {
-    headers['X-Internal-Token'] = internalToken.trim()
-  }
-
-  const res = await fetch(`/api/v1/metrics/ocr?window=${encodeURIComponent(window)}`, {
-    headers,
-    signal: AbortSignal.timeout(7000),
+  return apiFetch<OCRMetricsResponse>(`/api/v1/metrics/ocr?window=${encodeURIComponent(window)}`, {
+    headers: buildInternalHeaders(),
+    timeoutMs: 7000,
   })
-
-  if (!res.ok) {
-    const payload = await res.json().catch(() => null)
-    throw new Error(parseErrorMessage(res.status, payload))
-  }
-
-  return res.json() as Promise<OCRMetricsResponse>
 }
 
 export async function getProviderMetrics(): Promise<ProviderMetricsResponse> {
-  const internalToken = import.meta.env.VITE_INTERNAL_TOKEN as string | undefined
-  const headers: HeadersInit = {}
-  if (internalToken && internalToken.trim()) {
-    headers['X-Internal-Token'] = internalToken.trim()
-  }
-
-  const res = await fetch('/api/v1/metrics/providers', {
-    headers,
-    signal: AbortSignal.timeout(7000),
+  return apiFetch<ProviderMetricsResponse>("/api/v1/metrics/providers", {
+    headers: buildInternalHeaders(),
+    timeoutMs: 7000,
   })
-
-  if (!res.ok) {
-    const payload = await res.json().catch(() => null)
-    throw new Error(parseErrorMessage(res.status, payload))
-  }
-
-  return res.json() as Promise<ProviderMetricsResponse>
 }

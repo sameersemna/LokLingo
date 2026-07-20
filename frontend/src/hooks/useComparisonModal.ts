@@ -122,6 +122,8 @@ export interface ComparisonModalApi {
  */
 export function useComparisonModal(): ComparisonModalApi {
   const [state, dispatch] = useReducer(reducer, INITIAL)
+  const stateRef = useRef(state)
+  stateRef.current = state
   const flashTimerRef = useRef<number | null>(null)
   const panOriginRef = useRef<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>(null)
 
@@ -161,7 +163,7 @@ export function useComparisonModal(): ComparisonModalApi {
   const close = useCallback(() => dispatch({ type: "close" }), [])
   const setView = useCallback((view: ModalView | ((prev: ModalView) => ModalView)) => {
     if (typeof view === "function") {
-      dispatch({ type: "set-view", view: view(INITIAL.view) })
+      dispatch({ type: "set-view", view: view(stateRef.current.view) })
     } else {
       dispatch({ type: "set-view", view })
     }
@@ -172,7 +174,7 @@ export function useComparisonModal(): ComparisonModalApi {
   )
   const setSliderPercent = useCallback(
     (percent: number | ((prev: number) => number)) => {
-      const next = typeof percent === "function" ? percent(50) : percent
+      const next = typeof percent === "function" ? percent(stateRef.current.sliderPercent) : percent
       dispatch({ type: "set-slider-percent", percent: next })
     },
     [],

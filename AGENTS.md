@@ -24,13 +24,16 @@ You are an expert maintainer of **LokLingo** — a high-performance, self-hosted
 - `.env.development`, `.env.production`, `.env.example`
 - `guide/reliability-runbook.md`
 - `guide/governance/*` — All governance and review processes
+- **`.agentrules`** — Architectural standards, coding conventions, and system prompt for agent interoperability. **Read this first before making any changes.**
 
 ## Coding & Architecture Guidelines
-- Use structured logging and proper error wrapping in Go.
+- Use structured logging (`log/slog`) and proper error wrapping (`%w`) in Go.
 - All external calls (LiteLLM, OCR) must have timeouts and retries.
 - Prefer environment variables over hard-coded values.
 - Maintain clear separation between API handlers, services, and workers.
 - Add comprehensive health/readiness checks for every service.
+- **Frontend**: Use `apiFetch()` from `utils/http.ts` for all HTTP requests. Use `getErrorMessage()` from `utils/errors.ts` for error handling. Import constants from `constants.ts` — never redefine locally.
+- **Backend**: Use `internal/httputil` for shared HTTP helpers. No duplicate utility functions. Constructor injection only — no two-phase initialization.
 
 ## When Making Changes
 1. Update relevant documentation in `guide/`

@@ -1,15 +1,7 @@
-// gen_realworld renders a real downloaded JPEG with Arabic, Devanagari,
-// Bengali and CJK overlays to verify no-tofu rendering on a genuine photo.
-//
-// Run from backend/:
-//
-//	go run ./cmd/gen_realworld [/path/to/source.jpg]
-//
-// Defaults to /tmp/realworld_src.jpg (downloaded by the font integration test).
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +10,8 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
 	src := "/tmp/realworld_src.jpg"
 	if len(os.Args) > 1 {
 		src = os.Args[1]
@@ -26,7 +20,8 @@ func main() {
 	_, thisFile, _, _ := runtime.Caller(0)
 	outDir := filepath.Join(filepath.Dir(thisFile), "../../../guide/render_samples")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		log.Fatalf("mkdir: %v", err)
+		slog.Error("mkdir failed", "err", err)
+		os.Exit(1)
 	}
 
 	blocks := []services.ImageTextBlock{
@@ -36,31 +31,38 @@ func main() {
 		{Text: "Wing structure detail", Bbox: []float64{330, 60, 630, 120}},
 	}
 	translated := []string{
-		"نوع النمل", // Arabic
-		"वैज्ञानिक नाम हिंदी में",  // Devanagari
-		"আবাসস্থলের বিবরণ বাংলায়", // Bengali
-		"翅膀结构细节", // CJK
+		"نوع النمل",
+		"वैज्ञानिक नाम हिंदी में",
+		"আবাসস্থলের বিবরণ বাংলায়",
+		"翅膀结构细节",
 	}
 
 	opts := services.DefaultOverlayOptions()
 	outTmp, stats, err := services.DrawTextOnImageWithOptions(src, blocks, translated, opts)
 	if err != nil {
-		log.Fatalf("render: %v", err)
+		slog.Error("render failed", "err", err)
+		os.Exit(1)
 	}
 
 	dest := filepath.Join(outDir, "realworld_overlay.jpg")
 	data, err := os.ReadFile(outTmp)
 	if err != nil {
-		log.Fatalf("read tmp: %v", err)
+		slog.Error("read tmp failed", "err", err)
+		os.Exit(1)
 	}
 	if err := os.WriteFile(dest, data, 0o644); err != nil {
-		log.Fatalf("write dest: %v", err)
+		slog.Error("write dest failed", "err", err)
+		os.Exit(1)
 	}
 	os.Remove(outTmp)
 
-	log.Printf("✓ realworld_overlay  drawn=%d skipped=%d fontWarnings=%d → %s",
-		stats.BlocksDrawn, stats.BlocksSkipped, len(stats.FontWarnings), dest)
+	slog.Info("realworld_overlay generated",
+		"drawn", stats.BlocksDrawn,
+		"skipped", stats.BlocksSkipped,
+		"fontWarnings", len(stats.FontWarnings),
+		"dest", dest,
+	)
 	for _, w := range stats.FontWarnings {
-		log.Printf("  ⚠ %s", w)
+		slog.Warn("font warning", "warning", w)
 	}
 }

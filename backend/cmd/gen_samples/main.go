@@ -1,18 +1,11 @@
 package main
 
-// gen_samples renders reference PNG images to guide/render_samples/ using the
-// live image overlay pipeline with all current fixes applied.
-//
-// Run from the repo root:
-//
-//	go run ./backend/cmd/gen_samples
-
 import (
 	"image"
 	"image/color"
 	"image/draw"
 	"image/png"
-	"log"
+	"log/slog"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -26,15 +19,16 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
 	_, thisFile, _, _ := runtime.Caller(0)
-	// thisFile = backend/cmd/gen_samples/main.go  → up 4 dirs to repo root
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "../../..")
 	outDir := filepath.Join(repoRoot, "guide/render_samples")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		log.Fatalf("mkdir: %v", err)
+		slog.Error("mkdir failed", "err", err)
+		os.Exit(1)
 	}
 
-	// writeCanvas creates a gradient+noise synthetic base image.
 	writeCanvas := func(name string, w, h int) string {
 		img := image.NewRGBA(image.Rect(0, 0, w, h))
 		rng := rand.New(rand.NewSource(42))
@@ -49,11 +43,13 @@ func main() {
 		p := filepath.Join(os.TempDir(), name)
 		f, err := os.Create(p)
 		if err != nil {
-			log.Fatalf("create canvas %s: %v", name, err)
+			slog.Error("create canvas failed", "name", name, "err", err)
+			os.Exit(1)
 		}
 		defer f.Close()
 		if err := png.Encode(f, img); err != nil {
-			log.Fatalf("encode canvas %s: %v", name, err)
+			slog.Error("encode canvas failed", "name", name, "err", err)
+			os.Exit(1)
 		}
 		return p
 	}
@@ -61,10 +57,12 @@ func main() {
 	copyTo := func(src, dest string) {
 		data, err := os.ReadFile(src)
 		if err != nil {
-			log.Fatalf("read %s: %v", src, err)
+			slog.Error("read failed", "src", src, "err", err)
+			os.Exit(1)
 		}
 		if err := os.WriteFile(dest, data, 0o644); err != nil {
-			log.Fatalf("write %s: %v", dest, err)
+			slog.Error("write failed", "dest", dest, "err", err)
+			os.Exit(1)
 		}
 		os.Remove(src)
 	}
@@ -86,8 +84,6 @@ func main() {
 		return image.Rect(x0, y0, x1, y1).Intersect(bounds)
 	}
 
-	// writeCanvasWithText creates a canvas and paints synthetic source text
-	// directly into the OCR boxes so style/color sampling has realistic pixels.
 	writeCanvasWithText := func(name string, w, h int, blocks []services.ImageTextBlock, texts []string, colors []color.RGBA, bold []bool) string {
 		img := image.NewRGBA(image.Rect(0, 0, w, h))
 		rng := rand.New(rand.NewSource(42))
@@ -127,19 +123,15 @@ func main() {
 			d := &font.Drawer{Dst: img, Src: image.NewUniform(ink), Face: basicfont.Face7x13, Dot: dot}
 			d.DrawString(texts[i])
 			if isBold {
-				// Simulate heavier weight by overpainting one-pixel offset pass.
 				d2 := &font.Drawer{Dst: img, Src: image.NewUniform(ink), Face: basicfont.Face7x13, Dot: fixed.P(dot.X.Ceil()+1, dot.Y.Ceil())}
 				d2.DrawString(texts[i])
 			}
 
-			// Add tiny decorative bar in text color to strengthen color sampling.
 			barW := min(14, max(6, box.Dx()/8))
 			barH := min(6, max(3, box.Dy()/12))
 			bar := image.Rect(box.Min.X+padX, box.Min.Y+2, box.Min.X+padX+barW, box.Min.Y+2+barH).Intersect(img.Bounds())
 			draw.Draw(img, bar, image.NewUniform(ink), image.Point{}, draw.Src)
 
-			// Add short "ink-stroke" bands so sampled text-colored pixels are >10%
-			// of the box while still keeping background as majority.
 			strokeW := max(10, box.Dx()/3)
 			strokeH := max(2, box.Dy()/14)
 			for s := 0; s < 3; s++ {
@@ -153,11 +145,13 @@ func main() {
 		p := filepath.Join(os.TempDir(), name)
 		f, err := os.Create(p)
 		if err != nil {
-			log.Fatalf("create canvas %s: %v", name, err)
+			slog.Error("create canvas failed", "name", name, "err", err)
+			os.Exit(1)
 		}
 		defer f.Close()
 		if err := png.Encode(f, img); err != nil {
-			log.Fatalf("encode canvas %s: %v", name, err)
+			slog.Error("encode canvas failed", "name", name, "err", err)
+			os.Exit(1)
 		}
 		return p
 	}
@@ -165,15 +159,20 @@ func main() {
 	render := func(canvasPath string, blocks []services.ImageTextBlock, translated []string, opts services.OverlayOptions, destName string) {
 		outPath, stats, err := services.DrawTextOnImageWithOptions(canvasPath, blocks, translated, opts)
 		if err != nil {
-			log.Fatalf("render %s: %v", destName, err)
+			slog.Error("render failed", "dest", destName, "err", err)
+			os.Exit(1)
 		}
 		dest := filepath.Join(outDir, destName+".png")
 		copyTo(outPath, dest)
-		log.Printf("✓ %-20s drawn=%d skipped=%d fontWarnings=%d → %s",
-			destName, stats.BlocksDrawn, stats.BlocksSkipped, len(stats.FontWarnings), dest)
+		slog.Info("render complete",
+			"dest", destName,
+			"drawn", stats.BlocksDrawn,
+			"skipped", stats.BlocksSkipped,
+			"fontWarnings", len(stats.FontWarnings),
+		)
 		if len(stats.FontWarnings) > 0 {
 			for _, w := range stats.FontWarnings {
-				log.Printf("  ⚠ font warning: %s", w)
+				slog.Warn("font warning", "warning", w)
 			}
 		}
 	}
@@ -206,7 +205,6 @@ func main() {
 		canvas := writeCanvas("loklingo_cjk.png", 780, 560)
 		blocks := []services.ImageTextBlock{
 			{Text: "Japanese horizontal text", Bbox: []float64{50, 55, 620, 125}},
-			// two narrow vertical columns
 			{Text: "縦書きの日本語テキスト", Bbox: []float64{710, 50, 740, 510}},
 			{Text: "漢字仮名交じり文書の例", Bbox: []float64{665, 50, 700, 490}},
 			{Text: "Chinese simplified text", Bbox: []float64{50, 160, 560, 230}},
@@ -223,7 +221,7 @@ func main() {
 		os.Remove(canvas)
 	}
 
-	// ── 3. overlay_result (mixed — replaces guide/render_samples/overlay_result.png) ──
+	// ── 3. overlay_result ──
 	{
 		canvas := writeCanvas("loklingo_mixed_ov.png", 960, 620)
 		blocks := []services.ImageTextBlock{
@@ -242,7 +240,7 @@ func main() {
 		os.Remove(canvas)
 	}
 
-	// ── 4. layout_result (transparent bg — replaces guide/render_samples/layout_result.png) ──
+	// ── 4. layout_result ──
 	{
 		canvas := writeCanvas("loklingo_mixed_ly.png", 960, 620)
 		blocks := []services.ImageTextBlock{
@@ -299,7 +297,6 @@ func main() {
 			"loklingo_before_after_colored.png", 920, 320,
 			blocks,
 			[]string{"Status: WARNING", "Status: OK", "Status: ERROR"},
-			// Deliberately muted tones so adaptive amplification is visible in "after".
 			[]color.RGBA{{168, 142, 110, 255}, {108, 146, 126, 255}, {156, 112, 118, 255}},
 			[]bool{false, false, true},
 		)
@@ -313,7 +310,7 @@ func main() {
 		os.Remove(canvas)
 	}
 
-	// ── 7. before/after: mixed styles (bold + colored + scripts) ──────────────
+	// ── 7. before/after: mixed styles ──
 	{
 		blocks := []services.ImageTextBlock{
 			{Text: "FEATURE ANNOUNCEMENT", Bbox: []float64{60, 45, 930, 145}},

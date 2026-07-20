@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"loklingo/backend/internal/httputil"
 	"loklingo/backend/internal/observability"
 )
 
@@ -365,7 +366,7 @@ func (c *ocrClient) ExtractImageBlocksWithOptions(filePath, lang string, options
 		return nil, fmt.Errorf("ocr: service returned HTTP %d", httpResp.StatusCode)
 	}
 
-	raw, err = readBodyLimited(httpResp.Body, ocrMaxResponseBodyBytes)
+	raw, err = httputil.ReadBodyLimited(httpResp.Body, ocrMaxResponseBodyBytes)
 	if err != nil {
 		observability.IncOCRResponseRejectedBody()
 		slog.Warn("ocr_response_rejected", "endpoint", ocrImagePath, "reason", "body_too_large_or_unreadable", "err", err)
@@ -491,17 +492,6 @@ func parseRetryAfter(v string) time.Duration {
 		}
 	}
 	return 0
-}
-
-func readBodyLimited(r io.Reader, maxBytes int64) ([]byte, error) {
-	b, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > maxBytes {
-		return nil, fmt.Errorf("response body exceeds max size (%d bytes)", maxBytes)
-	}
-	return b, nil
 }
 
 func (c *ocrClient) extractOCRSharedPath(filePath, lang string, options OCRRequestOptions) (ocrPDFResponse, int, error) {
@@ -713,7 +703,7 @@ func (c *ocrClient) extractOCRJSONStream(filePath, lang string, options OCRReque
 }
 
 func decodeOCRResponse(r io.Reader) (ocrPDFResponse, error) {
-	raw, err := readBodyLimited(r, ocrMaxResponseBodyBytes)
+	raw, err := httputil.ReadBodyLimited(r, ocrMaxResponseBodyBytes)
 	if err != nil {
 		observability.IncOCRResponseRejectedBody()
 		slog.Warn("ocr_response_rejected", "endpoint", ocrPDFPath, "reason", "body_too_large_or_unreadable", "err", err)

@@ -1,8 +1,3 @@
-/* eslint-disable react-hooks/refs -- False positive: the React 19 Compiler
-   flags every access to .current on refs returned by our custom hooks
-   (e.g. useReadiness().chipRef) as "ref access during render", but the
-   accesses are inside event handlers / useEffect, never during render.
-   Tracked in guide/hardening-roadmap.md for the next refactor pass. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { translate, translateImage, uploadPDF, type JobProgressUpdate } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
@@ -18,109 +13,34 @@ import { useOCRVisualization } from "./hooks/useOCRVisualization"
 import { useHistory } from "./hooks/useHistory"
 import { useComparisonModal } from "./hooks/useComparisonModal"
 import { useReadiness } from "./hooks/useReadiness"
+import { getErrorMessage } from "./utils/errors"
 import { MOTION } from "./motion"
+import {
+  LANGUAGES,
+  TARGET_LANGUAGES,
+  PRODUCT_MODE_BACKEND_MAP,
+  PRODUCT_MODES,
+  WORKFLOWS,
+  MAX_CHARS,
+  FIRST_VISIT_KEY,
+  RELIABILITY_WINDOWS,
+  CHECKPOINT_HIT_WARN_THRESHOLD,
+  CHECKPOINT_HIT_CRITICAL_THRESHOLD,
+  CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD,
+  CHECKPOINT_PERSIST_FAILURE_CRITICAL_THRESHOLD,
+  DEMO_PRESETS,
+  TRUST_SIGNALS,
+  IMAGE_PROGRESS_STAGES,
+  OCR_STAGGER_PRESETS,
+  type ProductMode,
+  type InputWorkflow,
+  type UploadSelection,
+  type ComparisonFocus,
+  type ProgressStage,
+  type OverlayStage,
+  type LiveProgressDetail,
+} from "./constants"
 import "./App.css"
-
-const LANGUAGES = [
-  { code: "auto", label: "Auto-detect" },
-  { code: "en",   label: "English"     },
-  { code: "de",   label: "German"      },
-  { code: "fr",   label: "French"      },
-  { code: "hi",   label: "Hindi"       },
-  { code: "ur",   label: "Urdu"        },
-  { code: "ar",   label: "Arabic"      },
-  { code: "bn",   label: "Bengali"     },
-  { code: "es",   label: "Spanish"     },
-  { code: "zh",   label: "Chinese"     },
-  { code: "ja",   label: "Japanese"    },
-]
-
-const TARGET_LANGUAGES = LANGUAGES.filter(l => l.code !== "auto")
-type ProductMode = "fast" | "studio" | "extract"
-const PRODUCT_MODE_BACKEND_MAP: Record<ProductMode, "overlay" | "layout" | "ocr_only"> = {
-  fast: "overlay",
-  studio: "layout",
-  extract: "ocr_only",
-}
-const PRODUCT_MODES = [
-  { value: "fast", label: "Fast", detail: "Quick visual draft" },
-  { value: "studio", label: "Studio", detail: "Premium layout fidelity" },
-  { value: "extract", label: "Extract", detail: "Text-first output" },
-] as const
-const WORKFLOWS = [
-  { value: "image", label: "Image", detail: "Hero workflow for instant visual translation", icon: "🖼" },
-  { value: "pdf", label: "PDF", detail: "Queue full-document translation in background", icon: "📄" },
-  { value: "text", label: "Text", detail: "Translate pasted or typed text", icon: "✍" },
-] as const
-const MAX_CHARS = 2000
-const FIRST_VISIT_KEY = "loklingo-first-visit"
-const RELIABILITY_WINDOWS: MetricsWindow[] = ["1h", "6h", "24h", "7d", "30d"]
-const CHECKPOINT_HIT_WARN_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_HIT_WARN ?? 70)
-const CHECKPOINT_HIT_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_HIT_CRITICAL ?? 40)
-const CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_PERSIST_FAILURE_WARN ?? 5)
-const CHECKPOINT_PERSIST_FAILURE_CRITICAL_THRESHOLD = Number(import.meta.env.VITE_CHECKPOINT_PERSIST_FAILURE_CRITICAL ?? 15)
-
-const DEMO_PRESETS = [
-  // Manga & Comics
-  { id: "manga",      label: "Manga frames",     emoji: "📚", category: "Manga", src: "/samples/cjk_vertical.png",       source: "ja", target: "en" },
-  // Restaurant Menus
-  { id: "menu",       label: "Restaurant menu",  emoji: "🍽", category: "Menus", src: "/samples/before_bold_style.png",  source: "auto", target: "en" },
-  // Anime & Stylized Art
-  { id: "anime",      label: "Anime/stylized",   emoji: "🎨", category: "Anime", src: "/samples/before_mixed_styles.png", source: "en", target: "es" },
-  // Street Signs
-  { id: "signs",      label: "Street signs",     emoji: "🚩", category: "Signs", src: "/samples/realworld_overlay.jpg",   source: "auto", target: "en" },
-  // Infographics
-  { id: "infographic", label: "Infographics",    emoji: "📊", category: "Infographics", src: "/samples/cjk_vertical.png",  source: "auto", target: "en" },
-  // Screenshots
-  { id: "screenshot", label: "UI screenshots",   emoji: "🖥", category: "Screenshots", src: "/samples/before_bold_style.png", source: "en", target: "fr" },
-  // Posters
-  { id: "poster",     label: "Posters & art",    emoji: "🎬", category: "Posters", src: "/samples/before_mixed_styles.png", source: "en", target: "de" },
-  // PDFs (using same images as proxy)
-  { id: "document",   label: "Documents/PDFs",  emoji: "📄", category: "PDFs", src: "/samples/realworld_overlay.jpg",   source: "auto", target: "en" },
-] as const
-
-type InputWorkflow = "image" | "pdf" | "text"
-
-interface UploadSelection {
-  kind: "image" | "pdf"
-  name: string
-  size: number
-  previewUrl?: string
-}
-
-type ComparisonFocus = "original" | "overlay" | "layout"
-type ProgressStage = "detecting" | "layout" | "languages" | "translating" | "typography" | "rendering"
-type OverlayStage = "idle" | "ocr" | "translated"
-type LiveProgressDetail = {
-  stage?: ProgressStage
-  region?: number
-  totalRegions?: number
-  chunkProgress?: number
-  phaseLabel?: string
-}
-
-const TRUST_SIGNALS = [
-  "Local processing",
-  "GPU acceleration",
-  "No cloud dependency",
-  "OCR confidence",
-  "Layout preservation",
-] as const
-
-const IMAGE_PROGRESS_STAGES: Array<{ key: ProgressStage; label: string }> = [
-  { key: "detecting", label: "Detecting text" },
-  { key: "layout", label: "Understanding layout" },
-  { key: "languages", label: "Detecting languages" },
-  { key: "translating", label: "Translating content" },
-  { key: "typography", label: "Rebuilding typography" },
-  { key: "rendering", label: "Rendering final image" },
-]
-
-const OCR_STAGGER_PRESETS = [
-  { id: "fast", label: "Fast", ms: 30 },
-  { id: "default", label: "Default", ms: 70 },
-  { id: "slow", label: "Slow", ms: 140 },
-] as const
 
 function isRenderableOCRBlock(block: TextBlock): boolean {
   const [x1, y1, x2, y2] = block.bbox
@@ -506,7 +426,7 @@ function App() {
         setMetricsUpdatedAt(Date.now())
       } catch (err) {
         if (cancelled) return
-        setMetricsError(err instanceof Error ? err.message : "Failed to load reliability metrics")
+        setMetricsError(getErrorMessage(err, "Failed to load reliability metrics"))
       } finally {
         if (!cancelled) {
           setMetricsLoading(false)
@@ -554,7 +474,7 @@ function App() {
         result: res.translated_text,
       })
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Translation failed", "error")
+      pushToast(getErrorMessage(err, "Translation failed"), "error")
     } finally {
       setLoading(false)
     }
@@ -638,9 +558,7 @@ function App() {
     return () => window.removeEventListener("keyup", release)
   }, [comparisonModalOpen])
 
-  useEffect(() => {
-    // Body scroll lock is now managed by useComparisonModal.
-  }, [])
+  // Body scroll lock is managed by useComparisonModal.
 
   const handleCopy = async () => {
     if (!result) return
@@ -670,7 +588,7 @@ function App() {
       document.body.removeChild(a)
       URL.revokeObjectURL(blobUrl)
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Download failed", "error")
+      pushToast(getErrorMessage(err, "Download failed"), "error")
     }
   }, [pushToast])
 
@@ -712,7 +630,7 @@ function App() {
       pdf.save("loklingo-export.pdf")
       pushToast("PDF exported", "success")
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : "PDF export failed", "error")
+      pushToast(getErrorMessage(err, "PDF export failed"), "error")
     }
   }, [pushToast, result, resultImageUrl])
 
@@ -1422,7 +1340,6 @@ function App() {
       failImageProgress()
       pushToast("Image translation paused. Retry to continue.", "error")
     } finally {
-      void ocrExtractionPromise
       setOcrLoading(false)
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null
@@ -1466,7 +1383,7 @@ function App() {
       const file = new File([blob], `demo-${preset.id}.${ext}`, { type: blob.type || `image/${ext}` })
       await runImageFile(file, preset.source, preset.target)
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Demo preset failed", "error")
+      pushToast(getErrorMessage(err, "Demo preset failed"), "error")
     }
   }, [compareOriginalUrl, ocrLoading, pushToast, runImageFile])
 
@@ -1540,7 +1457,7 @@ function App() {
         setShowHistory(false)
         pushToast('PDF uploaded — translating in background', 'success')
       } catch (err) {
-        pushToast(err instanceof Error ? err.message : 'PDF upload failed', 'error')
+        pushToast(getErrorMessage(err, "PDF upload failed"), "error")
       } finally {
         setPdfLoading(false)
         if (fileRef.current) {

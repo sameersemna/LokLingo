@@ -45,9 +45,9 @@ func main() {
 		var err error
 		pgPool, err = pgxpool.New(context.Background(), cfg.PostgresDSN)
 		if err != nil {
-			slog.New(jsonHandler).Warn("postgres analytics sink disabled: could not connect", "err", err)
+			slog.Warn("postgres analytics sink disabled: could not connect", "err", err)
 		} else {
-			slog.New(jsonHandler).Info("postgres analytics sink enabled")
+			slog.Info("postgres analytics sink enabled")
 		}
 	}
 

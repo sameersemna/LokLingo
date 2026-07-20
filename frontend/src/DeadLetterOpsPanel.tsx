@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { listDeadJobs, replayDeadJob, type DeadLetterJobItem } from "./api/deadletter"
+import { getErrorMessage } from "./utils/errors"
 
 type ToastFn = (msg: string, type: "success" | "error") => void
 
@@ -63,36 +64,15 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
       const data = await listDeadJobs(limit, token)
       setItems(data.jobs)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load dead-letter jobs")
+      setError(getErrorMessage(err, "Failed to load dead-letter jobs"))
     } finally {
       setLoading(false)
     }
   }, [limit, token])
 
   useEffect(() => {
-    let cancelled = false
-
-    const run = async () => {
-      try {
-        const data = await listDeadJobs(limit, token)
-        if (cancelled) return
-        setItems(data.jobs)
-        setError(null)
-      } catch (err) {
-        if (cancelled) return
-        setError(err instanceof Error ? err.message : "Failed to load dead-letter jobs")
-      } finally {
-        if (!cancelled) {
-          setLoading(false)
-        }
-      }
-    }
-
-    void run()
-    return () => {
-      cancelled = true
-    }
-  }, [limit, token])
+    void load()
+  }, [load])
 
   useEffect(() => {
     if (!autoRefresh) {
@@ -209,7 +189,7 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
       onToast(`Replayed ${replayed.job_id}`, "success")
       setItems(prev => prev.filter(item => item.job_id !== jobId))
     } catch (err) {
-      onToast(err instanceof Error ? err.message : "Replay failed", "error")
+      onToast(getErrorMessage(err, "Replay failed"), "error")
     } finally {
       setReplaying(null)
     }
