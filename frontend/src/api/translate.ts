@@ -1,4 +1,4 @@
-import { apiFetch, buildInternalHeaders } from "../utils/http"
+import { apiFetch } from "../utils/http"
 
 export interface TranslateRequest {
   text: string
@@ -52,7 +52,6 @@ export interface JobEventResponse extends JobResponse {
 
 const POLL_INTERVAL_MS = 600
 const MAX_POLLS = 100
-const REQUEST_TIMEOUT_MS = 30_000
 const IMAGE_REQUEST_TIMEOUT_MS = 120_000
 const IMAGE_MAX_POLLS = Math.ceil(IMAGE_REQUEST_TIMEOUT_MS / POLL_INTERVAL_MS)
 

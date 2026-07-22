@@ -5,7 +5,7 @@ import { getOCRMetrics, getProviderMetrics, type MetricsWindow, type OCRMetricsR
 import { PdfJobsPanel } from "./PdfJobsPanel"
 import { DeadLetterOpsPanel } from "./DeadLetterOpsPanel"
 import { saveStoredJob } from "./pdfJobsStorage"
-import { checkpointOperatorHint, formatPercent, levelLabel, safePercent, type CheckpointThresholds } from "./checkpointReliability"
+
 import { useTheme } from "./hooks/useTheme"
 import { useToasts } from "./hooks/useToasts"
 import { useLanguageSelection } from "./hooks/useLanguageSelection"
@@ -17,21 +17,11 @@ import { getErrorMessage } from "./utils/errors"
 import { MOTION } from "./motion"
 import {
   LANGUAGES,
-  TARGET_LANGUAGES,
   PRODUCT_MODE_BACKEND_MAP,
-  PRODUCT_MODES,
-  WORKFLOWS,
   MAX_CHARS,
   FIRST_VISIT_KEY,
-  RELIABILITY_WINDOWS,
-  CHECKPOINT_HIT_WARN_THRESHOLD,
-  CHECKPOINT_HIT_CRITICAL_THRESHOLD,
-  CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD,
-  CHECKPOINT_PERSIST_FAILURE_CRITICAL_THRESHOLD,
   DEMO_PRESETS,
-  TRUST_SIGNALS,
   IMAGE_PROGRESS_STAGES,
-  OCR_STAGGER_PRESETS,
   type ProductMode,
   type InputWorkflow,
   type UploadSelection,
@@ -41,6 +31,7 @@ import {
   type LiveProgressDetail,
 } from "./constants"
 import "./App.css"
+import { Header, WorkflowSwitcher, UploadHero, ImageProgress, IntelligencePanel, PipelineWarning, DemoGallery, HistoryPanel, ExportActions, ComparisonView, ReliabilityTelemetry } from "./components"
 
 function isRenderableOCRBlock(block: TextBlock): boolean {
   const [x1, y1, x2, y2] = block.bbox
@@ -205,9 +196,10 @@ function App() {
   const [theme, setTheme] = useTheme()
   const { toasts, push: pushToast } = useToasts()
   const { source: sourceLang, target: targetLang, setSource: setSourceLang, setTarget: setTargetLang } = useLanguageSelection()
-  const { show: showOCROverlay, staggerMs: ocrStaggerMs, setShow: setShowOCROverlay, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
+  const { show: showOCROverlay, staggerMs: ocrStaggerMs, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
   const { history, add: addHistoryEntry, clear: clearHistory } = useHistory()
   const modal = useComparisonModal()
+  /* eslint-disable react-hooks/refs */
   const {
     state: modalState,
     open: openModal,
@@ -306,7 +298,6 @@ function App() {
   const fileRef = useRef<HTMLInputElement>(null)
   const compareSectionRef = useRef<HTMLElement>(null)
   const sliderDraggingRef = useRef(false)
-  const modalSliderDraggingRef = useRef(false)
   const autoCompareKeyRef = useRef<string | null>(null)
   const imageProgressTimersRef = useRef<number[]>([])
   const translationTickerRef = useRef<number | null>(null)
@@ -328,6 +319,7 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setResultImageLarge(false)
     if (!resultImageUrl) return
     const checkSize = async () => {
@@ -393,7 +385,6 @@ function App() {
     }
     document.addEventListener("mousedown", handler)
     return () => document.removeEventListener("mousedown", handler)
-    // eslint-disable-next-line react-hooks/refs, react-hooks/exhaustive-deps
   }, [showStatusDetail, setShowStatusDetail])
 
   useEffect(() => {
@@ -963,6 +954,7 @@ function App() {
     const total = overlayBlocks.length
     if (total <= 0) return
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTranslationRegionTotal(total)
     setLivePhaseLabel("Preserving layout geometry")
     translationTickerRef.current = window.setInterval(() => {
@@ -1121,6 +1113,129 @@ function App() {
     return () => window.removeEventListener("keydown", handler)
   }, [comparisonModalOpen, hasModalComparison, closeComparisonModal])
 
+  const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
+    setOcrLoading(true)
+    setPipelineWarning(null)
+    startImageProgress()
+    resetOCRVisualization()
+    setOcrConfidence(null)
+
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
+    let ocrBlocks: TextBlock[] = []
+    let translatedOverlayText = ""
+    extractTextFromImage(file, src)
+      .then(ocrRes => {
+        setOcrConfidence(Number.isFinite(ocrRes.confidence) ? ocrRes.confidence * 100 : null)
+        ocrBlocks = ocrRes.blocks.filter(isRenderableOCRBlock)
+        setTranslationRegionTotal(ocrBlocks.length)
+        if (ocrBlocks.length === 0) {
+          return
+        }
+
+        if (translatedOverlayText.trim()) {
+          revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
+          return
+        }
+
+        revealOCRVisualization(ocrBlocks)
+      })
+      .catch(() => {
+        // Keep the main image pipeline running even if OCR visualization is unavailable.
+      })
+
+    try {
+      const originalUrl = URL.createObjectURL(file)
+      if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
+      setCompareOriginalUrl(originalUrl)
+
+      const requestMode = PRODUCT_MODE_BACKEND_MAP[mode]
+
+      if (requestMode === "ocr_only") {
+        const ocrRes = await translateImage(file, src, tgt, requestMode, handleImageJobProgress, controller.signal)
+        translatedOverlayText = ocrRes.translated_text ?? ""
+        if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
+          revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
+        }
+
+        setResult(ocrRes.translated_text)
+        setResultKind("ocr")
+        setResultImageUrl(ocrRes.image_url ?? null)
+        setCompareOverlayUrl(null)
+        setCompareLayoutUrl(null)
+        if (src === "auto" && ocrRes.source && ocrRes.source !== "auto") {
+          setDetectedLang(ocrRes.source)
+        }
+        setPipelineWarning(null)
+        completeImageProgress()
+        pushToast("OCR extracted", "success")
+        return
+      }
+
+      const overlayRes = await translateImage(file, src, tgt, "overlay", handleImageJobProgress, controller.signal)
+      const layoutRes = await translateImage(file, src, tgt, "layout", handleImageJobProgress, controller.signal)
+
+      if (!overlayRes.image_url || !layoutRes.image_url) {
+        throw new Error("Image comparison requires both overlay and layout outputs")
+      }
+
+      const activeRes = mode === "studio" ? layoutRes : overlayRes
+      translatedOverlayText = activeRes.translated_text ?? ""
+      if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
+        revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
+      }
+
+      setResult(activeRes.translated_text)
+      setResultKind("translation")
+      setResultImageUrl(activeRes.image_url ?? null)
+      setCompareOverlayUrl(overlayRes.image_url)
+      setCompareLayoutUrl(layoutRes.image_url)
+
+      if (src === "auto") {
+        const resolved = overlayRes.source && overlayRes.source !== "auto"
+          ? overlayRes.source
+          : layoutRes.source && layoutRes.source !== "auto"
+          ? layoutRes.source
+          : ""
+        if (resolved) setDetectedLang(resolved)
+      }
+      setPipelineWarning(null)
+      completeImageProgress()
+      pushToast("Image translated", "success")
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setPipelineWarning("Translation cancelled.")
+        failImageProgress()
+        return
+      }
+      const friendlyWarning = getPipelineHelpMessage(err) ?? "Translation engine recovering. Please retry in a moment if processing does not complete."
+      setPipelineWarning(friendlyWarning)
+      failImageProgress()
+      pushToast("Image translation paused. Retry to continue.", "error")
+    } finally {
+      setOcrLoading(false)
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null
+      }
+      if (fileRef.current) {
+        fileRef.current.value = ""
+        fileRef.current.accept = "image/*,application/pdf"
+      }
+    }
+  }, [
+    compareOriginalUrl,
+    completeImageProgress,
+    failImageProgress,
+    mode,
+    pushToast,
+    resetOCRVisualization,
+    revealOCRVisualization,
+    revealTranslatedVisualization,
+    handleImageJobProgress,
+    startImageProgress,
+  ])
+
   // First-visit onboarding: Auto-load demo for new users
   useEffect(() => {
     const isFirstVisit = !localStorage.getItem(FIRST_VISIT_KEY)
@@ -1238,129 +1353,6 @@ function App() {
     modalPanOriginRef.current = null
     setModalPanning(false)
   }
-
-  const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
-    setOcrLoading(true)
-    setPipelineWarning(null)
-    startImageProgress()
-    resetOCRVisualization()
-    setOcrConfidence(null)
-
-    const controller = new AbortController()
-    abortControllerRef.current = controller
-
-    let ocrBlocks: TextBlock[] = []
-    let translatedOverlayText = ""
-    const ocrExtractionPromise = extractTextFromImage(file, src)
-      .then(ocrRes => {
-        setOcrConfidence(Number.isFinite(ocrRes.confidence) ? ocrRes.confidence * 100 : null)
-        ocrBlocks = ocrRes.blocks.filter(isRenderableOCRBlock)
-        setTranslationRegionTotal(ocrBlocks.length)
-        if (ocrBlocks.length === 0) {
-          return
-        }
-
-        if (translatedOverlayText.trim()) {
-          revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
-          return
-        }
-
-        revealOCRVisualization(ocrBlocks)
-      })
-      .catch(() => {
-        // Keep the main image pipeline running even if OCR visualization is unavailable.
-      })
-
-    try {
-      const originalUrl = URL.createObjectURL(file)
-      if (compareOriginalUrl) URL.revokeObjectURL(compareOriginalUrl)
-      setCompareOriginalUrl(originalUrl)
-
-      const requestMode = PRODUCT_MODE_BACKEND_MAP[mode]
-
-      if (requestMode === "ocr_only") {
-        const ocrRes = await translateImage(file, src, tgt, requestMode, handleImageJobProgress, controller.signal)
-        translatedOverlayText = ocrRes.translated_text ?? ""
-        if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
-          revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
-        }
-
-        setResult(ocrRes.translated_text)
-        setResultKind("ocr")
-        setResultImageUrl(ocrRes.image_url ?? null)
-        setCompareOverlayUrl(null)
-        setCompareLayoutUrl(null)
-        if (src === "auto" && ocrRes.source && ocrRes.source !== "auto") {
-          setDetectedLang(ocrRes.source)
-        }
-        setPipelineWarning(null)
-        completeImageProgress()
-        pushToast("OCR extracted", "success")
-        return
-      }
-
-      const overlayRes = await translateImage(file, src, tgt, "overlay", handleImageJobProgress, controller.signal)
-      const layoutRes = await translateImage(file, src, tgt, "layout", handleImageJobProgress, controller.signal)
-
-      if (!overlayRes.image_url || !layoutRes.image_url) {
-        throw new Error("Image comparison requires both overlay and layout outputs")
-      }
-
-      const activeRes = mode === "studio" ? layoutRes : overlayRes
-      translatedOverlayText = activeRes.translated_text ?? ""
-      if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
-        revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
-      }
-
-      setResult(activeRes.translated_text)
-      setResultKind("translation")
-      setResultImageUrl(activeRes.image_url ?? null)
-      setCompareOverlayUrl(overlayRes.image_url)
-      setCompareLayoutUrl(layoutRes.image_url)
-
-      if (src === "auto") {
-        const resolved = overlayRes.source && overlayRes.source !== "auto"
-          ? overlayRes.source
-          : layoutRes.source && layoutRes.source !== "auto"
-          ? layoutRes.source
-          : ""
-        if (resolved) setDetectedLang(resolved)
-      }
-      setPipelineWarning(null)
-      completeImageProgress()
-      pushToast("Image translated", "success")
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        setPipelineWarning("Translation cancelled.")
-        failImageProgress()
-        return
-      }
-      const friendlyWarning = getPipelineHelpMessage(err) ?? "Translation engine recovering. Please retry in a moment if processing does not complete."
-      setPipelineWarning(friendlyWarning)
-      failImageProgress()
-      pushToast("Image translation paused. Retry to continue.", "error")
-    } finally {
-      setOcrLoading(false)
-      if (abortControllerRef.current === controller) {
-        abortControllerRef.current = null
-      }
-      if (fileRef.current) {
-        fileRef.current.value = ""
-        fileRef.current.accept = "image/*,application/pdf"
-      }
-    }
-  }, [
-    compareOriginalUrl,
-    completeImageProgress,
-    failImageProgress,
-    mode,
-    pushToast,
-    resetOCRVisualization,
-    revealOCRVisualization,
-    revealTranslatedVisualization,
-    handleImageJobProgress,
-    startImageProgress,
-  ])
 
   const handleDemoPreset = useCallback(async (preset: typeof DEMO_PRESETS[number]) => {
     if (ocrLoading) return
@@ -1617,1194 +1609,235 @@ function App() {
 
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="header-row">
-          <h1>LokLingo</h1>
-          <div className="header-actions">
-            <button
-              className={`icon-btn${showPdfJobs ? " is-active" : ""}`}
-              type="button"
-              onClick={() => { setShowPdfJobs(p => !p); setShowHistory(false) }}
-              aria-pressed={showPdfJobs}
-              title="PDF translation jobs"
-            >
-              📄 PDF Jobs
-            </button>
-            <button
-              className={`icon-btn${showReliability ? " is-active" : ""}`}
-              type="button"
-              onClick={() => setShowReliability(v => !v)}
-              aria-pressed={showReliability}
-              title="Reliability telemetry"
-            >
-              📊 Reliability
-            </button>
-            <button
-              className={`icon-btn${showDeadOps ? " is-active" : ""}`}
-              type="button"
-              onClick={() => setShowDeadOps(v => !v)}
-              aria-pressed={showDeadOps}
-              title="Dead-letter operations"
-            >
-              🛠 Dead Ops
-            </button>
-            <button
-              className={`icon-btn${showHistory ? " is-active" : ""}`}
-              type="button"
-              onClick={() => { setShowHistory(h => !h); setShowPdfJobs(false) }}
-              aria-pressed={showHistory}
-              title="Translation history"
-            >
-              ⏱ History {history.length > 0 && <span className="badge">{history.length}</span>}
-            </button>
-            <button
-              className={`icon-btn${showDemoGallery ? " is-active" : ""}`}
-              type="button"
-              onClick={() => setShowDemoGallery(g => !g)}
-              aria-pressed={showDemoGallery}
-              title="Try demo examples"
-            >
-              🎨 Demos
-            </button>
-            <button
-              className={`icon-btn${showcaseMode ? " is-active" : ""}`}
-              type="button"
-              onClick={() => setShowcaseMode(s => !s)}
-              aria-pressed={showcaseMode}
-              title="Auto-play demo showcase"
-            >
-              ▶ Showcase
-            </button>
-            <button
-              className="theme-btn"
-              type="button"
-              aria-label="Toggle color scheme"
-              aria-pressed={theme === "dark"}
-              onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
-            >
-              {theme === "dark" ? "☀ Light" : "☾ Dark"}
-            </button>
-          </div>
-        </div>
-        <p className="tagline">Self-hosted translation &mdash; no limits</p>
-        <div className="readiness-chip-wrap" ref={chipRef}>
-          <button
-            type="button"
-            className={`readiness-chip readiness-${readinessState}${showStatusDetail ? " is-open" : ""}`}
-            onClick={() => setShowStatusDetail(!showStatusDetail)}
-            aria-expanded={showStatusDetail}
-            aria-haspopup="true"
-          >
-            {readinessLabel} <span className="chip-caret">{showStatusDetail ? "▲" : "▼"}</span>
-          </button>
-          {showStatusDetail && (
-            <div className="readiness-popover" role="status">
-              <div className="readiness-popover-title">Dependency status</div>
-              {readiness === null ? (
-                <p className="readiness-popover-checking">Fetching…</p>
-              ) : (
-                <>
-                  <ul className="readiness-dep-list">
-                    {Object.entries(readiness.dependencies)
-                      .sort(([a], [b]) => a.localeCompare(b))
-                      .map(([name, dep]) => (
-                        <li key={name} className={`readiness-dep-item dep-${dep.status}`}>
-                          <span className="dep-dot" />
-                          <span className="dep-name">{name}</span>
-                          {dep.status === "error" && dep.error && (
-                            <span className="dep-error" title={dep.error}>
-                              {dep.error.length > 60 ? dep.error.slice(0, 57) + "…" : dep.error}
-                            </span>
-                          )}
-                        </li>
-                      ))}
-                  </ul>
-
-                  <div className="readiness-mini-reliability">
-                    <div className="mini-rel-header">
-                      <div className="mini-rel-title">Reliability (1h)</div>
-                      {readinessMetrics && (
-                        <span className={`mini-rel-trend mini-rel-trend-${readinessPressureTrend} mini-rel-level-${readinessPressureLevel}`}>
-                          {readinessPressureTrend === "up" ? "▲" : readinessPressureTrend === "down" ? "▼" : "■"}
-                          {readinessPressureDelta === 0 ? "0" : readinessPressureDelta > 0 ? `+${readinessPressureDelta}` : `${readinessPressureDelta}`} {readinessPressureLabel}
-                        </span>
-                      )}
-                    </div>
-                    {readinessMetricsLoading && <p className="mini-rel-state">Loading...</p>}
-                    {readinessMetricsError && <p className="mini-rel-state mini-rel-state-error">{readinessMetricsError}</p>}
-                    {readinessMetrics && !readinessMetricsLoading && !readinessMetricsError && (
-                      <>
-                        {miniSparklinePoints && (
-                          <div className={`mini-rel-sparkline-wrap mini-rel-level-${readinessPressureLevel}`} aria-hidden="true">
-                            <svg className={`mini-rel-sparkline mini-rel-level-${readinessPressureLevel}`} viewBox="0 0 120 28" preserveAspectRatio="none">
-                              <polyline points={miniSparklinePoints} />
-                            </svg>
-                          </div>
-                        )}
-                        <div className="mini-rel-grid">
-                          <div className="mini-rel-item">
-                            <span>LiteLLM retries</span>
-                            <strong>{readinessMetrics.reliability.litellm.retry_attempts_total}</strong>
-                          </div>
-                          <div className="mini-rel-item">
-                            <span>LiteLLM circuit opens</span>
-                            <strong>{readinessMetrics.reliability.litellm.circuit_opened_total}</strong>
-                          </div>
-                          <div className="mini-rel-item">
-                            <span>OCR retries</span>
-                            <strong>{readinessMetrics.reliability.ocr.retry_attempts_total}</strong>
-                          </div>
-                          <div className="mini-rel-item">
-                            <span>OCR response rejects</span>
-                            <strong>{readinessMetrics.reliability.ocr.response_rejected_total}</strong>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          className="mini-rel-open-btn"
-                          onClick={() => {
-                            setShowReliability(true)
-                            setShowStatusDetail(false)
-                          }}
-                        >
-                          Open full Reliability panel
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-      </header>
+      <Header
+        theme={theme}
+        onToggleTheme={() => setTheme(t => t === "dark" ? "light" : "dark")}
+        showPdfJobs={showPdfJobs}
+        onTogglePdfJobs={() => { setShowPdfJobs(p => !p); setShowHistory(false) }}
+        showReliability={showReliability}
+        onToggleReliability={() => setShowReliability(v => !v)}
+        showDeadOps={showDeadOps}
+        onToggleDeadOps={() => setShowDeadOps(v => !v)}
+        showHistory={showHistory}
+        onToggleHistory={() => { setShowHistory(h => !h); setShowPdfJobs(false) }}
+        showDemoGallery={showDemoGallery}
+        onToggleDemoGallery={() => setShowDemoGallery(g => !g)}
+        showcaseMode={showcaseMode}
+        onToggleShowcase={() => setShowcaseMode(s => !s)}
+        historyCount={history.length}
+        chipRef={chipRef}
+        setShowStatusDetail={setShowStatusDetail}
+        showStatusDetail={showStatusDetail}
+        readinessLabel={readinessLabel}
+        readinessState={readinessState}
+        readiness={readiness}
+        readinessMetricsLoading={readinessMetricsLoading}
+        readinessMetricsError={readinessMetricsError}
+        readinessMetrics={readinessMetrics}
+        readinessPressureTrend={readinessPressureTrend}
+        readinessPressureDelta={readinessPressureDelta}
+        readinessPressureLabel={readinessPressureLabel}
+        readinessPressureLevel={readinessPressureLevel}
+        miniSparklinePoints={miniSparklinePoints}
+        onOpenReliability={() => { setShowReliability(true); setShowStatusDetail(false) }}
+      />
 
       {/* PDF Jobs panel */}
       {showPdfJobs && (
         <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} />
       )}
 
-      {/* Demo Gallery panel */}
-      {showDemoGallery && (
-        <section className="demo-gallery-panel" aria-label="Demo gallery - try examples">
-          <div className="demo-gallery-header">
-            <h2>Try Examples</h2>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setShowDemoGallery(false)}
-              aria-label="Close gallery"
-            >
-              ✕
-            </button>
-          </div>
-          <div className="demo-gallery-grid">
-            {DEMO_PRESETS.map(preset => (
-              <button
-                key={preset.id}
-                className="demo-card"
-                onClick={() => {
-                  setWorkflow("image")
-                  setSourceLang(preset.source)
-                  setTargetLang(preset.target)
-                  setShowDemoGallery(false)
-                  // Load the preset image
-                  fetch(preset.src)
-                    .then(res => res.blob())
-                    .then(blob => {
-                      const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
-                      runImageFile(file, preset.source, preset.target)
-                    })
-                    .catch(err => pushToast(`Failed to load demo: ${err.message}`, "error"))
-                }}
-                title={`Load demo: ${preset.label}`}
-              >
-                <div className="demo-card-emoji">{preset.emoji}</div>
-                <div className="demo-card-label">{preset.label}</div>
-                <div className="demo-card-category">{preset.category}</div>
-                <div className="demo-card-image-wrapper">
-                  <img
-                    src={preset.src}
-                    alt={preset.label}
-                    loading="lazy"
-                    className="demo-card-image"
-                  />
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
+      <DemoGallery
+        visible={showDemoGallery}
+        onClose={() => setShowDemoGallery(false)}
+        onSetWorkflow={w => setWorkflow(w)}
+        onLoadDemo={preset => {
+          setSourceLang(preset.source)
+          setTargetLang(preset.target)
+          fetch(preset.src)
+            .then(res => res.blob())
+            .then(blob => {
+              const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
+              runImageFile(file, preset.source, preset.target)
+            })
+            .catch(err => pushToast(`Failed to load demo: ${err.message}`, "error"))
+        }}
+      />
 
-      {/* Reliability telemetry panel */}
-      {showReliability && (
-        <section className="reliability-panel" aria-live="polite">
-          <div className="reliability-header">
-            <div>
-              <h2>Reliability telemetry</h2>
-              <p>Live counters and windowed event aggregates from /api/v1/metrics/ocr.</p>
-            </div>
-            <label className="reliability-window-control">
-              Window
-              <select value={metricsWindow} onChange={e => setMetricsWindow(e.target.value as MetricsWindow)}>
-                {RELIABILITY_WINDOWS.map(w => (
-                  <option key={w} value={w}>{w}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          {metricsLoading && <p className="reliability-state">Loading reliability metrics...</p>}
-          {metricsError && <p className="reliability-state reliability-state-error">{metricsError}</p>}
-
-          {metrics && (
-            <>
-              <div className="reliability-summary-grid">
-                <article className="reliability-card">
-                  <h3>LiteLLM</h3>
-                  <dl>
-                    <div><dt>Retries</dt><dd>{metrics.reliability.litellm.retry_attempts_total}</dd></div>
-                    <div><dt>Cancelled retries</dt><dd>{metrics.reliability.litellm.retry_cancelled_total}</dd></div>
-                    <div><dt>Exhausted retries</dt><dd>{metrics.reliability.litellm.retry_exhausted_total}</dd></div>
-                    <div><dt>Circuit opened</dt><dd>{metrics.reliability.litellm.circuit_opened_total}</dd></div>
-                    <div><dt>Circuit rejects</dt><dd>{metrics.reliability.litellm.circuit_reject_total}</dd></div>
-                    <div><dt>Response rejects</dt><dd>{metrics.reliability.litellm.response_rejected_total}</dd></div>
-                  </dl>
-                </article>
-
-                <article className="reliability-card">
-                  <h3>OCR</h3>
-                  <dl>
-                    <div><dt>Retries</dt><dd>{metrics.reliability.ocr.retry_attempts_total}</dd></div>
-                    <div><dt>Retry-After honored</dt><dd>{metrics.reliability.ocr.retry_after_honored_total}</dd></div>
-                    <div><dt>Cancelled retries</dt><dd>{metrics.reliability.ocr.retry_cancelled_total}</dd></div>
-                    <div><dt>Exhausted retries</dt><dd>{metrics.reliability.ocr.retry_exhausted_total}</dd></div>
-                    <div><dt>Response rejects</dt><dd>{metrics.reliability.ocr.response_rejected_total}</dd></div>
-                    <div><dt>OCR events ({metrics.window.name})</dt><dd>{metrics.events_total}</dd></div>
-                  </dl>
-                </article>
-              </div>
-
-              <div className="reliability-windowed-table-wrap">
-                <div className="reliability-windowed-title">Windowed reliability events ({metrics.window.name})</div>
-                {metrics.reliability_windowed.events.length === 0 ? (
-                  <p className="reliability-state">No reliability events recorded in this window.</p>
-                ) : (
-                  <table className="reliability-table">
-                    <thead>
-                      <tr>
-                        <th>Integration</th>
-                        <th>Event</th>
-                        <th>Reason</th>
-                        <th>Count</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {metrics.reliability_windowed.events.slice(0, 12).map((event, idx) => (
-                        <tr key={`${event.integration}:${event.event_name}:${event.reason}:${idx}`}>
-                          <td>{event.integration}</td>
-                          <td>{event.event_name}</td>
-                          <td>{event.reason || "-"}</td>
-                          <td>{event.count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-
-              <div className="reliability-windowed-table-wrap">
-                <div className="reliability-windowed-title">Provider reliability (live)</div>
-                {providerMetricsError && <p className="reliability-state reliability-state-error">{providerMetricsError}</p>}
-                {providerMetrics && providerMetrics.providers.length === 0 && (
-                  <p className="reliability-state">No provider calls observed yet.</p>
-                )}
-                {providerMetrics && providerMetrics.providers.length > 0 && (
-                  <table className="reliability-table">
-                    <thead>
-                      <tr>
-                        <th>Provider</th>
-                        <th>Success</th>
-                        <th>Failures</th>
-                        <th>Retries</th>
-                        <th>Timeouts</th>
-                        <th>Failovers</th>
-                        <th>Avg latency (ms)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {providerMetrics.providers.map(provider => (
-                        <tr key={provider.provider}>
-                          <td>{provider.provider}</td>
-                          <td>{provider.success_total}</td>
-                          <td>{provider.failure_total}</td>
-                          <td>{provider.retry_total}</td>
-                          <td>{provider.timeout_total}</td>
-                          <td>{provider.failover_total}</td>
-                          <td>{Math.round(provider.avg_latency_ms)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-
-              {providerMetrics && providerMetrics.timeouts.by_reason.length > 0 && (
-                <div className="reliability-windowed-table-wrap">
-                  <div className="reliability-windowed-title">Timeout reasons (live)</div>
-                  <table className="reliability-table">
-                    <thead>
-                      <tr>
-                        <th>Reason</th>
-                        <th>Count</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {providerMetrics.timeouts.by_reason.map(reason => (
-                        <tr key={reason.reason}>
-                          <td>{reason.reason}</td>
-                          <td>{reason.total}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {providerMetrics && (
-                <div className="reliability-windowed-table-wrap">
-                  <div className="reliability-windowed-title">Checkpoint health (live)</div>
-                  {(() => {
-                    const checkpointThresholds: CheckpointThresholds = {
-                      hitWarn: CHECKPOINT_HIT_WARN_THRESHOLD,
-                      hitCritical: CHECKPOINT_HIT_CRITICAL_THRESHOLD,
-                      persistFailureWarn: CHECKPOINT_PERSIST_FAILURE_WARN_THRESHOLD,
-                      persistFailureCritical: CHECKPOINT_PERSIST_FAILURE_CRITICAL_THRESHOLD,
-                    }
-                    const checkpointEvents = providerMetrics.checkpoints.hit_total + providerMetrics.checkpoints.miss_total
-                    const checkpointHitRate = safePercent(providerMetrics.checkpoints.hit_total, checkpointEvents)
-                    const persistFailureRate = safePercent(providerMetrics.checkpoints.persist_failure_total, checkpointEvents)
-                    const operatorHint = checkpointOperatorHint(checkpointHitRate, persistFailureRate, checkpointThresholds)
-                    const evaluatedAt = metricsUpdatedAt ? new Date(metricsUpdatedAt).toLocaleTimeString() : null
-
-                    return (
-                    <>
-                  <table className="reliability-table">
-                    <thead>
-                      <tr>
-                        <th>Metric</th>
-                        <th>Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td>Checkpoint hits</td>
-                        <td>{providerMetrics.checkpoints.hit_total}</td>
-                      </tr>
-                      <tr>
-                        <td>Checkpoint misses</td>
-                        <td>{providerMetrics.checkpoints.miss_total}</td>
-                      </tr>
-                      <tr>
-                        <td>Persist failures</td>
-                        <td>{providerMetrics.checkpoints.persist_failure_total}</td>
-                      </tr>
-                      <tr>
-                        <td>Cleanup runs</td>
-                        <td>{providerMetrics.checkpoints.clear_total}</td>
-                      </tr>
-                      <tr>
-                        <td>Cleanup failures</td>
-                        <td>{providerMetrics.checkpoints.clear_failure_total}</td>
-                      </tr>
-                      <tr>
-                        <td>Hit rate</td>
-                        <td>
-                          <span className={`reliability-rate-badge reliability-rate-level-${operatorHint.hitLevel}`}>
-                            {formatPercent(checkpointHitRate)} - {levelLabel(operatorHint.hitLevel)}
-                          </span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td>Persist failure rate</td>
-                        <td>
-                          <span className={`reliability-rate-badge reliability-rate-level-${operatorHint.persistLevel}`}>
-                            {formatPercent(persistFailureRate)} - {levelLabel(operatorHint.persistLevel)}
-                          </span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                    <p className={`reliability-operator-hint reliability-operator-hint-${operatorHint.level}`}>
-                      {operatorHint.message}
-                      {evaluatedAt && (
-                        <span className="reliability-operator-hint-meta"> Evaluated at {evaluatedAt}.</span>
-                      )}
-                    </p>
-                    </>
-                    )
-                  })()}
-                </div>
-              )}
-
-              {metricsUpdatedAt && (
-                <p className="reliability-updated">Updated {new Date(metricsUpdatedAt).toLocaleTimeString()}</p>
-              )}
-            </>
-          )}
-        </section>
-      )}
+      <ReliabilityTelemetry
+        visible={showReliability}
+        window={metricsWindow}
+        onWindowChange={w => setMetricsWindow(w)}
+        loading={metricsLoading}
+        error={metricsError}
+        metrics={metrics}
+        providerMetrics={providerMetrics}
+        providerError={providerMetricsError}
+        updatedAt={metricsUpdatedAt}
+      />
 
       {showDeadOps && (
         <DeadLetterOpsPanel onToast={pushToast} />
       )}
 
-      {/* History drawer */}
-      {showHistory && (
-        <section className="history-panel">
-          <div className="history-header">
-            <span>Recent translations</span>
-            {history.length > 0 && (
-              <button className="icon-btn" onClick={() => { clearHistory() }}>
-                Clear all
-              </button>
-            )}
-          </div>
-          {history.length === 0 ? (
-            <p className="history-empty">No translations yet.</p>
-          ) : (
-            <ul className="history-list">
-              {history.map(h => (
-                <li key={h.id} className="history-item" onClick={() => {
-                  setSourceText(h.sourceText)
-                  setSourceLang(h.sourceLang)
-                  setTargetLang(h.targetLang)
-                  setResult(h.result)
-                  setResultKind("translation")
-                  setResultImageUrl(null)
-                  if (compareOriginalUrl) {
-                    URL.revokeObjectURL(compareOriginalUrl)
-                    setCompareOriginalUrl(null)
-                  }
-                  setCompareOverlayUrl(null)
-                  setCompareLayoutUrl(null)
-                  setShowHistory(false)
-                }}>
-                  <div className="history-langs">
-                    {langLabel(h.sourceLang)} → {langLabel(h.targetLang)}
-                  </div>
-                  <div className="history-preview">{h.sourceText.slice(0, 80)}{h.sourceText.length > 80 ? "…" : ""}</div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
+      <HistoryPanel
+        history={history}
+        onClearAll={() => clearHistory()}
+        onRestore={h => {
+          setSourceText(h.sourceText)
+          setSourceLang(h.sourceLang)
+          setTargetLang(h.targetLang)
+          setResult(h.result)
+          setResultKind("translation")
+          setResultImageUrl(null)
+          if (compareOriginalUrl) {
+            URL.revokeObjectURL(compareOriginalUrl)
+            setCompareOriginalUrl(null)
+          }
+          setCompareOverlayUrl(null)
+          setCompareLayoutUrl(null)
+        }}
+        onClose={() => setShowHistory(false)}
+        langLabel={langLabel}
+      />
+
+      <WorkflowSwitcher
+        source={sourceLang}
+        target={targetLang}
+        detectedLang={detectedLang}
+        mode={mode}
+        workflow={workflow}
+        onSourceChange={v => { setSourceLang(v); setDetectedLang("") }}
+        onTargetChange={v => setTargetLang(v)}
+        onSwap={handleSwap}
+        onModeChange={v => setMode(v)}
+        onWorkflowChange={v => setWorkflow(v)}
+        langLabel={langLabel}
+        onFileChange={f => { if (f) handleOCRFile(f) }}
+      />
 
       <main className="translator">
-        <div className="lang-selectors">
-          <div className="lang-select-wrap">
-            <select
-              aria-label="Source language"
-              value={sourceLang}
-              onChange={e => { setSourceLang(e.target.value); setDetectedLang("") }}
-            >
-              {LANGUAGES.map(l => (
-                <option key={l.code} value={l.code}>{l.label}</option>
-              ))}
-            </select>
-            {detectedLang && (
-              <span className="detected-badge">✓ {langLabel(detectedLang)}</span>
-            )}
-          </div>
-
-          <button
-            className="swap-btn"
-            title={sourceLang === "auto" ? "Cannot swap when source is Auto-detect" : "Swap languages"}
-            disabled={sourceLang === "auto"}
-            onClick={handleSwap}
-          >
-            ⇄
-          </button>
-
-          <select
-            aria-label="Target language"
-            value={targetLang}
-            onChange={e => setTargetLang(e.target.value)}
-          >
-            {TARGET_LANGUAGES.map(l => (
-              <option key={l.code} value={l.code}>{l.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="mode-row">
-          <label className="mode-label" htmlFor="translation-mode">Mode</label>
-          <select
-            id="translation-mode"
-            className="mode-select"
-            aria-label="Translation mode"
-            value={mode}
-            onChange={e => setMode(e.target.value as ProductMode)}
-          >
-            {PRODUCT_MODES.map(m => (
-              <option key={m.value} value={m.value}>{m.label}</option>
-            ))}
-          </select>
-        </div>
-        <p className="mode-help" role="note" aria-live="polite">
-          {PRODUCT_MODES.find(m => m.value === mode)?.detail}
-        </p>
-
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*,application/pdf"
-          className="ocr-input"
-          id="ocr-file"
-          onChange={e => e.target.files?.[0] && handleOCRFile(e.target.files[0])}
+        <UploadHero
+          workflow={workflow}
+          uploadSelection={uploadSelection}
+          uploadDragActive={uploadDragActive}
+          ocrLoading={ocrLoading}
+          pdfLoading={pdfLoading}
+          ocrStaggerMs={ocrStaggerMs}
+          overlayStage={overlayStage}
+          showOCROverlay={showOCROverlay}
+          overlayBlocks={overlayBlocks}
+          overlayTexts={overlayTexts}
+          overlayLabelSwapActive={overlayLabelSwapActive}
+          overlayDemoRunning={overlayDemoRunning}
+          overlayImageSize={overlayImageSize}
+          legendActiveStage={legendActiveStage ?? ""}
+          uploadBackendState={uploadBackendState}
+          uploadBackendHint={uploadBackendHint}
+          uploadBackendLabel={uploadBackendLabel}
+          uploadHeroSubtitle={uploadHeroSubtitle}
+          uploadEmptyTitle={uploadEmptyTitle}
+          uploadEmptySupport={uploadEmptySupport}
+          uploadBrowseAccept={uploadBrowseAccept}
+          onDragEnter={e => { e.preventDefault(); e.stopPropagation(); if (!ocrLoading && !pdfLoading) setUploadDragActive(true) }}
+          onDragOver={e => { e.preventDefault(); e.stopPropagation(); if (!ocrLoading && !pdfLoading) setUploadDragActive(true) }}
+          onDragLeave={e => { e.preventDefault(); e.stopPropagation(); setUploadDragActive(false) }}
+          onUploadDrop={e => handleUploadDrop(e as unknown as React.DragEvent<HTMLDivElement>)}
+          onOverlayImageLoad={event => {
+            const img = event.currentTarget
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              setOverlayImageSize({ width: img.naturalWidth, height: img.naturalHeight })
+            }
+          }}
+          onOpenUploadPicker={accept => openUploadPicker(accept)}
+          onReplayDemo={runOverlayDemo}
+          onStaggerChange={ms => setOcrStaggerMs(ms)}
+          onStaggerPreset={ms => setOcrStaggerMs(ms)}
+          formatFileSize={formatFileSize}
         />
 
-        <section className="workflow-switch-wrap" aria-label="Input workflow">
-          <div className="workflow-switch-heading">Choose workflow: Image, PDF, or Text</div>
-          <div className="workflow-switch">
-          {WORKFLOWS.map(item => (
-            <button
-              key={item.value}
-              type="button"
-              className={`workflow-card${workflow === item.value ? " is-active" : ""}${item.value === "image" ? " is-primary" : ""}`}
-              onClick={() => setWorkflow(item.value)}
-              aria-pressed={workflow === item.value}
-            >
-              <span className="workflow-card-top">
-                <span className="workflow-card-icon" aria-hidden="true">{item.icon}</span>
-                <span className="workflow-card-title">{item.label}</span>
-                {item.value === "image" && <span className="workflow-card-badge">Primary</span>}
-              </span>
-              <span className="workflow-card-detail">{item.detail}</span>
-            </button>
-          ))}
-          </div>
-        </section>
-
-        <section
-          className={`upload-hero${uploadDragActive ? " is-drag-active" : ""}${workflow === "image" ? " is-image-primary" : ""}${workflow === "pdf" ? " is-pdf-focus" : ""}${workflow === "text" ? " is-text-focus" : ""}`}
-          onDragEnter={e => {
-            e.preventDefault()
-            e.stopPropagation()
-            if (!ocrLoading && !pdfLoading) setUploadDragActive(true)
-          }}
-          onDragOver={e => {
-            e.preventDefault()
-            e.stopPropagation()
-            if (!ocrLoading && !pdfLoading) setUploadDragActive(true)
-          }}
-          onDragLeave={e => {
-            e.preventDefault()
-            e.stopPropagation()
-            setUploadDragActive(false)
-          }}
-          onDrop={handleUploadDrop}
-          aria-label="Upload image or PDF"
-        >
-          <div className="upload-hero-head">
-            <h2>Visual localization</h2>
-            <div className="upload-hero-head-right">
-              <span className="upload-hero-pill">Local by default</span>
-              <button
-                type="button"
-                className={`upload-backend-chip upload-backend-${uploadBackendState}`}
-                onClick={() => {
-                  setShowReliability(true)
-                  setShowStatusDetail(false)
-                }}
-                title={uploadBackendHint}
-              >
-                <span className="upload-backend-dot" aria-hidden="true" />
-                <span>{uploadBackendLabel}</span>
-              </button>
-            </div>
-          </div>
-          <p className="upload-hero-subtitle">{uploadHeroSubtitle}</p>
-
-          <div className="upload-trust-row" aria-label="Trust indicators">
-            {TRUST_SIGNALS.map(signal => (
-              <span key={signal} className="upload-trust-pill">{signal}</span>
-            ))}
-          </div>
-
-          {uploadSelection?.kind === "image" && uploadSelection.previewUrl ? (
-            <div className="upload-preview upload-preview-image">
-              <div className="upload-preview-image-stage">
-                <div className="ocr-pipeline-legend" aria-label="Visual pipeline legend">
-                  <span className={`ocr-pipeline-step${overlayStage !== "idle" ? " is-done" : ""}${legendActiveStage === "ocr" ? " is-active" : ""}`}>Scan</span>
-                  <span className={`ocr-pipeline-step${overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "translation" ? " is-active" : ""}`}>Translate</span>
-                  <span className={`ocr-pipeline-step${!ocrLoading && overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "rendering" ? " is-active" : ""}`}>Render</span>
-                </div>
-                <img
-                  src={uploadSelection.previewUrl}
-                  alt="Selected upload preview"
-                  onLoad={event => {
-                    const img = event.currentTarget
-                    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-                      setOverlayImageSize({ width: img.naturalWidth, height: img.naturalHeight })
-                    }
-                  }}
-                />
-                {showOCROverlay && overlayImageSize && overlayBlocks.length > 0 && overlayStage !== "idle" && (
-                  <div className={`ocr-visualization-overlay ocr-visualization-${overlayStage}${overlayLabelSwapActive ? " is-switching" : ""}`} aria-hidden="true">
-                    {overlayBlocks.map((block, idx) => {
-                      const [bx1, by1, bx2, by2] = block.bbox
-                      const left = (Math.min(bx1, bx2) / overlayImageSize.width) * 100
-                      const top = (Math.min(by1, by2) / overlayImageSize.height) * 100
-                      const width = (Math.abs(bx2 - bx1) / overlayImageSize.width) * 100
-                      const height = (Math.abs(by2 - by1) / overlayImageSize.height) * 100
-                      const label = overlayStage === "translated" ? (overlayTexts[idx] || block.text) : block.text
-                      return (
-                        <div
-                          key={`${idx}-${block.bbox.join("-")}`}
-                          className={`ocr-visualization-box${overlayStage === "translated" ? " is-translated" : ""}`}
-                          style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, animationDelay: `${idx * ocrStaggerMs}ms` }}
-                        >
-                          <span
-                            className={`ocr-visualization-label${overlayStage === "translated" ? " is-translated" : ""}`}
-                            style={{ animationDelay: `${idx * ocrStaggerMs + 120}ms` }}
-                          >
-                            {label}
-                          </span>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-                {showOCROverlay && overlayBlocks.length > 0 && overlayStage !== "idle" && (
-                  <div className={`ocr-visualization-badge ocr-visualization-badge-${overlayStage}`}>
-                    {overlayStage === "ocr" ? `Detected ${overlayBlocks.length} regions` : `Translated ${overlayBlocks.length} regions`}
-                  </div>
-                )}
-              </div>
-              <div className="upload-preview-meta">
-                <strong>{uploadSelection.name}</strong>
-                <span>{formatFileSize(uploadSelection.size)} · Image</span>
-                {overlayStage === "ocr" && (
-                  <span className="upload-preview-stage-note">Animating scan regions…</span>
-                )}
-                {overlayStage === "translated" && (
-                  <span className="upload-preview-stage-note">Regions now show translated text.</span>
-                )}
-                {!showOCROverlay && overlayStage !== "idle" && (
-                  <span className="upload-preview-stage-note">Visual overlay hidden.</span>
-                )}
-              </div>
-            </div>
-          ) : uploadSelection?.kind === "pdf" ? (
-            <div className="upload-preview upload-preview-pdf">
-              <div className="upload-preview-file-icon" aria-hidden="true">PDF</div>
-              <div className="upload-preview-meta">
-                <strong>{uploadSelection.name}</strong>
-                <span>{formatFileSize(uploadSelection.size)} · queued for background translation</span>
-              </div>
-            </div>
-          ) : (
-            <div className="upload-preview upload-preview-empty-panel">
-              <button
-                type="button"
-                className={`upload-preview upload-preview-empty upload-drop-target${uploadDragActive ? " is-drag-active" : ""}`}
-                disabled={ocrLoading || pdfLoading}
-                onClick={() => openUploadPicker(uploadBrowseAccept)}
-              >
-                <strong>{uploadDragActive ? "Release to upload" : uploadEmptyTitle}</strong>
-                <span>{uploadEmptySupport}</span>
-              </button>
-              <div className="upload-example-grid" aria-label="Example files">
-                {DEMO_PRESETS.map(preset => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    className="upload-example-card"
-                    disabled={ocrLoading || demoModeActive}
-                    onClick={() => handleDemoPreset(preset)}
-                    title={`Load ${preset.label}`}
-                  >
-                    <img src={preset.src} alt="" aria-hidden="true" loading="lazy" />
-                    <span className="upload-example-meta">
-                      <strong>{preset.label}</strong>
-                      <span>{preset.source === "auto" ? "auto" : preset.source.toUpperCase()} → {preset.target.toUpperCase()}</span>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="upload-hero-actions">
-            <button
-              type="button"
-              className="upload-primary-btn"
-              disabled={ocrLoading || pdfLoading}
-              onClick={() => openUploadPicker("image/*")}
-            >
-              {ocrLoading
-                ? "Translating image..."
-                : "Upload image"}
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              disabled={ocrLoading || pdfLoading}
-              onClick={() => openUploadPicker("application/pdf")}
-            >
-              {pdfLoading ? "Uploading PDF..." : "Upload PDF"}
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setWorkflow("text")}
-            >
-              Use text input
-            </button>
-            <button
-              type="button"
-              className={`icon-btn${showOCROverlay ? " is-active" : ""}`}
-              onClick={() => setShowOCROverlay(v => !v)}
-              aria-pressed={showOCROverlay}
-              title="Show or hide visual overlay"
-            >
-              {showOCROverlay ? "Hide overlay" : "Show overlay"}
-            </button>
-            <label className="ocr-stagger-control">
-              Region stagger
-              <input
-                type="range"
-                min={20}
-                max={220}
-                step={10}
-                value={ocrStaggerMs}
-                onChange={event => setOcrStaggerMs(Number(event.target.value))}
-              />
-              <span>{ocrStaggerMs} ms</span>
-            </label>
-            <div className="ocr-stagger-presets" role="group" aria-label="Region stagger presets">
-              {OCR_STAGGER_PRESETS.map(preset => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  className={`icon-btn${ocrStaggerMs === preset.ms ? " is-active" : ""}`}
-                  onClick={() => setOcrStaggerMs(preset.ms)}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className={`icon-btn ocr-demo-btn${overlayDemoRunning ? " is-active" : ""}`}
-              onClick={runOverlayDemo}
-              disabled={ocrLoading || overlayStage === "idle" || overlayBlocks.length === 0}
-              title="Replay visual pipeline stages on the current preview (Shift+D)"
-            >
-              {overlayDemoRunning ? "Replaying demo..." : "Replay demo"}
-            </button>
-            <span className="ocr-demo-hint" aria-live="polite">Shortcut: Shift+D</span>
-          </div>
-        </section>
-
-        {imageProgressStatus !== "idle" && (
-          <section className={`image-progress image-progress-${imageProgressStatus}`} aria-live="polite">
-            <div className="image-progress-header">
-              <strong>
-                {imageProgressStatus === "running"
-                  ? "Image pipeline in progress"
-                  : imageProgressStatus === "done"
-                  ? "Image pipeline completed"
-                  : "Image pipeline failed"}
-              </strong>
-              <span className="image-progress-summary">
-                {imageProgressStatus === "running"
-                  ? `Active stage: ${IMAGE_PROGRESS_STAGES.find(stage => stage.key === imageProgressStage)?.label ?? "Detecting text"}`
-                  : imageProgressStatus === "done"
-                  ? "All stages finished"
-                  : "Job stopped before completion"}
-              </span>
-            </div>
-            <div className="image-progress-meter" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stageProgressRatio * 100)}>
-              <div className="image-progress-meter-fill" style={{ transform: `scaleX(${stageProgressRatio})` }} />
-            </div>
-            <div className="image-progress-live-row">
-              <span>{imageProgressStage === "translating" ? translationProgressText : (livePhaseLabel ?? "Rendering typography")}</span>
-              <span>{Math.round(((liveChunkProgress ?? stageProgressRatio) * 100))}%</span>
-            </div>
-            {reliabilityHint && (
-              <div className="image-progress-reliability" role="status">{reliabilityHint}</div>
-            )}
-            <ol className="image-progress-stages">
-              {IMAGE_PROGRESS_STAGES.map(stage => {
-                const done = imageProgressCompleted.includes(stage.key)
-                const active = imageProgressStatus === "running" && imageProgressStage === stage.key
-                const failed = imageProgressStatus === "error" && imageProgressFailedStage === stage.key
-                return (
-                  <li
-                    key={stage.key}
-                    className={`image-progress-stage${done ? " is-done" : ""}${active ? " is-active" : ""}${failed ? " is-failed" : ""}`}
-                  >
-                    <span className="image-progress-dot" aria-hidden="true" />
-                    <span>{stage.label}</span>
-                    {done && <span className="image-progress-state">Done</span>}
-                    {active && <span className="image-progress-state">Running</span>}
-                    {failed && <span className="image-progress-state">Failed</span>}
-                  </li>
-                )
-              })}
-            </ol>
-          </section>
-        )}
+        <ImageProgress
+          status={imageProgressStatus}
+          stage={imageProgressStage}
+          completedStages={imageProgressCompleted}
+          failedStage={imageProgressFailedStage}
+          reliabilityHint={reliabilityHint}
+          stageProgressRatio={stageProgressRatio}
+          livePhaseLabel={livePhaseLabel}
+          liveChunkProgress={liveChunkProgress}
+          translationProgressText={translationProgressText}
+        />
 
         {(overlayBlocks.length > 0 || imageProgressStatus === "running") && (
-          <section className="intelligence-panel" aria-live="polite">
-            <div className="intelligence-header">
-              <strong>Live intelligence</strong>
-              <span>{imageProgressStatus === "running" ? "Analyzing in real time" : "Analysis complete"}</span>
-            </div>
-            <div className="intelligence-grid">
-              <article className="intelligence-card">
-                <span className="intelligence-label">Text regions detected</span>
-                <strong>{animatedRegionCount}</strong>
-              </article>
-              <article className="intelligence-card">
-                <span className="intelligence-label">Languages</span>
-                <strong>{animatedLanguageCount}</strong>
-                <div className="intelligence-tags">
-                  {intelligenceLanguageCodes.length === 0 ? (
-                    <span className="intelligence-tag">Waiting…</span>
-                  ) : (
-                    intelligenceLanguageCodes.map(code => (
-                      <span key={code} className="intelligence-tag">{langLabel(code)}</span>
-                    ))
-                  )}
-                </div>
-              </article>
-              <article className="intelligence-card">
-                <span className="intelligence-label">Vertical typography</span>
-                <strong>{animatedVerticalCount ? "Detected" : "None"}</strong>
-              </article>
-              <article className="intelligence-card">
-                <span className="intelligence-label">RTL text</span>
-                <strong>{animatedRTLCount ? "Detected" : "None"}</strong>
-              </article>
-              <article className="intelligence-card">
-                <span className="intelligence-label">Confidence</span>
-                <strong>{animatedConfidence}%</strong>
-              </article>
-            </div>
-          </section>
+          <IntelligencePanel
+            regionCount={animatedRegionCount}
+            languageCount={animatedLanguageCount}
+            languageCodes={intelligenceLanguageCodes}
+            verticalCount={animatedVerticalCount}
+            rtlCount={animatedRTLCount}
+            confidence={animatedConfidence}
+            status={imageProgressStatus}
+            langLabel={langLabel}
+          />
         )}
 
-        {pipelineWarning && (
-          <section className="status-banner" role="status" aria-live="polite">
-            <span className="status-banner-icon" aria-hidden="true">⚠</span>
-            <span>{pipelineWarning}</span>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => {
-                setShowReliability(true)
-                setShowStatusDetail(false)
-              }}
-            >
-              Open reliability
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setPipelineWarning(null)}
-            >
-              Dismiss
-            </button>
-          </section>
-        )}
+        <PipelineWarning
+          warning={pipelineWarning}
+          onOpenReliability={() => { setShowReliability(true); setShowStatusDetail(false) }}
+          onDismiss={() => setPipelineWarning(null)}
+        />
 
-        {/* Comparison spotlight */}
-        {ocrLoading && compareOriginalUrl && (
-          <div className="comparison-loading comparison-loading-spotlight">
-            <span className="spinner" aria-hidden="true" />
-            {imageProgressStage === "detecting"
-              ? "Detecting text regions..."
-              : imageProgressStage === "layout"
-              ? "Understanding layout and reading order..."
-              : imageProgressStage === "languages"
-              ? "Detecting language families and script direction..."
-              : imageProgressStage === "translating"
-              ? "Translating content..."
-              : imageProgressStage === "typography"
-              ? "Rebuilding typography and styling..."
-              : imageProgressStage === "rendering"
-              ? "Rendering final image..."
-              : mode === "extract"
-              ? "Extracting text..."
-              : "Preparing visual comparison — overlay and layout are processing..."}
-          </div>
-        )}
-
-        {!ocrLoading && compareOriginalUrl && compareOverlayUrl && compareLayoutUrl && (
-          <section
-            ref={compareSectionRef}
-            className={`comparison-wrap comparison-wrap--full comparison-hero${compareRevealActive ? " comparison-reveal" : ""}`}
-            aria-label="Image comparison"
-          >
-            <div className="comparison-intro">
-              <div className="comparison-kicker">Comparison first</div>
-              <h3>Original, Fast, Studio</h3>
-              <p>See the source, the quick pass, and the premium layout result side by side.</p>
-            </div>
-            <div className="comparison-controls">
-              <div className="comparison-segment" role="group" aria-label="Comparison layout">
-                <button
-                  type="button"
-                  className={`icon-btn${compareView === "side" ? " is-active" : ""}`}
-                  onClick={() => setCompareView("side")}
-                >
-                  Grid
-                </button>
-                <button
-                  type="button"
-                  className={`icon-btn${compareView === "slider" ? " is-active" : ""}`}
-                  onClick={() => setCompareView("slider")}
-                >
-                  Slider
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => openComparisonSliderModal("layout")}
-                >
-                  Fullscreen
-                </button>
-              </div>
-              {compareView === "slider" && (
-                <div className="comparison-segment" role="group" aria-label="Slider target">
-                  <button
-                    type="button"
-                    className={`icon-btn${sliderTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => setSliderTarget("overlay")}
-                  >
-                    Fast
-                  </button>
-                  <button
-                    type="button"
-                    className={`icon-btn${sliderTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => setSliderTarget("layout")}
-                  >
-                    Studio
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {compareView === "side" ? (
-              <div className="comparison-grid">
-                <figure className="compare-card">
-                  <figcaption>Original</figcaption>
-                  <img
-                    src={compareOriginalUrl}
-                    alt="Original image"
-                    loading="lazy"
-                    className="compare-clickable"
-                    onClick={() => openComparisonModal("original")}
-                  />
-                </figure>
-                <figure className="compare-card">
-                  <div className="compare-card-header">
-                    <figcaption>Fast</figcaption>
-                    <button
-                      type="button"
-                      className="icon-btn compare-dl-btn"
-                      title="Download fast result"
-                      onClick={() => handleDownload(compareOverlayUrl, "overlay-translation")}
-                    >
-                      ⬇ Download
-                    </button>
-                  </div>
-                  <img
-                    src={compareOverlayUrl}
-                    alt="Fast translation result"
-                    loading="lazy"
-                    className="compare-clickable"
-                    onClick={() => openComparisonModal("overlay")}
-                  />
-                </figure>
-                <figure className="compare-card">
-                  <div className="compare-card-header">
-                    <figcaption>Studio</figcaption>
-                    <button
-                      type="button"
-                      className="icon-btn compare-dl-btn"
-                      title="Download studio result"
-                      onClick={() => handleDownload(compareLayoutUrl, "layout-translation")}
-                    >
-                      ⬇ Download
-                    </button>
-                  </div>
-                  <img
-                    src={compareLayoutUrl}
-                    alt="Studio translation result"
-                    loading="lazy"
-                    className="compare-clickable"
-                    onClick={() => openComparisonModal("layout")}
-                  />
-                </figure>
-              </div>
-            ) : compareView === "slider" ? (
-              <div className="compare-slider-wrap">
-                <div
-                  className="compare-slider-frame"
-                  aria-live="polite"
-                  onMouseMove={(e) => {
-                    if (!sliderDraggingRef.current) return
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = e.clientX - rect.left
-                    const percent = Math.max(0, Math.min(100, (x / rect.width) * 100))
-                    setSliderPercent(percent)
-                  }}
-                  onMouseDown={(e) => {
-                    if (e.button !== 0) return
-                    sliderDraggingRef.current = true
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = e.clientX - rect.left
-                    setSliderPercent(Math.max(0, Math.min(100, (x / rect.width) * 100)))
-                  }}
-                  onMouseUp={() => { sliderDraggingRef.current = false }}
-                  onMouseLeave={() => { sliderDraggingRef.current = false }}
-                  onTouchMove={(e) => {
-                    if (!sliderDraggingRef.current) return
-                    const touch = e.touches[0]
-                    if (!touch) return
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = touch.clientX - rect.left
-                    const percent = Math.max(0, Math.min(100, (x / rect.width) * 100))
-                    setSliderPercent(percent)
-                  }}
-                  onTouchStart={(e) => {
-                    const touch = e.touches[0]
-                    if (!touch) return
-                    sliderDraggingRef.current = true
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = touch.clientX - rect.left
-                    setSliderPercent(Math.max(0, Math.min(100, (x / rect.width) * 100)))
-                  }}
-                  onTouchEnd={() => { sliderDraggingRef.current = false }}
-                >
-                  <img
-                    className="compare-slider-base"
-                    src={compareOriginalUrl}
-                    alt="Original image"
-                    loading="lazy"
-                  />
-                  <div
-                    className="compare-slider-overlay"
-                    style={{ width: `${sliderPercent}%` }}
-                    aria-hidden="true"
-                  >
-                    <img
-                      src={sliderTarget === "overlay" ? compareOverlayUrl : compareLayoutUrl}
-                      alt=""
-                      loading="lazy"
-                    />
-                  </div>
-                  <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
-                </div>
-                <label className="compare-slider-label">
-                  Original vs {sliderTarget === "overlay" ? "Fast" : "Studio"} — drag to reveal
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={sliderPercent}
-                    onChange={e => setSliderPercent(Number(e.target.value))}
-                  />
-                </label>
-                <div className="compare-dl-row">
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => handleDownload(compareOverlayUrl, "overlay-translation")}
-                  >
-                    ⬇ Download Fast
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => handleDownload(compareLayoutUrl, "layout-translation")}
-                  >
-                    ⬇ Download Studio
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="compare-slider-wrap compare-slider-wrap--compact">
-                <div className="compare-slider-frame compare-slider-frame--compact" aria-live="polite">
-                  <img
-                    className="compare-slider-base"
-                    src={compareOriginalUrl}
-                    alt="Original image"
-                    loading="lazy"
-                  />
-                  <div
-                    className="compare-slider-overlay"
-                    style={{ width: `${sliderPercent}%` }}
-                    aria-hidden="true"
-                  >
-                    <img
-                      src={compareOverlayUrl}
-                      alt="Fast comparison image"
-                      loading="lazy"
-                    />
-                  </div>
-                  <div className="compare-slider-handle" style={{ left: `${sliderPercent}%` }} aria-hidden="true" />
-                </div>
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* Demo presets */}
-        <div className="demo-presets" role="group" aria-label="Demo presets">
-          <span className="demo-presets-label">Sample images:</span>
-          <button
-            type="button"
-            className={`icon-btn demo-mode-btn${demoModeActive ? " is-active" : ""}`}
-            onClick={() => setDemoModeActive(prev => !prev)}
-            title="Cycle sample images automatically"
-          >
-            {demoModeActive ? "⏹ Stop demo" : "▶ Demo mode"}
-          </button>
-          {DEMO_PRESETS.map(preset => (
-            <button
-              key={preset.id}
-              type="button"
-              className="demo-preset-btn"
-              disabled={ocrLoading || demoModeActive}
-              onClick={() => handleDemoPreset(preset)}
-              title={`${preset.label} — ${preset.source === "auto" ? "auto" : preset.source} → ${preset.target}`}
-            >
-              <span className="demo-preset-thumb-wrap">
-                <img
-                  className="demo-preset-thumb"
-                  src={preset.src}
-                  alt=""
-                  loading="lazy"
-                  aria-hidden="true"
-                />
-              </span>
-              <span className="demo-preset-info">
-                <span className="demo-preset-emoji">{preset.emoji}</span>
-                <span className="demo-preset-name">{preset.label}</span>
-                <span className="demo-preset-langs">
-                  {preset.source === "auto" ? "auto" : preset.source.toUpperCase()} → {preset.target.toUpperCase()}
-                </span>
-              </span>
-            </button>
-          ))}
-        </div>
+        <ComparisonView
+          ocrLoading={ocrLoading}
+          imageProgressStage={imageProgressStage ?? ""}
+          mode={mode}
+          compareOriginalUrl={compareOriginalUrl}
+          compareOverlayUrl={compareOverlayUrl}
+          compareLayoutUrl={compareLayoutUrl}
+          compareRevealActive={compareRevealActive}
+          compareView={compareView}
+          sliderTarget={sliderTarget}
+          sliderPercent={sliderPercent}
+          demoModeActive={demoModeActive}
+          loading={loading}
+          modalImageSrc={modalImageSrc}
+          modalTransform={modalTransform}
+          hasModalComparison={hasModalComparison}
+          comparisonModalOpen={comparisonModalOpen}
+          comparisonModalView={comparisonModalView}
+          comparisonModalFocus={comparisonModalFocus}
+          comparisonModalZoom={comparisonModalZoom}
+          comparisonModalPanning={comparisonModalPanning}
+          comparisonModalFlashToggle={comparisonModalFlashToggle}
+          comparisonModalFlashTarget={comparisonModalFlashTarget}
+          comparisonModalSliderTarget={comparisonModalSliderTarget}
+          comparisonModalSliderPercent={comparisonModalSliderPercent}
+          comparisonModalQuickToggle={comparisonModalQuickToggle}
+          onDownload={handleDownload}
+          onOpenSliderModal={focus => openComparisonSliderModal(focus as ComparisonFocus)}
+          onSetCompareView={v => setCompareView(v)}
+          onSetSliderTarget={v => setSliderTarget(v)}
+          onSetSliderPercent={v => setSliderPercent(v)}
+          onOpenModal={focus => openComparisonModal(focus as ComparisonFocus)}
+          onSetModalView={v => setModalView2(v as "gallery" | "slider" | "flash")}
+          onSetModalFocus={v => setModalFocus(v as ComparisonFocus)}
+          onAdjustZoom={v => adjustComparisonModalZoom(v)}
+          onResetZoom={resetComparisonModalZoom}
+          onSetModalFlashToggle={setModalFlashToggle2}
+          onSetModalSliderTarget={v => setModalSliderTarget2(v as "overlay" | "layout")}
+          onSetModalSliderPercent={v => setModalSliderPercent2(v)}
+          onSetComparisonQuickToggle={v => setComparisonQuickToggle(v)}
+          onSetCompareSectionRef={el => { compareSectionRef.current = el }}
+          onWheelZoom={handleComparisonModalWheel}
+          onPointerDown={handleComparisonModalPointerDown}
+          onPointerMove={handleComparisonModalPointerMove}
+          onPointerUp={handleComparisonModalPointerUp}
+          onCloseModal={closeComparisonModal}
+          onToggleDemoMode={() => setDemoModeActive(prev => !prev)}
+          onOpenDemoPreset={handleDemoPreset}
+          sectionRef={compareSectionRef}
+          sliderDraggingRef={sliderDraggingRef}
+        />
 
         {workflow !== "text" && (
           <p className="text-mode-hint">Switch to Text workflow to translate typed text with the Translate button.</p>
@@ -2891,35 +1924,17 @@ function App() {
                 </>
               )}
             </div>
-            {result && !loading && (
-              <div className="panel-footer panel-footer-export">
-                <span className="char-count">{result.length} chars</span>
-                <div className="export-action-bar" role="group" aria-label="Export actions">
-                  <button
-                    className="icon-btn"
-                    title="Download PNG"
-                    disabled={!resultImageUrl}
-                    onClick={() => resultImageUrl && handleDownload(resultImageUrl, "loklingo-output")}
-                  >
-                    🖼 PNG
-                  </button>
-                  <button className="icon-btn" title="Download PDF" onClick={handleDownloadPDF}>
-                    📄 PDF
-                  </button>
-                  <button className="icon-btn" title="Copy translation" onClick={handleCopy}>
-                    ⎘ Copy text
-                  </button>
-                  <button
-                    className="icon-btn"
-                    title="Open comparison workspace"
-                    disabled={!(compareOriginalUrl || resultImageUrl)}
-                    onClick={() => openComparisonModal("layout")}
-                  >
-                    ⟲ Open compare
-                  </button>
-                </div>
-              </div>
-            )}
+            <ExportActions
+              result={result}
+              loading={loading}
+              resultImageUrl={resultImageUrl}
+              resultImageLarge={resultImageLarge}
+              compareOriginalUrl={compareOriginalUrl}
+              onDownloadPNG={() => resultImageUrl && handleDownload(resultImageUrl, "loklingo-output")}
+              onDownloadPDF={handleDownloadPDF}
+              onCopy={handleCopy}
+              onOpenCompare={focus => openComparisonModal(focus)}
+            />
           </div>
         </div>
 
@@ -2961,327 +1976,10 @@ function App() {
         ))}
       </div>
 
-      {comparisonModalOpen && modalImageSrc && (
-        <div
-          className="comparison-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Translation comparison viewer"
-          onClick={closeComparisonModal}
-        >
-          <div className="comparison-modal-card" onClick={e => e.stopPropagation()}>
-            <div className="comparison-modal-header">
-              <strong>Translation Quality Viewer</strong>
-              <div className="comparison-modal-header-actions">
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => adjustComparisonModalZoom(-0.2)}
-                  title="Zoom out"
-                >
-                  −
-                </button>
-                <span className="comparison-modal-zoom-label">{Math.round(comparisonModalZoom * 100)}%</span>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => adjustComparisonModalZoom(0.2)}
-                  title="Zoom in"
-                >
-                  +
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => {
-                    resetComparisonModalZoom()
-                  }}
-                  title="Reset zoom"
-                >
-                  Reset
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={closeComparisonModal}
-                  aria-label="Close comparison viewer"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
 
-            {hasModalComparison && (
-              <div className="comparison-modal-toolbar">
-                {/* Mode and focus selectors */}
-                <div className="comparison-toolbar-section">
-                  <div className="comparison-segment" role="group" aria-label="Modal comparison mode">
-                    <button
-                      type="button"
-                      className={`icon-btn${comparisonModalView === "gallery" ? " is-active" : ""}`}
-                      onClick={() => setModalView2("gallery")}
-                      title="Gallery view (G)"
-                    >
-                      Gallery
-                    </button>
-                    <button
-                      type="button"
-                      className={`icon-btn${comparisonModalView === "slider" ? " is-active" : ""}`}
-                      onClick={() => setModalView2("slider")}
-                      title="Slider view (S)"
-                    >
-                      Slider
-                    </button>
-                    <button
-                      type="button"
-                      className={`icon-btn${comparisonModalView === "flash" ? " is-active" : ""}`}
-                      onClick={() => {
-                        setModalFlashToggle2()
-                        setModalView2("flash")
-                      }}
-                      title="Flash toggle (F)"
-                    >
-                      Flash
-                    </button>
-                  </div>
-                  <div className="comparison-segment" role="group" aria-label="Focused image">
-                    <button
-                      type="button"
-                      className={`icon-btn${comparisonModalFocus === "original" ? " is-active" : ""}`}
-                      onClick={() => setModalFocus("original")}
-                      title="Original image (O)"
-                    >
-                      Original
-                    </button>
-                    <button
-                      type="button"
-                      className={`icon-btn${comparisonModalFocus === "overlay" ? " is-active" : ""}`}
-                      onClick={() => setModalFocus("overlay")}
-                      title="Overlay/Fast result (V)"
-                    >
-                      Fast
-                    </button>
-                    <button
-                      type="button"
-                      className={`icon-btn${comparisonModalFocus === "layout" ? " is-active" : ""}`}
-                      onClick={() => setModalFocus("layout")}
-                      title="Studio/Layout result (L)"
-                    >
-                      Studio
-                    </button>
-                  </div>
-                </div>
-
-                {/* Quick toggle and action buttons */}
-                <div className="comparison-toolbar-section">
-                  <button
-                    type="button"
-                    className={`icon-btn${comparisonModalQuickToggle ? " is-active" : ""}`}
-                    onMouseDown={() => setComparisonQuickToggle(true)}
-                    onMouseUp={() => setComparisonQuickToggle(false)}
-                    onMouseLeave={() => setComparisonQuickToggle(false)}
-                    onTouchStart={() => setComparisonQuickToggle(true)}
-                    onTouchEnd={() => setComparisonQuickToggle(false)}
-                    title="Press and hold for before/after toggle"
-                  >
-                    Before / After
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => {
-                      const img = modalImageSrc
-                      if (img) handleDownload(img, "comparison-result")
-                    }}
-                    title="Download this image"
-                  >
-                    ⬇ Download
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => {
-                      const elem = document.querySelector(".comparison-modal-card") as HTMLElement | null
-                      if (elem?.requestFullscreen) elem.requestFullscreen()
-                    }}
-                    title="Fullscreen view"
-                  >
-                    ⛶ Fullscreen
-                  </button>
-                </div>
-
-                <span className="comparison-shortcuts-hint" aria-hidden="true">
-                  <span className="hint-label">Keyboard:</span> G/S/F (modes) | O/V/L (views) | +/- (zoom) | ESC (close)
-                </span>
-              </div>
-            )}
-
-            {hasModalComparison && comparisonModalView === "slider" ? (
-              <div className="comparison-modal-body">
-                <div
-                  className={`comparison-modal-stage${comparisonModalZoom > 1 ? " is-pannable" : ""}${comparisonModalPanning ? " is-panning" : ""}`}
-                  onWheel={handleComparisonModalWheel}
-                  onPointerDown={handleComparisonModalPointerDown}
-                  onPointerMove={handleComparisonModalPointerMove}
-                  onPointerUp={handleComparisonModalPointerUp}
-                  onPointerLeave={handleComparisonModalPointerUp}
-                >
-                <div
-                  className="compare-slider-frame comparison-modal-slider-frame"
-                  aria-live="polite"
-                  onMouseMove={(e) => {
-                    if (!modalSliderDraggingRef.current) return
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = e.clientX - rect.left
-                    const percent = Math.max(0, Math.min(100, (x / rect.width) * 100))
-                    setModalSliderPercent2(percent)
-                  }}
-                  onMouseDown={(e) => {
-                    if (e.button !== 0) return
-                    modalSliderDraggingRef.current = true
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = e.clientX - rect.left
-                    setModalSliderPercent2(Math.max(0, Math.min(100, (x / rect.width) * 100)))
-                  }}
-                  onMouseUp={() => { modalSliderDraggingRef.current = false }}
-                  onMouseLeave={() => { modalSliderDraggingRef.current = false }}
-                  onTouchMove={(e) => {
-                    if (!modalSliderDraggingRef.current) return
-                    const touch = e.touches[0]
-                    if (!touch) return
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = touch.clientX - rect.left
-                    const percent = Math.max(0, Math.min(100, (x / rect.width) * 100))
-                    setModalSliderPercent2(percent)
-                  }}
-                  onTouchStart={(e) => {
-                    const touch = e.touches[0]
-                    if (!touch) return
-                    modalSliderDraggingRef.current = true
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                    const x = touch.clientX - rect.left
-                    setModalSliderPercent2(Math.max(0, Math.min(100, (x / rect.width) * 100)))
-                  }}
-                  onTouchEnd={() => { modalSliderDraggingRef.current = false }}
-                >
-                  <img
-                    className="compare-slider-base"
-                    src={compareOriginalUrl ?? ""}
-                    alt="Original image"
-                    loading="lazy"
-                    style={{ transform: modalTransform, transformOrigin: "center" }}
-                  />
-                  <div
-                    className="compare-slider-overlay"
-                    style={{ width: `${comparisonModalSliderPercent}%` }}
-                    aria-hidden="true"
-                  >
-                    <img
-                      src={comparisonModalSliderTarget === "overlay" ? compareOverlayUrl ?? "" : compareLayoutUrl ?? ""}
-                      alt=""
-                      loading="lazy"
-                      style={{ transform: modalTransform, transformOrigin: "center" }}
-                    />
-                  </div>
-                  <div className="compare-slider-handle" style={{ left: `${comparisonModalSliderPercent}%` }} aria-hidden="true" />
-                </div>
-                </div>
-                <label className="compare-slider-label">
-                  Original vs {comparisonModalSliderTarget === "overlay" ? "overlay" : "layout"} — drag to reveal
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={comparisonModalSliderPercent}
-                    onChange={e => setModalSliderPercent2(Number(e.target.value))}
-                  />
-                </label>
-                <div className="comparison-segment" role="group" aria-label="Modal slider target">
-                  <button
-                    type="button"
-                    className={`icon-btn${comparisonModalSliderTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => setModalSliderTarget2("overlay")}
-                  >
-                    Compare Overlay
-                  </button>
-                  <button
-                    type="button"
-                    className={`icon-btn${comparisonModalSliderTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => setModalSliderTarget2("layout")}
-                  >
-                    Compare Layout
-                  </button>
-                </div>
-              </div>
-            ) : hasModalComparison && comparisonModalView === "flash" ? (
-              <div className="comparison-modal-body">
-                <div
-                  className={`comparison-modal-stage${comparisonModalZoom > 1 ? " is-pannable" : ""}${comparisonModalPanning ? " is-panning" : ""}`}
-                  onWheel={handleComparisonModalWheel}
-                  onPointerDown={handleComparisonModalPointerDown}
-                  onPointerMove={handleComparisonModalPointerMove}
-                  onPointerUp={handleComparisonModalPointerUp}
-                  onPointerLeave={handleComparisonModalPointerUp}
-                >
-                  <div className="compare-flash-frame comparison-modal-flash-frame">
-                    <img
-                      className="compare-flash-image compare-flash-base"
-                      src={compareOriginalUrl ?? ""}
-                      alt="Original image"
-                      style={{ transform: modalTransform, transformOrigin: "center" }}
-                    />
-                    <img
-                      className={`compare-flash-image compare-flash-top${comparisonModalFlashToggle ? " is-visible" : ""}`}
-                      src={comparisonModalFlashTarget === "overlay" ? compareOverlayUrl ?? "" : compareLayoutUrl ?? ""}
-                      alt="Flash comparison"
-                      style={{ transform: modalTransform, transformOrigin: "center" }}
-                    />
-                    <div className="compare-flash-badge">
-                      {comparisonModalFlashToggle ? `Showing ${comparisonModalFlashTarget}` : "Showing original"}
-                    </div>
-                  </div>
-                </div>
-                <div className="comparison-segment" role="group" aria-label="Modal flash target">
-                  <button
-                    type="button"
-                    className={`icon-btn${comparisonModalFlashTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => setModalFlashTarget2("overlay")}
-                  >
-                    Flash Overlay
-                  </button>
-                  <button
-                    type="button"
-                    className={`icon-btn${comparisonModalFlashTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => setModalFlashTarget2("layout")}
-                  >
-                    Flash Layout
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="comparison-modal-body">
-                <div
-                  className={`comparison-modal-stage${comparisonModalZoom > 1 ? " is-pannable" : ""}${comparisonModalPanning ? " is-panning" : ""}`}
-                  onWheel={handleComparisonModalWheel}
-                  onPointerDown={handleComparisonModalPointerDown}
-                  onPointerMove={handleComparisonModalPointerMove}
-                  onPointerUp={handleComparisonModalPointerUp}
-                  onPointerLeave={handleComparisonModalPointerUp}
-                >
-                  <img
-                    src={modalImageSrc}
-                    alt="Comparison preview"
-                    className="comparison-modal-image"
-                    style={{ transform: modalTransform }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
+  /* eslint-enable react-hooks/refs */
 }
 
 export default App

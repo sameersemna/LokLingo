@@ -123,6 +123,7 @@ export interface ComparisonModalApi {
 export function useComparisonModal(): ComparisonModalApi {
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const stateRef = useRef(state)
+  // eslint-disable-next-line react-hooks/refs
   stateRef.current = state
   const flashTimerRef = useRef<number | null>(null)
   const panOriginRef = useRef<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>(null)

@@ -25,7 +25,7 @@ export const PRODUCT_MODE_BACKEND_MAP: Record<ProductMode, "overlay" | "layout" 
 export const PRODUCT_MODES = [
   { value: "fast", label: "Fast", detail: "Quick visual draft" },
   { value: "studio", label: "Studio", detail: "Premium layout fidelity" },
-  { value: "extract", label: "Text-first output" },
+  { value: "extract", label: "Text-first output", detail: "" },
 ] as const
 
 export const WORKFLOWS = [

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -126,50 +125,6 @@ func NewWorker(store Store, service services.TranslationService, pdfService inte
 	return w
 }
 
-func applyLayoutModeBBoxOptions(opts *internalservices.OverlayOptions, requestedPadding int) {
-	// Keep full OCR geometry in layout mode, but avoid edge collisions with
-	// a small internal text padding window.
-	opts.EraseBBox = true
-	opts.BboxShrinkPx = 0
-	opts.TextPadding = 3
-	// Layout mode prefers gentler seam blending to preserve structure.
-	opts.PatchFeatherPx = 1
-	opts.PatchBlurRadius = 1
-	if requestedPadding >= 0 {
-		switch {
-		case requestedPadding < 2:
-			opts.TextPadding = 2
-		case requestedPadding > 4:
-			opts.TextPadding = 4
-		default:
-			opts.TextPadding = requestedPadding
-		}
-	}
-}
-
-func writeImagePassthroughOutput(imagePath string) (string, error) {
-	ext := filepath.Ext(imagePath)
-	outPath := strings.TrimSuffix(imagePath, ext) + "_translated" + ext
-
-	in, err := os.Open(imagePath)
-	if err != nil {
-		return "", fmt.Errorf("open source image: %w", err)
-	}
-	defer in.Close()
-
-	out, err := os.Create(outPath)
-	if err != nil {
-		return "", fmt.Errorf("create passthrough image: %w", err)
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return "", fmt.Errorf("copy passthrough image: %w", err)
-	}
-
-	return outPath, nil
-}
-
 // Run blocks, processing jobs until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	slog.Info("translation worker started")
@@ -274,87 +229,6 @@ func (w *Worker) cleanupTerminalChunkCheckpoints(ctx context.Context, job *Job) 
 	observability.IncChunkCheckpointClear()
 }
 
-// normalizeText collapses runs of whitespace within each paragraph while
-// preserving paragraph breaks (blank lines between sections).
-func normalizeText(s string) string {
-	paragraphs := strings.Split(strings.TrimSpace(s), "\n\n")
-	out := paragraphs[:0]
-	for _, p := range paragraphs {
-		normalized := strings.Join(strings.Fields(p), " ")
-		if normalized != "" {
-			out = append(out, normalized)
-		}
-	}
-	return strings.Join(out, "\n\n")
-}
-
-// normalizePages applies normalizeText to each page and discards empty results.
-func normalizePages(raw []string) []string {
-	out := make([]string, 0, len(raw))
-	for _, p := range raw {
-		if n := normalizeText(p); n != "" {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// PDFUploadDir is the shared location where CreatePDFJob writes uploaded files.
-// Workers read from here; both sides must agree on this path.
-const PDFUploadDir = "/tmp/loklingo"
-
-// ImageUploadDir is the shared location where CreateImageJob writes uploaded files.
-const ImageUploadDir = "/tmp/loklingo/images"
-
-// pdfTranslateConcurrency is the default maximum number of page-translation goroutines
-// that may be in-flight simultaneously. Override at construction via WithTranslateConcurrency.
-const pdfTranslateConcurrency = 3
-
-// translateMaxRetries is the maximum number of retry attempts after a retryable
-// error (e.g. HTTP 429 rate-limit) before the page translation is failed.
-const translateMaxRetries = 3
-
-// translateChunkTimeout is the hard per-chunk deadline for a single translation
-// request. If exceeded, the chunk is immediately cancelled and split into halves
-// (split-before-retry). 25s bounds worst-case chunk latency while giving the LLM
-// enough headroom on loaded hosts; most chunks complete in 3–12s.
-// Kept as a variable so tests can temporarily override it.
-var translateChunkTimeout = 25 * time.Second
-
-// translateRetryBase is the initial back-off delay before the first retry.
-// Each subsequent retry doubles the delay (capped at translateRetryBase * 2^retries).
-// Kept as a variable so tests can temporarily override it.
-var translateRetryBase = 500 * time.Millisecond
-
-// slowChunkThreshold is the soft per-chunk latency threshold. Chunks that exceed
-// this value are logged as slow but are not cancelled or split. Set below the
-// hard translateChunkTimeout to surface latency regressions before they reach
-// the deadline. Kept as a variable so tests can temporarily override it.
-var slowChunkThreshold = 15 * time.Second
-
-// pdfChunkMinWords and pdfChunkMaxWords define the target PDF translation chunk
-// size in words. Chunks are built from contiguous page text units to reduce LLM
-// per-chunk latency and variance while keeping inputs within a safe token budget.
-// Target: 80–150 words per chunk; hard timeout + split-before-retry keep outliers bounded.
-const pdfChunkMinWords = 80
-const pdfChunkMaxWords = 150
-
-const pdfChunkSep = "\n\n[[[LK_PAGE_BREAK]]]\n\n"
-
-const defaultJobMaxAttempts = 3
-const maxRetryDelay = 60 * time.Second
-const retryJitterFraction = 0.25
-const queueOverloadDepthThreshold = int64(200)
-const retryBacklogOverloadThreshold = int64(120)
-const stuckJobsOverloadThreshold = int64(20)
-const severeQueueOverloadDepthThreshold = int64(400)
-const severeRetryBacklogThreshold = int64(240)
-const severeStuckJobsThreshold = int64(40)
-const lowQueueDepthThreshold = int64(30)
-const lowRetryBacklogThreshold = int64(10)
-const adaptiveTranslateConcurrencyCeiling = 6
-const lowOCRConfidenceThreshold = 0.72
-
 type chunkUnit struct {
 	pageIndex int
 	text      string
@@ -397,11 +271,6 @@ func (m *retryMetrics) totalRetryEvents() int64 {
 	return m.translateRetryCount.Load() + m.timeoutRetryCount.Load() + m.splitCount.Load()
 }
 
-const minAdaptiveChunkWordsFloor = 40
-
-// isRateLimitError reports whether err looks like an HTTP 429 / rate-limit
-// response from LiteLLM.  The service wraps the status as a formatted string
-// so we match on substrings rather than a sentinel error type.
 func isRateLimitError(err error) bool {
 	if err == nil {
 		return false

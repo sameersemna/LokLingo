@@ -1,4 +1,3 @@
-import { apiFetch } from "../utils/http"
 
 export interface DependencyStatus {
   status: "ok" | "error"

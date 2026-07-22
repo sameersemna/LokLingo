@@ -1,3 +1,4 @@
+// "use no memo"
 import { useCallback, useEffect, useReducer, useRef } from "react"
 import { getReadiness, getOCRMetrics, type ReadinessResponse, type OCRMetricsResponse } from "../api"
 import { pressureLevel } from "../constants"

@@ -32,7 +32,7 @@ export async function parseApiErrorBody(res: Response): Promise<ApiErrorBody> {
   }
 }
 
-export function buildApiError(status: number, body: ApiErrorBody, fallback: string): Error {
+export function buildApiError(_status: number, body: ApiErrorBody, fallback: string): Error {
   const msg = typeof body.error === "string" && body.error.trim()
     ? body.error
     : typeof body.detail === "string" && body.detail.trim()

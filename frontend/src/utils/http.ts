@@ -5,6 +5,7 @@ const DEFAULT_TIMEOUT_MS = 30_000
 export interface FetchOptions extends Omit<RequestInit, "signal"> {
   timeoutMs?: number
   baseUrl?: string
+  signal?: AbortSignal
 }
 
 export async function apiFetch<T = unknown>(
