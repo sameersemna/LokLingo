@@ -495,11 +495,8 @@ sessions rather than more iterations of this loop. Stopping here.
 both themes, no regressions.
 
 **Known issues remaining, ranked**:
-1. **`App.tsx` is 1985 lines**, ~4x the project's own 500-line component
-   guideline (`.agentrules`). Translate/OCR/comparison-modal orchestration
-   logic should be extracted into more hooks. Structural, needs a
-   dedicated session — not attempted here to avoid a large, hard-to-review
-   diff in a UI-focused loop.
+1. ~~**`App.tsx` is 1985 lines**~~ — resolved; see the dedicated refactor
+   section below (App.tsx is now 1166 lines).
 2. **Comparison modal's background isn't `inert`** while open — screen
    readers navigating by touch/virtual cursor (not sequential Tab) can
    still reach content behind the overlay, since it's a DOM sibling
@@ -531,3 +528,108 @@ here for visibility even though it was corrected within the same cycle —
 worth remembering that this repo's compose graph has `loklingo-ocr`
 depending on `loklingo-ollama`, so any single-service `up`/`build` should
 use `--no-deps` unless a full-stack recreate is actually intended.
+
+---
+
+## Structural refactor — App.tsx size reduction (2026-07-26)
+
+Follow-up to known issue #1 above, done at the user's request as a
+dedicated task rather than another UI-observation cycle. `App.tsx` was
+1985 lines — about 4x the project's own 500-line component guideline
+(`.agentrules`) — holding translate/OCR pipeline orchestration, an
+image-progress state machine, OCR overlay visualization, demo/showcase
+auto-play, global keyboard shortcuts, and export actions all in one
+component with ~40 `useState` calls and ~15 refs.
+
+Planned and executed as 8 incremental, independently-verified extractions
+(plan approved via plan mode before any code changes), each its own commit:
+
+1. **Pure helpers → `utils/ocrPipeline.ts`** — `isRenderableOCRBlock`,
+   `mapTranslatedLinesToBlocks`, `formatFileSize`, `hasRTLText`,
+   `hasVerticalTypography`, `getPipelineHelpMessage`,
+   `mapBackendImageStage`, `mapBackendStageNarrative`,
+   `mapBackendReliabilityHint`. Zero behavior risk (no closure over
+   component state).
+2. **`useAnimatedCount` → `hooks/useAnimatedCount.ts`** — was already a
+   self-contained hook defined at module scope.
+3. **Export actions → `hooks/useExportActions.ts`** — `handleCopy`,
+   `handleDownload`, `handleDownloadPDF`; changed to take `result`/
+   `resultImageUrl` as call-time arguments instead of closing over them,
+   so the hook stays stateless.
+4. **Demo/showcase mode → `hooks/useDemoShowcase.ts`** — first-visit
+   onboarding auto-load, "Showcase" auto-cycle, and the comparison view's
+   demo-cycling mode. `handleDemoPreset` itself stayed in `App.tsx`
+   (used more broadly) and is passed in as a parameter.
+5. **Keyboard shortcuts → `hooks/useKeyboardShortcuts.ts`** — all four
+   keydown/keyup effects (main shortcut handler, space-bar quick-toggle,
+   Shift+D overlay-demo replay, comparison-modal letter shortcuts).
+   Filling in each effect's dependency array completely (now required
+   since callbacks arrive as hook parameters rather than being
+   recognized as stable in-component closures) incidentally fixed several
+   pre-existing missing-deps ESLint warnings.
+6. **Image-progress state machine → `hooks/useImageProgress.ts`** — the
+   six-stage progress state machine, its timer refs, backend job-progress
+   event handling, and reliability hints. `runImageFile` stayed in
+   `App.tsx` and drives the hook's exposed lifecycle functions.
+7. **OCR overlay visualization → `hooks/useOverlayVisualization.ts`** —
+   detected-block state, label-swap animation, and the replayable overlay
+   demo. Named to avoid clashing with the pre-existing, unrelated
+   `hooks/useOCRVisualization.ts` (a show/stagger-speed toggle).
+8. **Comparison-modal pan/zoom → extended `hooks/useComparisonModal.ts`**
+   — `clampModalPan`, `modalTransform`, and the four wheel/pointer DOM
+   handlers moved into the hook that already owned every piece of state
+   they touched, needing zero new parameters.
+
+**Deliberately not attempted**: `runImageFile`/`handleOCRFile`/
+`handleDemoPreset`/`openUploadPicker`/`handleUploadDrop` — the core
+upload-and-translate orchestration. It's the most business-critical path
+in the app and depends on nearly everything extracted above; safer to
+revisit in a follow-up now that steps 1–8 have cleared the surrounding
+clutter, rather than attempting it in the same pass.
+
+### Verification
+
+Every step was verified individually before moving to the next: `tsc -b
+--noEmit` clean, `eslint` warning count checked against the prior step's
+baseline (net effect across all 8 steps: **15 → 11 warnings**, a genuine
+improvement, not just relocation — filling in dependency arrays that
+were only "safe" to omit because of same-component closure assumptions
+fixed several real gaps), `npm test` (25/25 passing throughout, using
+the suite fixed in Cycle 5), and a Docker rebuild + Puppeteer smoke test
+of the specific behavior each step touched (demo/showcase toggles,
+keyboard shortcuts dispatched as real `KeyboardEvent`s, the full
+image-translate pipeline, OCR overlay + replay-demo, and the comparison
+modal's zoom/pan/wheel interactions) — all with zero console errors
+before each commit.
+
+**One apparent regression, investigated and ruled out**: after step 6,
+the comparison modal appeared to no longer auto-open after a successful
+translation. Root-caused by running the pre-step-6 build side-by-side in
+a second container: `completeImageProgress`'s auto-open check reads
+`compareOriginalUrl`/`compareOverlayUrl`/`compareLayoutUrl`/
+`resultImageUrl` from a `useCallback` closure that's stale relative to
+the state updates made earlier in that same `runImageFile` invocation —
+so it only auto-opens starting from a session's *second* successful
+translation (the first one's stale closure sees all-null values and
+returns early). Confirmed this exact behavior already existed before
+this refactor (same dependency array, same closure pattern) and wasn't
+introduced by the extraction — it just hadn't been specifically exercised
+in earlier cycles' manual tests, which used the "Fullscreen" button to
+open the modal directly rather than relying on auto-open. Left unfixed
+as it's a pre-existing correctness bug outside a structural-only
+refactor's scope; flagged here as a real, reproducible bug for a future
+session (fix: use a ref for the compare/result URLs inside
+`completeImageProgress`, or read them via a getter rather than closure
+capture).
+
+### Result
+
+`App.tsx`: **1985 → 1166 lines (41% reduction)**. Six new hook files plus
+one utils module now hold the extracted logic (`hooks/useAnimatedCount.ts`,
+`hooks/useExportActions.ts`, `hooks/useDemoShowcase.ts`,
+`hooks/useKeyboardShortcuts.ts`, `hooks/useImageProgress.ts`,
+`hooks/useOverlayVisualization.ts`, `utils/ocrPipeline.ts`), each scoped
+to one cohesive piece of state/behavior and independently testable.
+Still not under the project's 500-line guideline — the remaining bulk is
+the upload/translate orchestration (`runImageFile` and friends) and ~370
+lines of JSX composition, both deliberately deferred as noted above.
