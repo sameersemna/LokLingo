@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { type DependencyStatus } from "../api/health"
 import { type OCRMetricsResponse } from "../api/metrics"
 
@@ -66,11 +67,26 @@ export function Header({
   miniSparklinePoints,
   onOpenReliability,
 }: HeaderProps) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
   return (
     <header className="app-header">
       <div className="header-row">
         <h1>LokLingo</h1>
-        <div className="header-actions">
+        <button
+          type="button"
+          className="mobile-nav-toggle"
+          aria-expanded={mobileNavOpen}
+          aria-controls="header-actions-menu"
+          onClick={() => setMobileNavOpen(open => !open)}
+        >
+          Menu {mobileNavOpen ? "▲" : "▼"}
+        </button>
+        <div
+          id="header-actions-menu"
+          className={`header-actions${mobileNavOpen ? " is-open" : ""}`}
+          onClick={() => setMobileNavOpen(false)}
+        >
           <button
             className={`icon-btn${showPdfJobs ? " is-active" : ""}`}
             type="button"

@@ -112,6 +112,10 @@ body {
   gap: 1rem;
 }
 
+.mobile-nav-toggle {
+  display: none;
+}
+
 .app-header h1 {
   font-size: clamp(2.4rem, 4vw, 3.6rem);
   font-weight: 800;
@@ -2825,17 +2829,38 @@ body {
     align-items: flex-start;
   }
 
+  .mobile-nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    align-self: flex-start;
+    margin-top: 0.6rem;
+    min-height: 44px;
+    padding: 0.42rem 1rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+
   .header-actions {
     width: 100%;
-    display: grid;
+    display: none;
     grid-template-columns: 1fr 1fr;
     gap: 0.55rem;
+    margin-top: 0.6rem;
+  }
+
+  .header-actions.is-open {
+    display: grid;
   }
 
   .header-actions .icon-btn,
   .header-actions .theme-btn {
     width: 100%;
-    min-height: 38px;
+    min-height: 44px;
     justify-content: center;
   }
 
@@ -2908,7 +2933,7 @@ body {
 
   .header-actions .icon-btn,
   .header-actions .theme-btn {
-    min-height: 36px;
+    min-height: 44px;
     padding: 0.4rem 0.78rem;
     font-size: 0.78rem;
   }
