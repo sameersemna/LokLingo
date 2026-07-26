@@ -16,6 +16,7 @@ import { useReadiness } from "./hooks/useReadiness"
 import { useAnimatedCount } from "./hooks/useAnimatedCount"
 import { useExportActions } from "./hooks/useExportActions"
 import { useDemoShowcase } from "./hooks/useDemoShowcase"
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts"
 import { getErrorMessage } from "./utils/errors"
 import {
   isRenderableOCRBlock,
@@ -321,84 +322,6 @@ function App() {
       setLoading(false)
     }
   }, [sourceText, sourceLang, targetLang, mode, workflow, pushToast, compareOriginalUrl, addHistoryEntry])
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null
-      const inEditable = Boolean(
-        target && (
-          target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.isContentEditable
-        )
-      )
-      if (e.key === "Escape" && comparisonModalOpen) {
-        closeModal()
-        return
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        if (!inEditable || workflow === "text") {
-          handleTranslate()
-        }
-        return
-      }
-      if (!comparisonModalOpen || inEditable) return
-
-      if (e.key === "+" || e.key === "=") {
-        e.preventDefault()
-        adjustComparisonModalZoom(0.16)
-        return
-      }
-      if (e.key === "-") {
-        e.preventDefault()
-        adjustComparisonModalZoom(-0.16)
-        return
-      }
-      if (e.key === "0") {
-        e.preventDefault()
-        resetComparisonModalZoom()
-        return
-      }
-
-      if (comparisonModalView === "slider") {
-        if (e.key === "ArrowLeft") {
-          e.preventDefault()
-          setModalSliderPercent2(prev => Math.max(0, prev - 4))
-          return
-        }
-        if (e.key === "ArrowRight") {
-          e.preventDefault()
-          setModalSliderPercent2(prev => Math.min(100, prev + 4))
-          return
-        }
-      }
-
-      if (e.key.toLowerCase() === "f") {
-        e.preventDefault()
-        setModalView2(prev => (prev === "flash" ? "slider" : "flash"))
-        return
-      }
-
-      if (e.key === " ") {
-        e.preventDefault()
-        setComparisonQuickToggle(true)
-      }
-    }
-    window.addEventListener("keydown", handler)
-    return () => window.removeEventListener("keydown", handler)
-  }, [comparisonModalOpen, comparisonModalView, handleTranslate, workflow])
-
-  useEffect(() => {
-    if (!comparisonModalOpen) return
-    const release = (e: KeyboardEvent) => {
-      if (e.key === " ") {
-        setComparisonQuickToggle(false)
-      }
-    }
-    window.addEventListener("keyup", release)
-    return () => window.removeEventListener("keyup", release)
-  }, [comparisonModalOpen])
 
   // Body scroll lock is managed by useComparisonModal.
 
@@ -805,87 +728,24 @@ function App() {
     }
   }, [])
 
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null
-      const inEditable = Boolean(
-        target && (
-          target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.isContentEditable
-        )
-      )
-      if (inEditable) return
-      if (event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "d") {
-        event.preventDefault()
-        runOverlayDemo()
-      }
-    }
-    window.addEventListener("keydown", handler)
-    return () => window.removeEventListener("keydown", handler)
-  }, [runOverlayDemo])
-
   const hasModalComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
 
-  // Keyboard shortcuts for comparison modal modes
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (!comparisonModalOpen) return
-      const target = event.target as HTMLElement | null
-      const inEditable = Boolean(
-        target && (
-          target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.isContentEditable
-        )
-      )
-      if (inEditable) return
-
-      const key = event.key.toLowerCase()
-
-      // Comparison mode shortcuts (only when modal is open)
-      if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
-        if (key === "s") {
-          event.preventDefault()
-          if (hasModalComparison) setModalView2("slider")
-        } else if (key === "g") {
-          event.preventDefault()
-          if (hasModalComparison) setModalView2("gallery")
-        } else if (key === "f") {
-          event.preventDefault()
-          if (hasModalComparison) setModalView2("flash")
-        } else if (key === "o") {
-          event.preventDefault()
-          setModalFocus("original")
-          setComparisonQuickToggle(false)
-        } else if (key === "v") {
-          event.preventDefault()
-          setModalFocus("overlay")
-          setComparisonQuickToggle(false)
-        } else if (key === "l") {
-          event.preventDefault()
-          setModalFocus("layout")
-          setComparisonQuickToggle(false)
-        } else if (key === "+" || key === "=") {
-          event.preventDefault()
-          adjustComparisonModalZoom(0.2)
-        } else if (key === "-" || key === "_") {
-          event.preventDefault()
-          adjustComparisonModalZoom(-0.2)
-        } else if (key === "0") {
-          event.preventDefault()
-          resetComparisonModalZoom()
-        } else if (key === "escape") {
-          event.preventDefault()
-          closeComparisonModal()
-        }
-      }
-    }
-    window.addEventListener("keydown", handler)
-    return () => window.removeEventListener("keydown", handler)
-  }, [comparisonModalOpen, hasModalComparison, closeComparisonModal])
+  useKeyboardShortcuts({
+    comparisonModalOpen,
+    comparisonModalView,
+    hasModalComparison,
+    workflow,
+    handleTranslate,
+    runOverlayDemo,
+    closeModal,
+    closeComparisonModal,
+    adjustComparisonModalZoom,
+    resetComparisonModalZoom,
+    setModalSliderPercent: setModalSliderPercent2,
+    setModalView: setModalView2,
+    setComparisonQuickToggle,
+    setModalFocus,
+  })
 
   const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
