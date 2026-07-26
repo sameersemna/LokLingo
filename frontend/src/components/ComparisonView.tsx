@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react"
+import { createPortal } from "react-dom"
 import { type ProductMode, DEMO_PRESETS } from "../constants"
 
 const FOCUSABLE_SELECTOR =
@@ -351,8 +352,9 @@ export function ComparisonView({
         </section>
       )}
 
-      {/* Comparison modal */}
-      {comparisonModalOpen && modalImageSrc && (
+      {/* Comparison modal: portaled to document.body so it sits outside the
+          .app subtree that gets marked inert while this is open. */}
+      {comparisonModalOpen && modalImageSrc && createPortal(
         <div
           className="comparison-modal"
           role="dialog"
@@ -650,7 +652,8 @@ export function ComparisonView({
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* Demo presets */}

@@ -789,7 +789,7 @@ function App() {
       : null
 
   return (
-    <div className="app">
+    <div className="app" inert={comparisonModalOpen}>
       <Header
         theme={theme}
         onToggleTheme={() => setTheme(t => t === "dark" ? "light" : "dark")}
