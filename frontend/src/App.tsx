@@ -15,6 +15,7 @@ import { useComparisonModal } from "./hooks/useComparisonModal"
 import { useReadiness } from "./hooks/useReadiness"
 import { useAnimatedCount } from "./hooks/useAnimatedCount"
 import { useExportActions } from "./hooks/useExportActions"
+import { useDemoShowcase } from "./hooks/useDemoShowcase"
 import { getErrorMessage } from "./utils/errors"
 import {
   isRenderableOCRBlock,
@@ -32,7 +33,6 @@ import {
   LANGUAGES,
   PRODUCT_MODE_BACKEND_MAP,
   MAX_CHARS,
-  FIRST_VISIT_KEY,
   DEMO_PRESETS,
   IMAGE_PROGRESS_STAGES,
   type ProductMode,
@@ -129,8 +129,6 @@ function App() {
   const [overlayLabelSwapActive, setOverlayLabelSwapActive] = useState(false)
   const [overlayDemoRunning, setOverlayDemoRunning] = useState(false)
   const [overlayDemoPhase, setOverlayDemoPhase] = useState<"ocr" | "translation" | "rendering" | null>(null)
-  const [demoModeActive, setDemoModeActive] = useState(false)
-  const [demoModeIndex, setDemoModeIndex] = useState(0)
   const [detectedLang, setDetectedLang] = useState("")
   const [pipelineWarning, setPipelineWarning] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -140,7 +138,6 @@ function App() {
   const [showPdfJobs, setShowPdfJobs] = useState(false)
   const [showReliability, setShowReliability] = useState(false)
   const [showDemoGallery, setShowDemoGallery] = useState(false)
-  const [showcaseMode, setShowcaseMode] = useState(false)
   const [showDeadOps, setShowDeadOps] = useState(false)
   const [pdfJobsVersion, setPdfJobsVersion] = useState(0)
   const [metricsWindow, setMetricsWindow] = useState<MetricsWindow>("24h")
@@ -161,7 +158,6 @@ function App() {
   const overlayDemoTimersRef = useRef<number[]>([])
   const compareFlashTimerRef = useRef<number | null>(null)
   const modalFlashTimerRef = useRef<number | null>(null)
-  const demoModeTimerRef = useRef<number | null>(null)
   const compareRevealKeyRef = useRef<string | null>(null)
   const backendImageProgressActiveRef = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -803,9 +799,6 @@ function App() {
       if (modalFlashTimerRef.current !== null) {
         window.clearInterval(modalFlashTimerRef.current)
       }
-      if (demoModeTimerRef.current !== null) {
-        window.clearTimeout(demoModeTimerRef.current)
-      }
       if (translationTickerRef.current !== null) {
         window.clearInterval(translationTickerRef.current)
       }
@@ -1017,72 +1010,6 @@ function App() {
     startImageProgress,
   ])
 
-  // First-visit onboarding: Auto-load demo for new users
-  useEffect(() => {
-    const isFirstVisit = !localStorage.getItem(FIRST_VISIT_KEY)
-    if (isFirstVisit) {
-      localStorage.setItem(FIRST_VISIT_KEY, "true")
-      // Auto-load first demo preset (manga) after a short delay to avoid jarring UX
-      const demoTimer = window.setTimeout(() => {
-        const demoPreset = DEMO_PRESETS[0]
-        setWorkflow("image")
-        setSourceLang(demoPreset.source)
-        setTargetLang(demoPreset.target)
-        
-        // Load and process the demo image
-        fetch(demoPreset.src)
-          .then(res => res.blob())
-          .then(blob => {
-            const file = new File([blob], `demo-${demoPreset.id}.png`, { type: blob.type })
-            runImageFile(file, demoPreset.source, demoPreset.target)
-          })
-          .catch(() => {
-            // Silently fail - demo is optional
-          })
-      }, 800)
-
-      return () => window.clearTimeout(demoTimer)
-    }
-  }, [])
-
-  // Showcase mode: Auto-cycle through demos
-  useEffect(() => {
-    if (!showcaseMode) return
-
-    let currentIndex = 0
-    let timerId: number | null = null
-
-    const loadNextDemo = () => {
-      const preset = DEMO_PRESETS[currentIndex % DEMO_PRESETS.length]
-      setWorkflow("image")
-      setSourceLang(preset.source)
-      setTargetLang(preset.target)
-
-      fetch(preset.src)
-        .then(res => res.blob())
-        .then(blob => {
-          const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
-          runImageFile(file, preset.source, preset.target)
-          currentIndex++
-          
-          // Schedule next demo after processing + 6 seconds display time
-          timerId = window.setTimeout(loadNextDemo, MOTION.imageProgress.successSettleMs + 6000)
-        })
-        .catch(() => {
-          // Skip to next demo on error
-          currentIndex++
-          timerId = window.setTimeout(loadNextDemo, 2000)
-        })
-    }
-
-    // Start showcase after 1 second
-    const startTimer = window.setTimeout(loadNextDemo, 1000)
-
-    return () => {
-      window.clearTimeout(startTimer)
-      if (timerId !== null) window.clearTimeout(timerId)
-    }
-  }, [showcaseMode])
 
   const effectiveModalFocus: ComparisonFocus = comparisonModalQuickToggle ? "original" : comparisonModalFocus
   const modalImageSrc =
@@ -1160,46 +1087,23 @@ function App() {
     }
   }, [compareOriginalUrl, ocrLoading, pushToast, runImageFile])
 
-  useEffect(() => {
-    if (!demoModeActive || ocrLoading || pdfLoading || loading) {
-      if (demoModeTimerRef.current !== null) {
-        window.clearTimeout(demoModeTimerRef.current)
-        demoModeTimerRef.current = null
-      }
-      return
-    }
-
-    const preset = DEMO_PRESETS[demoModeIndex % DEMO_PRESETS.length]
-    const kickoff = window.setTimeout(() => {
-      const cycle = demoModeIndex % 3
-      if (cycle === 0) {
-        setCompareView("side")
-      } else if (cycle === 1) {
-        setSliderTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
-        setCompareView("slider")
-      } else {
-        setSliderTarget(demoModeIndex % 2 === 0 ? "layout" : "overlay")
-        setCompareView("slider")
-      }
-      void handleDemoPreset(preset)
-    }, 0)
-    demoModeTimerRef.current = window.setTimeout(() => {
-      setDemoModeIndex(prev => (prev + 1) % DEMO_PRESETS.length)
-    }, MOTION.demoCycleMs)
-
-    return () => {
-      window.clearTimeout(kickoff)
-      if (demoModeTimerRef.current !== null) {
-        window.clearTimeout(demoModeTimerRef.current)
-        demoModeTimerRef.current = null
-      }
-    }
-  }, [demoModeActive, demoModeIndex, handleDemoPreset, loading, ocrLoading, pdfLoading])
+  const { showcaseMode, toggleShowcase, demoModeActive, toggleDemoMode, stopDemoMode } = useDemoShowcase({
+    runImageFile,
+    handleDemoPreset,
+    setWorkflow,
+    setSourceLang,
+    setTargetLang,
+    setCompareView,
+    setSliderTarget,
+    ocrLoading,
+    pdfLoading,
+    loading,
+  })
 
   const handleOCRFile = async (file: File) => {
     setPipelineWarning(null)
     if (demoModeActive) {
-      setDemoModeActive(false)
+      stopDemoMode()
     }
     // PDF files → async translate_pdf job (enqueue + track in PDF Jobs panel)
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
@@ -1404,7 +1308,7 @@ function App() {
         showDemoGallery={showDemoGallery}
         onToggleDemoGallery={() => setShowDemoGallery(g => !g)}
         showcaseMode={showcaseMode}
-        onToggleShowcase={() => setShowcaseMode(s => !s)}
+        onToggleShowcase={toggleShowcase}
         historyCount={history.length}
         chipRef={chipRef}
         setShowStatusDetail={setShowStatusDetail}
@@ -1614,7 +1518,7 @@ function App() {
           onPointerMove={handleComparisonModalPointerMove}
           onPointerUp={handleComparisonModalPointerUp}
           onCloseModal={closeComparisonModal}
-          onToggleDemoMode={() => setDemoModeActive(prev => !prev)}
+          onToggleDemoMode={toggleDemoMode}
           onOpenDemoPreset={handleDemoPreset}
           sectionRef={compareSectionRef}
           sliderDraggingRef={sliderDraggingRef}
