@@ -18,16 +18,15 @@ import { useExportActions } from "./hooks/useExportActions"
 import { useDemoShowcase } from "./hooks/useDemoShowcase"
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts"
 import { useImageProgress } from "./hooks/useImageProgress"
+import { useOverlayVisualization } from "./hooks/useOverlayVisualization"
 import { getErrorMessage } from "./utils/errors"
 import {
   isRenderableOCRBlock,
-  mapTranslatedLinesToBlocks,
   formatFileSize,
   hasRTLText,
   hasVerticalTypography,
   getPipelineHelpMessage,
 } from "./utils/ocrPipeline"
-import { MOTION } from "./motion"
 import {
   LANGUAGES,
   PRODUCT_MODE_BACKEND_MAP,
@@ -38,7 +37,6 @@ import {
   type InputWorkflow,
   type UploadSelection,
   type ComparisonFocus,
-  type OverlayStage,
 } from "./constants"
 import "./App.css"
 import { Header, WorkflowSwitcher, UploadHero, ImageProgress, IntelligencePanel, PipelineWarning, DemoGallery, HistoryPanel, ExportActions, ComparisonView, ReliabilityTelemetry } from "./components"
@@ -110,13 +108,6 @@ function App() {
   const [sliderPercent, setSliderPercent] = useState(50)
   const [compareRevealActive, setCompareRevealActive] = useState(false)
   const [ocrConfidence, setOcrConfidence] = useState<number | null>(null)
-  const [overlayBlocks, setOverlayBlocks] = useState<TextBlock[]>([])
-  const [overlayTexts, setOverlayTexts] = useState<string[]>([])
-  const [overlayStage, setOverlayStage] = useState<OverlayStage>("idle")
-  const [overlayImageSize, setOverlayImageSize] = useState<{ width: number; height: number } | null>(null)
-  const [overlayLabelSwapActive, setOverlayLabelSwapActive] = useState(false)
-  const [overlayDemoRunning, setOverlayDemoRunning] = useState(false)
-  const [overlayDemoPhase, setOverlayDemoPhase] = useState<"ocr" | "translation" | "rendering" | null>(null)
   const [detectedLang, setDetectedLang] = useState("")
   const [pipelineWarning, setPipelineWarning] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -139,8 +130,6 @@ function App() {
   const compareSectionRef = useRef<HTMLElement>(null)
   const sliderDraggingRef = useRef(false)
   const autoCompareKeyRef = useRef<string | null>(null)
-  const overlaySwapTimerRef = useRef<number | null>(null)
-  const overlayDemoTimersRef = useRef<number[]>([])
   const compareFlashTimerRef = useRef<number | null>(null)
   const modalFlashTimerRef = useRef<number | null>(null)
   const compareRevealKeyRef = useRef<string | null>(null)
@@ -357,98 +346,20 @@ function App() {
     closeModal()
   }
 
-  const clearOverlaySwapTimer = useCallback(() => {
-    if (overlaySwapTimerRef.current !== null) {
-      window.clearTimeout(overlaySwapTimerRef.current)
-      overlaySwapTimerRef.current = null
-    }
-  }, [])
-
-  const clearOverlayDemoTimers = useCallback(() => {
-    overlayDemoTimersRef.current.forEach(timer => window.clearTimeout(timer))
-    overlayDemoTimersRef.current = []
-  }, [])
-
-  const resetOCRVisualization = useCallback(() => {
-    clearOverlayDemoTimers()
-    clearOverlaySwapTimer()
-    setOverlayBlocks([])
-    setOverlayTexts([])
-    setOverlayStage("idle")
-    setOverlayImageSize(null)
-    setOverlayLabelSwapActive(false)
-    setOverlayDemoRunning(false)
-    setOverlayDemoPhase(null)
-  }, [clearOverlayDemoTimers, clearOverlaySwapTimer])
-
-  const revealOCRVisualization = useCallback((blocks: TextBlock[]) => {
-    clearOverlayDemoTimers()
-    clearOverlaySwapTimer()
-    setOverlayBlocks(blocks)
-    setOverlayTexts([])
-    setOverlayStage(blocks.length > 0 ? "ocr" : "idle")
-    setOverlayLabelSwapActive(false)
-    setOverlayDemoRunning(false)
-    setOverlayDemoPhase(null)
-  }, [clearOverlayDemoTimers, clearOverlaySwapTimer])
-
-  const revealTranslatedVisualization = useCallback((blocks: TextBlock[], translatedText: string) => {
-    clearOverlayDemoTimers()
-    clearOverlaySwapTimer()
-    setOverlayBlocks(blocks)
-    setOverlayTexts(mapTranslatedLinesToBlocks(blocks, translatedText))
-    setOverlayStage(blocks.length > 0 ? "translated" : "idle")
-    if (blocks.length > 0) {
-      setOverlayLabelSwapActive(true)
-      overlaySwapTimerRef.current = window.setTimeout(() => {
-        setOverlayLabelSwapActive(false)
-        overlaySwapTimerRef.current = null
-      }, MOTION.overlaySwapLabelMs)
-    }
-    setOverlayDemoRunning(false)
-    setOverlayDemoPhase(null)
-  }, [clearOverlayDemoTimers, clearOverlaySwapTimer])
-
-  const runOverlayDemo = useCallback(() => {
-    if (ocrLoading || overlayBlocks.length === 0 || overlayStage === "idle") {
-      return
-    }
-
-    clearOverlayDemoTimers()
-    clearOverlaySwapTimer()
-
-    const hasTranslatedLabels = overlayTexts.some(text => text.trim() !== "")
-
-    setOverlayDemoRunning(true)
-    setOverlayDemoPhase("ocr")
-    setOverlayStage("ocr")
-    setOverlayLabelSwapActive(false)
-
-    const toTranslation = window.setTimeout(() => {
-      setOverlayDemoPhase("translation")
-      if (hasTranslatedLabels) {
-        setOverlayStage("translated")
-        setOverlayLabelSwapActive(true)
-      }
-    }, MOTION.overlayDemo.toTranslationMs)
-
-    const clearSwap = window.setTimeout(() => {
-      setOverlayLabelSwapActive(false)
-    }, MOTION.overlayDemo.clearSwapMs)
-
-    const toRendering = window.setTimeout(() => {
-      setOverlayDemoPhase("rendering")
-    }, MOTION.overlayDemo.toRenderingMs)
-
-    const settle = window.setTimeout(() => {
-      setOverlayDemoRunning(false)
-      setOverlayDemoPhase(null)
-      setOverlayLabelSwapActive(false)
-      setOverlayStage(hasTranslatedLabels ? "translated" : "ocr")
-    }, MOTION.overlayDemo.settleMs)
-
-    overlayDemoTimersRef.current = [toTranslation, clearSwap, toRendering, settle]
-  }, [clearOverlayDemoTimers, clearOverlaySwapTimer, ocrLoading, overlayBlocks, overlayStage, overlayTexts])
+  const {
+    overlayBlocks,
+    overlayTexts,
+    overlayStage,
+    overlayImageSize,
+    overlayLabelSwapActive,
+    overlayDemoRunning,
+    overlayDemoPhase,
+    setOverlayImageSize,
+    resetOCRVisualization,
+    revealOCRVisualization,
+    revealTranslatedVisualization,
+    runOverlayDemo,
+  } = useOverlayVisualization(ocrLoading)
 
   const {
     imageProgressStage,
@@ -481,18 +392,6 @@ function App() {
     resetComparisonModalZoom,
     openModal,
   })
-
-  useEffect(() => {
-    return () => {
-      clearOverlaySwapTimer()
-    }
-  }, [clearOverlaySwapTimer])
-
-  useEffect(() => {
-    return () => {
-      clearOverlayDemoTimers()
-    }
-  }, [clearOverlayDemoTimers])
 
   useEffect(() => {
     return () => {
