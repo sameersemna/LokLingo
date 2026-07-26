@@ -3899,6 +3899,11 @@ body {
     padding: 0.5rem;
   }
 
+  .comparison-toolbar-section {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+  }
+
   .comparison-shortcuts-hint {
     width: 100%;
     margin-left: 0;

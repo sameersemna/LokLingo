@@ -198,9 +198,111 @@ a hand-rolled, already-fairly-considered CSS app, not a truncated effort.
 
 ---
 
+## Cycle 3 — Deeper pass: secondary panels, error surfacing, comparison modal (2026-07-26)
+
+### Findings (Phase 1)
+
+Walked the panels not covered in Cycles 1–2: the readiness popover, Dead
+Ops recovery queue, PDF Jobs panel, Demos gallery, and the fullscreen
+"Translation Quality Viewer" comparison modal (triggered via a demo
+preset), each checked at 1440/768/375px, plus a look at `apiFetch`'s error
+path after the readiness popover showed a suspicious generic error.
+
+1. **[High, correctness] `apiFetch` silently discards real backend error
+   messages and replaces them with "Network request failed."** In
+   `frontend/src/utils/http.ts`, the catch block tried to distinguish
+   "already-handled API error" from "genuine network failure" by checking
+   `err.message.startsWith("HTTP ")`. But `buildApiError`
+   (`frontend/src/utils/errors.ts`) only falls back to an `HTTP {status}`
+   string when the response body has no JSON `error`/`detail` field —
+   when the backend *does* return a structured error (e.g. this
+   environment's metrics endpoints returning `{"error":"unauthorized"}`
+   for a 401), the resulting `Error("unauthorized")` doesn't start with
+   `"HTTP "`, fails the check, and gets silently rethrown as the generic
+   `"Network request failed."`. Reproduced live: the Reliability popover
+   showed "Network request failed." for what was actually a 401 from
+   `/api/v1/metrics/ocr` — a user or operator debugging this would
+   incorrectly suspect a network/connectivity problem instead of an auth
+   configuration issue. This path is shared by every `api/*` module
+   (translate, ocr, metrics, deadletter, health), so it affects most
+   user-facing error messages in the app, not just this one panel.
+
+2. **[High, mobile layout] Comparison modal's view-mode toggle overflows
+   and clips on narrow viewports.** In the fullscreen "Translation Quality
+   Viewer" (`ComparisonView.tsx` / `.comparison-modal-toolbar`), the first
+   `.comparison-toolbar-section` holds two `.comparison-segment` button
+   groups (Gallery/Slider/Flash and Original/Fast/Studio side by side,
+   ~368px combined) with no internal wrap. At 375px this section's content
+   (`scrollWidth: 381`) exceeds both its container (`clientWidth: 357`)
+   and the viewport itself — confirmed via `getBoundingClientRect()` that
+   the "Studio" button's right edge sat at x=385, past the 375px viewport.
+   The existing `max-width: 600px` responsive block only handled the
+   keyboard-shortcut hint text, not this toolbar row, so the "Studio"
+   comparison-source option was effectively cut off and not reliably
+   tappable on phones.
+
+Also audited: Dead Ops and PDF Jobs panels stack cleanly at all three
+widths with no overflow; the comparison grid (non-modal, inline) already
+collapses to one column on mobile correctly; all `outline: none` rules
+have paired `box-shadow` focus rings (no missing keyboard-focus states
+found in this pass either).
+
+### Research (Phase 2)
+
+For finding 1: this is a logic bug, not a design-pattern question — fixed
+by making the "is this an API error I already formatted" check structural
+(a marker on the `Error` object) rather than string-content-based, which
+is fragile by construction (any real backend message that happens not to
+start with "HTTP " defeats it).
+
+For finding 2: consistent with the same mobile-collapse research from
+Cycle 1 — segmented control groups that don't fit their container should
+wrap to their own row rather than clip silently; scoped to the existing
+`max-width: 600px` breakpoint already used for this modal's other mobile
+overrides, so it stays consistent with the modal's own established
+responsive pattern.
+
+### Implementation (Phase 3)
+
+- `frontend/src/utils/errors.ts`: `buildApiError` now sets `error.name =
+  "ApiError"` on the `Error` it constructs.
+- `frontend/src/utils/http.ts`: `apiFetch`'s catch block now checks
+  `err.name === "ApiError"` instead of `err.message.startsWith("HTTP ")`
+  to decide whether to rethrow the original (already-informative) error
+  or wrap it as a generic network failure.
+- `frontend/src/App.css`: added `.comparison-toolbar-section { flex-wrap:
+  wrap; row-gap: 0.4rem; }` inside the existing `max-width: 600px` block
+  used by the comparison modal's other mobile overrides.
+
+### Verification (Phase 4)
+
+Rebuilt/redeployed `loklingo-frontend` and re-tested live:
+- Readiness popover now shows `unauthorized` (the real backend response)
+  instead of `Network request failed.` — confirmed the same fix also
+  corrected the Dead Ops panel's error display, which hits the same
+  `apiFetch` path.
+- Comparison modal at 375px: Gallery/Slider/Flash and Original/Fast/Studio
+  now wrap onto their own rows, fully visible and tappable, no clipping.
+- Same modal at 768px and 1440px: unchanged, single-row layout — no
+  regression.
+- `npx tsc -b --noEmit` and `npm run lint`: clean, same 15 pre-existing
+  warnings as prior cycles, none new.
+
+### Cycle decision
+
+Finding 1 (error-message correctness) is a materially more consequential
+bug than Cycles 1–2's UI polish — it affects how every API failure in the
+app is communicated to users, so this cycle was worth running well past
+"diminishing returns." Continuing to Cycle 4 would mean either chasing
+progressively smaller cosmetic issues or attempting the structural
+`App.tsx` refactor flagged since Cycle 1, which is out of scope for a UI
+loop. Stopping here.
+
+---
+
 ## Summary
 
-**Cycles run**: 2 (plus Cycle 0 orientation).
+**Cycles run**: 3 (plus Cycle 0 orientation).
 
 **Changes made**:
 - *Accessibility / mobile UX*: collapsed 7 header utility buttons behind a
@@ -210,6 +312,12 @@ a hand-rolled, already-fairly-considered CSS app, not a truncated effort.
 - *Accessibility / contrast*: fixed dark-theme `--text-muted` from a
   4.13:1 (WCAG AA fail on surfaces) to 4.91:1+ across all surfaces
   (`frontend/src/App.css`).
+- *Correctness*: fixed `apiFetch` silently discarding real backend error
+  messages (401s, validation errors, etc.) and replacing them with a
+  misleading generic "Network request failed." — affects every API call
+  in the app (`frontend/src/utils/http.ts`, `frontend/src/utils/errors.ts`).
+- *Mobile layout*: fixed comparison modal's view-mode toggle clipping off
+  the edge of the viewport on phones (`frontend/src/App.css`).
 
 **Verified**: TypeScript build clean, ESLint clean (no new warnings),
 manual visual check at 375/768/1440px in both themes, no regressions.
@@ -230,10 +338,14 @@ unrelated to this loop).
    --no-deps loklingo-frontend`), which is slow for this kind of
    screenshot-driven work. Worth documenting a `vite dev` workflow in
    `guide/` for future UI sessions.
-4. Deeper contrast/focus audit of the readiness popover, comparison modal,
-   and PDF/Reliability/Dead-Ops panels not done — those weren't visited in
-   this loop's walkthrough (the app's onboarding auto-loads a demo image on
-   first visit, which dominated the initial observation pass instead).
+4. The internal-metrics endpoints (`/api/v1/metrics/*`) return 401 in this
+   environment because no `VITE_INTERNAL_TOKEN` is configured for the
+   build — not a bug, but worth confirming that's intentional for this
+   deployment rather than a missed config step.
+5. Text/Slider/Flash focus-order and screen-reader labeling inside the
+   comparison modal wasn't audited keystroke-by-keystroke (only checked
+   that `box-shadow` focus rings exist) — a full keyboard-only pass
+   through the modal would be a good Cycle 4 candidate.
 
 **Process note**: an early `docker compose up -d loklingo-frontend` (no
 `--no-deps`) recreated `loklingo-ollama` as a dependency and dropped its
