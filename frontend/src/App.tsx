@@ -63,9 +63,12 @@ function App() {
     setFocus: setModalFocus,
     adjustZoom: adjustComparisonModalZoom,
     resetZoom: resetComparisonModalZoom,
-    setPan: setModalPan,
     setPanning: setModalPanning,
-    panOriginRef: modalPanOriginRef,
+    modalTransform,
+    handleWheel: handleComparisonModalWheel,
+    handlePointerDown: handleComparisonModalPointerDown,
+    handlePointerMove: handleComparisonModalPointerMove,
+    handlePointerUp: handleComparisonModalPointerUp,
   } = modal
   const comparisonModalOpen = modalState.open
   const comparisonModalView = modalState.view
@@ -76,7 +79,6 @@ function App() {
   const comparisonModalFocus = modalState.focus
   const comparisonModalQuickToggle = modalState.quickToggle
   const comparisonModalZoom = modalState.zoom
-  const comparisonModalPan = modalState.pan
   const comparisonModalPanning = modalState.panning
   const readinessApi = useReadiness()
   // Expose the readiness chip ref and popover toggle from the hook.
@@ -555,49 +557,6 @@ function App() {
       : effectiveModalFocus === "overlay"
       ? compareOverlayUrl
       : compareLayoutUrl ?? resultImageUrl
-  const clampModalPan = (x: number, y: number, zoom: number) => {
-    const maxOffset = Math.max(0, (zoom - 1) * 520)
-    return {
-      x: Math.max(-maxOffset, Math.min(maxOffset, x)),
-      y: Math.max(-maxOffset, Math.min(maxOffset, y)),
-    }
-  }
-  const modalTransform = `translate(${comparisonModalPan.x}px, ${comparisonModalPan.y}px) scale(${comparisonModalZoom})`
-
-  const handleComparisonModalWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (!comparisonModalOpen) return
-    event.preventDefault()
-    const delta = event.deltaY < 0 ? 0.12 : -0.12
-    adjustComparisonModalZoom(delta)
-  }
-
-  const handleComparisonModalPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (comparisonModalZoom <= 1) return
-    event.preventDefault()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    modalPanOriginRef.current = {
-      pointerX: event.clientX,
-      pointerY: event.clientY,
-      panX: comparisonModalPan.x,
-      panY: comparisonModalPan.y,
-    }
-    setModalPanning(true)
-  }
-
-  const handleComparisonModalPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!modalPanOriginRef.current || !comparisonModalPanning) return
-    const dx = event.clientX - modalPanOriginRef.current.pointerX
-    const dy = event.clientY - modalPanOriginRef.current.pointerY
-    setModalPan(clampModalPan(modalPanOriginRef.current.panX + dx, modalPanOriginRef.current.panY + dy, comparisonModalZoom))
-  }
-
-  const handleComparisonModalPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
-    }
-    modalPanOriginRef.current = null
-    setModalPanning(false)
-  }
 
   const handleDemoPreset = useCallback(async (preset: typeof DEMO_PRESETS[number]) => {
     if (ocrLoading) return

@@ -113,6 +113,19 @@ export interface ComparisonModalApi {
   setPan: (pan: { x: number; y: number }) => void
   setPanning: (on: boolean) => void
   panOriginRef: React.MutableRefObject<{ pointerX: number; pointerY: number; panX: number; panY: number } | null>
+  modalTransform: string
+  handleWheel: (event: React.WheelEvent<HTMLDivElement>) => void
+  handlePointerDown: (event: React.PointerEvent<HTMLDivElement>) => void
+  handlePointerMove: (event: React.PointerEvent<HTMLDivElement>) => void
+  handlePointerUp: (event: React.PointerEvent<HTMLDivElement>) => void
+}
+
+function clampModalPan(x: number, y: number, zoom: number): { x: number; y: number } {
+  const maxOffset = Math.max(0, (zoom - 1) * 520)
+  return {
+    x: Math.max(-maxOffset, Math.min(maxOffset, x)),
+    y: Math.max(-maxOffset, Math.min(maxOffset, y)),
+  }
 }
 
 /**
@@ -203,6 +216,43 @@ export function useComparisonModal(): ComparisonModalApi {
   const setPan = useCallback((pan: { x: number; y: number }) => dispatch({ type: "pan", pan }), [])
   const setPanning = useCallback((on: boolean) => dispatch({ type: "panning", on }), [])
 
+  const modalTransform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`
+
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (!stateRef.current.open) return
+    event.preventDefault()
+    const delta = event.deltaY < 0 ? 0.12 : -0.12
+    adjustZoom(delta)
+  }, [adjustZoom])
+
+  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (stateRef.current.zoom <= 1) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    panOriginRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      panX: stateRef.current.pan.x,
+      panY: stateRef.current.pan.y,
+    }
+    setPanning(true)
+  }, [setPanning])
+
+  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!panOriginRef.current || !stateRef.current.panning) return
+    const dx = event.clientX - panOriginRef.current.pointerX
+    const dy = event.clientY - panOriginRef.current.pointerY
+    setPan(clampModalPan(panOriginRef.current.panX + dx, panOriginRef.current.panY + dy, stateRef.current.zoom))
+  }, [setPan])
+
+  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    panOriginRef.current = null
+    setPanning(false)
+  }, [setPanning])
+
   return {
     state,
     open,
@@ -221,5 +271,10 @@ export function useComparisonModal(): ComparisonModalApi {
     setPan,
     setPanning,
     panOriginRef,
+    modalTransform,
+    handleWheel,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
   }
 }
