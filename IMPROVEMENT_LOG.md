@@ -403,14 +403,69 @@ restoration) verified working. This is a good stopping point — the
 remaining candidates are either the `inert`/portal refactor (structural,
 deferred above), the `App.tsx` size issue (structural, flagged since
 Cycle 1), or the broken `npm test` environment (unrelated tooling debt).
-None of those fit a UI-polish loop without ballooning scope. Stopping
-here.
+None of those fit a UI-polish loop without ballooning scope. Continued to
+Cycle 5 to clear the `npm test` item, since it was small, safe, and
+directly unblocks verifying future cycles' changes with real tests
+instead of just `tsc`/`eslint`.
+
+---
+
+## Cycle 5 — Fix broken test suite (2026-07-26)
+
+### Findings (Phase 1)
+
+`npm test` has failed since at least Cycle 0's orientation pass with
+`Cannot find package 'jsdom'`. `frontend/vitest.config.ts` sets
+`environment: 'jsdom'` and `frontend/src/test/setup.ts` patches
+`window.matchMedia` for jsdom specifically, so the test suite was clearly
+written assuming `jsdom` would be installed — but it wasn't listed in
+`package.json`'s `devDependencies`. Confirmed it was genuinely absent
+(`ls node_modules/jsdom` → not found) rather than a version-resolution
+problem.
+
+### Research (Phase 2)
+
+Not a design decision — just picked the current `jsdom` release
+(`29.1.1` via `npm view jsdom version`) since nothing in the repo pins an
+older major version and vitest 4 supports current jsdom.
+
+### Implementation (Phase 3)
+
+`cd frontend && npm install --save-dev jsdom` → added `"jsdom":
+"^29.1.1"` to `package.json` and updated `package-lock.json`. No source
+changes.
+
+### Verification (Phase 4)
+
+- `npm run test`: **6 test files, 25 tests, all passing** (previously: 0
+  tests run, 6 errors, `ERR_MODULE_NOT_FOUND`).
+- `npx tsc -b --noEmit` and `npm run lint`: still clean, same 15
+  pre-existing warnings.
+- Noticed `npm install` surfaced 5 pre-existing vulnerabilities (1
+  moderate in `dompurify`, 3 high in `brace-expansion`/`postcss`/`vite`,
+  1 low). Verified via `git stash` that all 5 already existed before this
+  change (transitive deps unrelated to `jsdom`) — not introduced by this
+  fix. Left untouched: `npm audit fix` can bump major versions of `vite`
+  and `postcss`, which is a real risk of breaking the build and is a
+  separate decision from "make tests runnable," not appropriate to bundle
+  into this fix.
+
+### Cycle decision
+
+This was a deliberately small, low-risk cycle to clear tooling debt that
+was blocking proper verification (`tsc`/`eslint` catch different things
+than actual component/hook tests do). With this fixed, the codebase now
+has a working safety net for any future UI work. The remaining flagged
+items (`inert`/portal for the modal, `App.tsx` size, the `npm audit`
+findings) are each a meaningfully larger, separate piece of work than
+anything done in Cycles 1–5 — good candidates for dedicated follow-up
+sessions rather than more iterations of this loop. Stopping here.
 
 ---
 
 ## Summary
 
-**Cycles run**: 4 (plus Cycle 0 orientation).
+**Cycles run**: 5 (plus Cycle 0 orientation).
 
 **Changes made**:
 - *Accessibility / mobile UX*: collapsed 7 header utility buttons behind a
@@ -431,11 +486,13 @@ here.
   restoration to the trigger on close — bringing it in line with the
   WAI-ARIA Dialog (Modal) pattern its existing `aria-modal="true"` was
   already claiming to follow (`frontend/src/components/ComparisonView.tsx`).
+- *Tooling*: fixed the broken test suite (`npm i -D jsdom`) — 25 tests
+  across 6 files now run and pass, giving future cycles real test
+  coverage instead of only `tsc`/`eslint` (`frontend/package.json`).
 
 **Verified**: TypeScript build clean, ESLint clean (no new warnings),
-manual visual check at 375/768/1440px in both themes, no regressions.
-`npm test` could not be run (pre-existing missing `jsdom` dependency,
-unrelated to this loop).
+`npm test` now passing (25/25), manual visual check at 375/768/1440px in
+both themes, no regressions.
 
 **Known issues remaining, ranked**:
 1. **`App.tsx` is 1985 lines**, ~4x the project's own 500-line component
@@ -443,19 +500,7 @@ unrelated to this loop).
    logic should be extracted into more hooks. Structural, needs a
    dedicated session — not attempted here to avoid a large, hard-to-review
    diff in a UI-focused loop.
-2. **`npm test` is broken** in this checkout: `Cannot find package
-   'jsdom'`. Likely a one-line `npm i -D jsdom` fix; left alone here since
-   it's unrelated to UI/UX and not caused by this loop's changes.
-3. **No fast local dev loop for UI iteration**: the frontend is only
-   verifiable via a full Docker image rebuild (`docker compose build && up
-   --no-deps loklingo-frontend`), which is slow for this kind of
-   screenshot-driven work. Worth documenting a `vite dev` workflow in
-   `guide/` for future UI sessions.
-4. The internal-metrics endpoints (`/api/v1/metrics/*`) return 401 in this
-   environment because no `VITE_INTERNAL_TOKEN` is configured for the
-   build — not a bug, but worth confirming that's intentional for this
-   deployment rather than a missed config step.
-5. **Comparison modal's background isn't `inert`** while open — screen
+2. **Comparison modal's background isn't `inert`** while open — screen
    readers navigating by touch/virtual cursor (not sequential Tab) can
    still reach content behind the overlay, since it's a DOM sibling
    rather than portaled out of the main app subtree. Fixing this properly
@@ -463,6 +508,21 @@ unrelated to this loop).
    the rest of the tree without inert-ing the modal itself — a bigger
    change than this loop's other fixes, good candidate for a dedicated
    accessibility pass.
+3. **5 pre-existing `npm audit` findings** (1 moderate in `dompurify`, 3
+   high in `brace-expansion`/`postcss`/`vite`, 1 low), surfaced while
+   installing `jsdom` but confirmed pre-existing and unrelated via `git
+   stash`. `npm audit fix` is available but can bump `vite`/`postcss`
+   major versions — a separate, riskier decision than this loop's scope,
+   deliberately left untouched.
+4. **No fast local dev loop for UI iteration**: the frontend is only
+   verifiable via a full Docker image rebuild (`docker compose build && up
+   --no-deps loklingo-frontend`), which is slow for this kind of
+   screenshot-driven work. Worth documenting a `vite dev` workflow in
+   `guide/` for future UI sessions.
+5. The internal-metrics endpoints (`/api/v1/metrics/*`) return 401 in this
+   environment because no `VITE_INTERNAL_TOKEN` is configured for the
+   build — not a bug, but worth confirming that's intentional for this
+   deployment rather than a missed config step.
 
 **Process note**: an early `docker compose up -d loklingo-frontend` (no
 `--no-deps`) recreated `loklingo-ollama` as a dependency and dropped its
