@@ -497,14 +497,8 @@ both themes, no regressions.
 **Known issues remaining, ranked**:
 1. ~~**`App.tsx` is 1985 lines**~~ — resolved; see the dedicated refactor
    section below (App.tsx is now 1166 lines).
-2. **Comparison modal's background isn't `inert`** while open — screen
-   readers navigating by touch/virtual cursor (not sequential Tab) can
-   still reach content behind the overlay, since it's a DOM sibling
-   rather than portaled out of the main app subtree. Fixing this properly
-   means rendering the modal via a portal so `inert` can be applied to
-   the rest of the tree without inert-ing the modal itself — a bigger
-   change than this loop's other fixes, good candidate for a dedicated
-   accessibility pass.
+2. ~~**Comparison modal's background isn't `inert`**~~ — resolved; see
+   "Comparison modal: genuine background inertness" below.
 3. **5 pre-existing `npm audit` findings** (1 moderate in `dompurify`, 3
    high in `brace-expansion`/`postcss`/`vite`, 1 low), surfaced while
    installing `jsdom` but confirmed pre-existing and unrelated via `git
@@ -633,3 +627,66 @@ to one cohesive piece of state/behavior and independently testable.
 Still not under the project's 500-line guideline — the remaining bulk is
 the upload/translate orchestration (`runImageFile` and friends) and ~370
 lines of JSX composition, both deliberately deferred as noted above.
+
+---
+
+## Comparison modal: genuine background inertness (2026-07-26)
+
+Follow-up to known issue #2, and to Cycle 4's focus trap specifically.
+Cycle 4 made Tab/Shift+Tab respect the modal's boundary and restored
+focus on close, but the modal still rendered as a DOM *descendant* of
+`.app`, so `aria-modal="true"` was still an unenforced promise: screen
+readers navigating by touch/virtual cursor (not sequential Tab — the
+majority of how screen reader users actually explore a page) could still
+reach content behind the overlay.
+
+### Research
+
+Checked current (2026) guidance on custom modal accessibility rather than
+assuming. Consensus: for a custom (non-native-`<dialog>`) modal, the
+implementer owns applying `inert` to the background — `inert` is a single
+W3C-standard HTML attribute (Baseline since 2023) that blocks focus,
+pointer/click events, and accessibility-tree discoverability across an
+entire subtree in one step, replacing the "hand-roll a focus trap +
+scatter `aria-hidden`" approach `inert` was designed to obsolete. The
+documented pattern: place the modal as a DOM *sibling* of the subtree
+being sealed off, so marking that subtree `inert` doesn't also inert the
+modal itself. Switching to a native `<dialog>` element (which gets this
+for free via `showModal()`) was considered and rejected as disproportionate
+— it would mean redesigning an already-working custom modal's backdrop,
+animations, and focus-trap wiring for a benefit this narrower fix already
+achieves.
+
+### Implementation
+
+- `frontend/src/components/ComparisonView.tsx`: wrapped the modal's JSX
+  in `createPortal(..., document.body)` so it renders as a sibling of the
+  app root instead of a child. Event handling (backdrop click-to-close,
+  the Cycle-4 keydown trap) is unaffected — React's synthetic event
+  system follows the component tree, not the DOM tree, so portaling
+  doesn't change bubbling behavior.
+- `frontend/src/App.tsx`: added `inert={comparisonModalOpen}` to the
+  root `.app` div.
+
+### Verification
+
+Rebuilt/redeployed, confirmed live:
+- `document.querySelector('.comparison-modal').parentElement.tagName` is
+  `BODY`; `.app` does not contain the modal.
+- `.app` carries the `inert` attribute only while `comparisonModalOpen`
+  is true; removed immediately on close.
+- A background header button could not receive focus via `.focus()`
+  while the modal was open (blocked by `inert`) — focus stayed on the
+  modal's own control.
+- Cycle 4's initial-focus (lands on "Zoom out"), Tab-trap (Shift+Tab
+  wraps to the last focusable element), and focus-restoration-on-close
+  behaviors all still work correctly with the modal now portaled.
+- One test artifact caught and corrected during verification: an earlier
+  check used a programmatic `.click()` on the trigger button without
+  first calling `.focus()`, which doesn't set `document.activeElement`
+  the way a real user click does in a real browser — this looked like a
+  focus-restoration regression until re-tested with an explicit
+  `.focus()` call first, which restored correctly. Not a real bug, just
+  a gap in how the synthetic click was constructed.
+- `tsc -b --noEmit` clean, `npm run lint` unchanged (11 warnings), `npm
+  test` 25/25 passing.
