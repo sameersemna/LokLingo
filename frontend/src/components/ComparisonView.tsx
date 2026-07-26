@@ -1,4 +1,8 @@
+import { useEffect, useRef } from "react"
 import { type ProductMode, DEMO_PRESETS } from "../constants"
+
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 interface ComparisonViewProps {
   ocrLoading: boolean
@@ -116,6 +120,38 @@ export function ComparisonView({
 }: ComparisonViewProps) {
   const inProgress = ocrLoading && compareOriginalUrl
   const resultsReady = !ocrLoading && compareOriginalUrl && compareOverlayUrl && compareLayoutUrl
+
+  const modalCardRef = useRef<HTMLDivElement>(null)
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!comparisonModalOpen) return
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null
+    const firstFocusable = modalCardRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
+    firstFocusable?.focus()
+    return () => {
+      previouslyFocusedRef.current?.focus?.()
+    }
+  }, [comparisonModalOpen])
+
+  const handleModalKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Tab") return
+    const card = modalCardRef.current
+    if (!card) return
+    const focusables = Array.from(card.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      el => el.offsetParent !== null,
+    )
+    if (focusables.length === 0) return
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
 
   return (
     <>
@@ -323,8 +359,9 @@ export function ComparisonView({
           aria-modal="true"
           aria-label="Translation comparison viewer"
           onClick={onCloseModal}
+          onKeyDown={handleModalKeyDown}
         >
-          <div className="comparison-modal-card" onClick={e => e.stopPropagation()}>
+          <div className="comparison-modal-card" ref={modalCardRef} onClick={e => e.stopPropagation()}>
             <div className="comparison-modal-header">
               <strong>Translation Quality Viewer</strong>
               <div className="comparison-modal-header-actions">

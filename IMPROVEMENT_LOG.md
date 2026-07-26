@@ -293,16 +293,124 @@ Rebuilt/redeployed `loklingo-frontend` and re-tested live:
 Finding 1 (error-message correctness) is a materially more consequential
 bug than Cycles 1–2's UI polish — it affects how every API failure in the
 app is communicated to users, so this cycle was worth running well past
-"diminishing returns." Continuing to Cycle 4 would mean either chasing
-progressively smaller cosmetic issues or attempting the structural
-`App.tsx` refactor flagged since Cycle 1, which is out of scope for a UI
-loop. Stopping here.
+"diminishing returns." Continued to Cycle 4 for the keyboard-navigation
+audit flagged as a follow-up above, rather than stopping.
+
+---
+
+## Cycle 4 — Comparison modal focus trap (2026-07-26)
+
+### Findings (Phase 1)
+
+Followed up on Cycle 3's deferred item: a full keyboard-only pass through
+the fullscreen comparison modal (`ComparisonView.tsx`). The modal already
+had correct `role="dialog"`, `aria-modal="true"`, and `aria-label`, and
+Escape-to-close was already wired up in `App.tsx`. Checked the rest of
+the WAI-ARIA APG Dialog (Modal) pattern's requirements by inspecting the
+code for a Tab handler and initial-focus/focus-restoration logic — none
+existed (`grep` for `"Tab"` key handling across `App.tsx`,
+`ComparisonView.tsx`, and the hooks came back empty).
+
+**[High, accessibility] No focus trap, no initial focus, no focus
+restoration.** Concretely, this meant:
+- Opening the modal did not move focus into it — keyboard focus stayed
+  wherever it was (typically still on the trigger button, but not
+  guaranteed).
+- Tab and Shift+Tab were not intercepted, so keyboard users could tab out
+  of the dialog into background page content (header buttons, language
+  pickers, etc.) while the modal overlay was still visually up — the
+  dialog wasn't actually modal for keyboard users despite
+  `aria-modal="true"` asserting that it is.
+- Closing the modal left focus wherever it happened to be (often lost to
+  `<body>`), instead of returning it to the element that opened the
+  dialog, breaking the user's "point of regard."
+
+Per the W3C WAI-ARIA Authoring Practices Guide's note on `aria-modal`:
+marking a dialog modal when the application doesn't actually make it
+behave modally "can... have severe negative ramifications" for
+assistive-technology users, since it's an explicit promise the code
+wasn't keeping.
+
+### Research (Phase 2)
+
+Confirmed current guidance against the live W3C APG Dialog (Modal)
+pattern page (`w3.org/WAI/ARIA/apg/patterns/dialog-modal/`) rather than
+relying on memory, since this is normative spec behavior, not a style
+preference:
+- On open, focus moves to an element inside the dialog (first focusable
+  element, absent a more specific reason to choose another).
+- Tab/Shift+Tab must not move focus outside the dialog while open —
+  wrapping from last→first and first→last.
+- On close, focus returns to the element that invoked the dialog.
+- Full AT-level modality also requires the background to be `inert`
+  (or `aria-hidden`), which this component doesn't yet do — see deferred
+  note below.
+
+### Implementation (Phase 3)
+
+`frontend/src/components/ComparisonView.tsx`:
+- Added `modalCardRef` (attached to `.comparison-modal-card`) and
+  `previouslyFocusedRef`.
+- A `useEffect` keyed on `comparisonModalOpen`: on open, stores
+  `document.activeElement`, then focuses the first focusable element
+  inside the modal card; the effect's cleanup (fires on close/unmount)
+  restores focus to the previously-stored element.
+- `handleModalKeyDown`, wired to the modal overlay's `onKeyDown`: on
+  `Tab`, finds all focusable, visible elements inside the modal card and
+  wraps focus between the first and last (Shift+Tab from first → last,
+  Tab from last → first), preventing default so native Tab can't escape
+  the dialog.
+- No new dependencies; self-contained to this one component, since it
+  already owned the modal's markup and didn't need `App.tsx` changes.
+
+### Verification (Phase 4)
+
+Rebuilt/redeployed `loklingo-frontend`. Since the puppeteer MCP tool
+available in this session doesn't expose a trusted key-press primitive,
+verified the trap logic itself (which is implemented in JS, not relying
+on native browser Tab behavior) by dispatching real `KeyboardEvent`
+`"Tab"`/`Shift+Tab` events at the modal and reading
+`document.activeElement` after each:
+- On open: `document.activeElement` was the "Zoom out" button (first
+  focusable element in the dialog) — confirmed via title/text.
+- Shift+Tab from "Zoom out": focus moved to "Compare Layout" (the last
+  focusable element) — confirmed wrap-to-last.
+- Tab from "Compare Layout": focus moved back to "Zoom out" — confirmed
+  wrap-to-first.
+- Clicking Close: focus returned to "Try demo examples" (the button that
+  had opened the demo gallery leading to this modal) — confirmed
+  restoration.
+- Visual check at 1440px: no rendering change, modal closes cleanly.
+- `npx tsc -b --noEmit` and `npm run lint`: clean, same 15 pre-existing
+  warnings, none new.
+
+### Deferred / follow-ups
+
+- The background page is not `inert`/`aria-hidden` while the modal is
+  open, so screen-reader users navigating by touch/virtual cursor (as
+  opposed to sequential Tab) can still reach content behind the overlay.
+  A full fix means rendering the modal via a portal outside the main
+  `.app` subtree so `inert` can be applied to the rest of the tree
+  without also making the modal itself inert — a bigger structural change
+  than this cycle's scope, flagged for a future pass.
+
+### Cycle decision
+
+Four cycles in: two mobile-layout fixes, one correctness bug affecting
+every API error message in the app, and now a real WCAG/ARIA modal-focus
+violation with all three of its required behaviors (trap, initial focus,
+restoration) verified working. This is a good stopping point — the
+remaining candidates are either the `inert`/portal refactor (structural,
+deferred above), the `App.tsx` size issue (structural, flagged since
+Cycle 1), or the broken `npm test` environment (unrelated tooling debt).
+None of those fit a UI-polish loop without ballooning scope. Stopping
+here.
 
 ---
 
 ## Summary
 
-**Cycles run**: 3 (plus Cycle 0 orientation).
+**Cycles run**: 4 (plus Cycle 0 orientation).
 
 **Changes made**:
 - *Accessibility / mobile UX*: collapsed 7 header utility buttons behind a
@@ -318,6 +426,11 @@ loop. Stopping here.
   in the app (`frontend/src/utils/http.ts`, `frontend/src/utils/errors.ts`).
 - *Mobile layout*: fixed comparison modal's view-mode toggle clipping off
   the edge of the viewport on phones (`frontend/src/App.css`).
+- *Accessibility*: added a real focus trap to the comparison modal —
+  initial focus on open, Tab/Shift+Tab wrap within the dialog, focus
+  restoration to the trigger on close — bringing it in line with the
+  WAI-ARIA Dialog (Modal) pattern its existing `aria-modal="true"` was
+  already claiming to follow (`frontend/src/components/ComparisonView.tsx`).
 
 **Verified**: TypeScript build clean, ESLint clean (no new warnings),
 manual visual check at 375/768/1440px in both themes, no regressions.
@@ -342,10 +455,14 @@ unrelated to this loop).
    environment because no `VITE_INTERNAL_TOKEN` is configured for the
    build — not a bug, but worth confirming that's intentional for this
    deployment rather than a missed config step.
-5. Text/Slider/Flash focus-order and screen-reader labeling inside the
-   comparison modal wasn't audited keystroke-by-keystroke (only checked
-   that `box-shadow` focus rings exist) — a full keyboard-only pass
-   through the modal would be a good Cycle 4 candidate.
+5. **Comparison modal's background isn't `inert`** while open — screen
+   readers navigating by touch/virtual cursor (not sequential Tab) can
+   still reach content behind the overlay, since it's a DOM sibling
+   rather than portaled out of the main app subtree. Fixing this properly
+   means rendering the modal via a portal so `inert` can be applied to
+   the rest of the tree without inert-ing the modal itself — a bigger
+   change than this loop's other fixes, good candidate for a dedicated
+   accessibility pass.
 
 **Process note**: an early `docker compose up -d loklingo-frontend` (no
 `--no-deps`) recreated `loklingo-ollama` as a dependency and dropped its
