@@ -49,7 +49,7 @@ export async function apiFetch<T = unknown>(
       }
       throw err
     }
-    if (err instanceof Error && err.message.startsWith("HTTP ")) {
+    if (err instanceof Error && err.name === "ApiError") {
       throw err
     }
     if (err instanceof Error) {

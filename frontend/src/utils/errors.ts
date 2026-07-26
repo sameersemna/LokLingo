@@ -38,5 +38,7 @@ export function buildApiError(_status: number, body: ApiErrorBody, fallback: str
     : typeof body.detail === "string" && body.detail.trim()
       ? body.detail
       : fallback
-  return new Error(msg)
+  const error = new Error(msg)
+  error.name = "ApiError"
+  return error
 }
