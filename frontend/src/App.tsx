@@ -14,6 +14,7 @@ import { useHistory } from "./hooks/useHistory"
 import { useComparisonModal } from "./hooks/useComparisonModal"
 import { useReadiness } from "./hooks/useReadiness"
 import { useAnimatedCount } from "./hooks/useAnimatedCount"
+import { useExportActions } from "./hooks/useExportActions"
 import { getErrorMessage } from "./utils/errors"
 import {
   isRenderableOCRBlock,
@@ -48,6 +49,7 @@ import { Header, WorkflowSwitcher, UploadHero, ImageProgress, IntelligencePanel,
 function App() {
   const [theme, setTheme] = useTheme()
   const { toasts, push: pushToast } = useToasts()
+  const { handleCopy: copyText, handleDownload, handleDownloadPDF: downloadPDF } = useExportActions(pushToast)
   const { source: sourceLang, target: targetLang, setSource: setSourceLang, setTarget: setTargetLang } = useLanguageSelection()
   const { show: showOCROverlay, staggerMs: ocrStaggerMs, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
   const { history, add: addHistoryEntry, clear: clearHistory } = useHistory()
@@ -403,80 +405,6 @@ function App() {
   }, [comparisonModalOpen])
 
   // Body scroll lock is managed by useComparisonModal.
-
-  const handleCopy = async () => {
-    if (!result) return
-    try {
-      await navigator.clipboard.writeText(result)
-      pushToast("Copied to clipboard", "success")
-    } catch {
-      pushToast("Copy failed — check browser permissions", "error")
-    }
-  }
-
-  const handleDownload = useCallback(async (url: string, basename: string) => {
-    try {
-      const res = await fetch(url)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const blob = await res.blob()
-      const ext = blob.type === "image/jpeg" ? "jpg"
-        : blob.type === "image/webp" ? "webp"
-        : blob.type === "image/gif"  ? "gif"
-        : "png"
-      const blobUrl = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = blobUrl
-      a.download = `${basename}.${ext}`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(blobUrl)
-    } catch (err) {
-      pushToast(getErrorMessage(err, "Download failed"), "error")
-    }
-  }, [pushToast])
-
-  const handleDownloadPDF = useCallback(async () => {
-    if (!resultImageUrl && !result.trim()) {
-      pushToast("Nothing to export", "error")
-      return
-    }
-
-    try {
-      const { jsPDF } = await import("jspdf")
-      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" })
-
-      if (resultImageUrl) {
-        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const img = new Image()
-          img.crossOrigin = "anonymous"
-          img.onload = () => resolve(img)
-          img.onerror = () => reject(new Error("Failed to prepare image for PDF export"))
-          img.src = resultImageUrl
-        })
-
-        const pageWidth = pdf.internal.pageSize.getWidth()
-        const pageHeight = pdf.internal.pageSize.getHeight()
-        const scale = Math.min((pageWidth - 48) / image.width, (pageHeight - 70) / image.height)
-        const drawWidth = image.width * scale
-        const drawHeight = image.height * scale
-        const x = (pageWidth - drawWidth) / 2
-        const y = (pageHeight - drawHeight) / 2
-        pdf.addImage(image, "PNG", x, y, drawWidth, drawHeight)
-      } else {
-        const pageWidth = pdf.internal.pageSize.getWidth()
-        const lines = pdf.splitTextToSize(result, pageWidth - 60)
-        pdf.setFont("helvetica", "normal")
-        pdf.setFontSize(11)
-        pdf.text(lines, 30, 40)
-      }
-
-      pdf.save("loklingo-export.pdf")
-      pushToast("PDF exported", "success")
-    } catch (err) {
-      pushToast(getErrorMessage(err, "PDF export failed"), "error")
-    }
-  }, [pushToast, result, resultImageUrl])
 
   const handleSwap = () => {
     if (sourceLang === "auto") return
@@ -1784,8 +1712,8 @@ function App() {
               resultImageLarge={resultImageLarge}
               compareOriginalUrl={compareOriginalUrl}
               onDownloadPNG={() => resultImageUrl && handleDownload(resultImageUrl, "loklingo-output")}
-              onDownloadPDF={handleDownloadPDF}
-              onCopy={handleCopy}
+              onDownloadPDF={() => downloadPDF(result, resultImageUrl)}
+              onCopy={() => copyText(result)}
               onOpenCompare={focus => openComparisonModal(focus)}
             />
           </div>
