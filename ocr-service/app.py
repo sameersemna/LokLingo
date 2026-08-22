@@ -129,11 +129,22 @@ app = FastAPI(
     lifespan=_log_startup_config,
 )
 
+# Restrict CORS to the trusted LAN hostname and localhost. The OCR service is
+# LAN-exposed on port 8000, so a wildcard origin would let any website on the
+# network issue cross-origin requests. Same-origin calls through the nginx
+# proxy (/ocr/) are unaffected.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "http://promaxgb10-6116:3000",
+        "http://promaxgb10-6116:13000",
+        "http://localhost:3000",
+        "http://localhost:13000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:13000",
+    ],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Token", "X-Internal-Token", "X-Request-Id"],
 )
 
 # ---------------------------------------------------------------------------

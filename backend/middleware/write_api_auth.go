@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -35,7 +36,8 @@ func WriteAPIAuth(appEnv, token string) fiber.Handler {
 			}
 		}
 
-		if headerToken != token {
+		// Constant-time comparison to avoid leaking token length/prefix via timing.
+		if subtle.ConstantTimeCompare([]byte(headerToken), []byte(token)) != 1 {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": "unauthorized",
 			})
