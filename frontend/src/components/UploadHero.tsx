@@ -187,7 +187,7 @@ export const UploadHero = memo(function UploadHero({
             <strong>{uploadDragActive ? "Release to upload" : uploadEmptyTitle}</strong>
             <span>{uploadEmptySupport}</span>
           </button>
-          <div className="upload-example-grid" aria-label="Example files">
+          <div className="upload-example-grid" role="group" aria-label="Example files">
             {/* Demo preset icons rendered by parent DemoGallery */}
           </div>
         </div>

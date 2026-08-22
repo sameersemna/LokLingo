@@ -111,6 +111,8 @@ services:
   loklingo-frontend:
     build:
       context: ./frontend
+      args:
+        VITE_INTERNAL_TOKEN: "${INTERNAL_TOKEN:-}"
     container_name: loklingo-frontend
     restart: unless-stopped
     # Non-root nginx listens on 8080 inside the container (see frontend/Dockerfile).

@@ -10,7 +10,7 @@ interface HistoryPanelProps {
 
 export function HistoryPanel({ history, onClearAll, onRestore, onClose, langLabel }: HistoryPanelProps) {
   return (
-    <section className="history-panel">
+    <aside className="history-panel" aria-label="Recent translations">
       <div className="history-header">
         <span>Recent translations</span>
         {history.length > 0 && (
@@ -40,6 +40,6 @@ export function HistoryPanel({ history, onClearAll, onRestore, onClose, langLabe
           ))}
         </ul>
       )}
-    </section>
+    </aside>
   )
 }

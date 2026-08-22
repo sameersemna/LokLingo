@@ -5,6 +5,12 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+
+# VITE_INTERNAL_TOKEN is baked into the bundle at build time so the frontend
+# can authenticate against the backend's internal routes (metrics, dead ops).
+# It is passed from docker-compose via build args (INTERNAL_TOKEN).
+ARG VITE_INTERNAL_TOKEN=""
+ENV VITE_INTERNAL_TOKEN=$VITE_INTERNAL_TOKEN
 RUN npm run build
 
 FROM nginx:1.27-alpine

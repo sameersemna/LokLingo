@@ -31,7 +31,7 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
   onFileChange,
 }: WorkflowSwitcherProps) {
   return (
-    <main className="translator">
+    <section className="translator" aria-label="Translation controls">
       <div className="lang-selectors">
         <div className="lang-select-wrap">
           <select
@@ -122,6 +122,6 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
           ))}
         </div>
       </section>
-    </main>
+    </section>
   )
 })

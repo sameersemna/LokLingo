@@ -48,7 +48,7 @@ test.describe('Accessibility (WCAG 2.2 AA) Audit', () => {
 
     // Tab through the first several focusable elements
     const focusableSelectors = [
-      'button, select, input, textarea, a[href]',
+      'button:visible, select:visible, input:visible, textarea:visible, a[href]:visible',
     ].join(', ');
 
     const focusable = page.locator(focusableSelectors).first();
