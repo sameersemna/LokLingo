@@ -1,10 +1,12 @@
+import { memo } from "react"
+
 interface PipelineWarningProps {
   warning: string | null
   onOpenReliability: () => void
   onDismiss: () => void
 }
 
-export function PipelineWarning({ warning, onOpenReliability, onDismiss }: PipelineWarningProps) {
+export const PipelineWarning = memo(function PipelineWarning({ warning, onOpenReliability, onDismiss }: PipelineWarningProps) {
   if (!warning) return null
   return (
     <section className="status-banner" role="status" aria-live="polite">
@@ -18,4 +20,4 @@ export function PipelineWarning({ warning, onOpenReliability, onDismiss }: Pipel
       </button>
     </section>
   )
-}
+})

@@ -1,3 +1,4 @@
+import { memo } from "react"
 import { LANGUAGES, TARGET_LANGUAGES, WORKFLOWS, type ProductMode, type InputWorkflow } from "../constants"
 
 interface WorkflowSwitcherProps {
@@ -15,7 +16,7 @@ interface WorkflowSwitcherProps {
   onFileChange: (file: File | null) => void
 }
 
-export function WorkflowSwitcher({
+export const WorkflowSwitcher = memo(function WorkflowSwitcher({
   source,
   target,
   detectedLang,
@@ -123,4 +124,4 @@ export function WorkflowSwitcher({
       </section>
     </main>
   )
-}
+})

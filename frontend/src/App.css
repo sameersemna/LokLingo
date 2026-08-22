@@ -10,6 +10,10 @@
   font-weight: 400;
   font-style: normal;
   font-display: swap;
+  /* Arabic script (U+0600–U+06FF, U+0750–U+077F, U+08A0–U+08FF, U+FB50–U+FDFF, U+FE70–U+FEFF).
+     Restricting to Arabic codepoints means the ~650 kB font is only fetched when
+     Arabic text is actually rendered, instead of on every page load. */
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
 }
 
 @font-face {
@@ -18,6 +22,7 @@
   font-weight: 400;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
 }
 
 @font-face {
@@ -26,6 +31,8 @@
   font-weight: 400;
   font-style: normal;
   font-display: swap;
+  /* Devanagari (U+0900–U+097F, U+A8E0–U+A8FF, U+1CD0–U+1CFF). */
+  unicode-range: U+0900-097F, U+A8E0-A8FF, U+1CD0-1CFF;
 }
 
 @font-face {
@@ -34,6 +41,8 @@
   font-weight: 400;
   font-style: normal;
   font-display: swap;
+  /* Bengali (U+0980–U+09FF). */
+  unicode-range: U+0980-09FF;
 }
 
 *,

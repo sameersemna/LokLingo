@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { memo, useEffect, useRef } from "react"
 import { createPortal } from "react-dom"
 import { type ProductMode, DEMO_PRESETS } from "../constants"
 
@@ -69,7 +69,7 @@ function spotLightText(stage: string, mode: string, ocrLoading: boolean): string
   return "Preparing visual comparison — overlay and layout are processing..."
 }
 
-export function ComparisonView({
+export const ComparisonView = memo(function ComparisonView({
   ocrLoading,
   imageProgressStage,
   mode,
@@ -686,4 +686,4 @@ export function ComparisonView({
       )}
     </>
   )
-}
+})

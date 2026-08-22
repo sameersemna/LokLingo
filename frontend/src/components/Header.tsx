@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { memo, useState } from "react"
 import { type DependencyStatus } from "../api/health"
 import { type OCRMetricsResponse } from "../api/metrics"
 
@@ -35,7 +35,7 @@ interface HeaderProps {
   onOpenReliability: () => void
 }
 
-export function Header({
+export const Header = memo(function Header({
   theme,
   onToggleTheme,
   showPdfJobs,
@@ -265,4 +265,4 @@ export function Header({
       </div>
     </header>
   )
-}
+})

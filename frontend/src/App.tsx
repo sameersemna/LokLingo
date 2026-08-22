@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { translate, translateImage, uploadPDF } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
 import { getOCRMetrics, getProviderMetrics, type MetricsWindow, type OCRMetricsResponse, type ProviderMetricsResponse } from "./api/metrics"
-import { PdfJobsPanel } from "./PdfJobsPanel"
-import { DeadLetterOpsPanel } from "./DeadLetterOpsPanel"
 import { saveStoredJob } from "./pdfJobsStorage"
 
 import { useTheme } from "./hooks/useTheme"
@@ -39,7 +37,16 @@ import {
   type ComparisonFocus,
 } from "./constants"
 import "./App.css"
-import { Header, WorkflowSwitcher, UploadHero, ImageProgress, IntelligencePanel, PipelineWarning, DemoGallery, HistoryPanel, ExportActions, ComparisonView, ReliabilityTelemetry } from "./components"
+import { Header, WorkflowSwitcher, UploadHero, ImageProgress, IntelligencePanel, PipelineWarning, ExportActions, ComparisonView } from "./components"
+
+// Heavy panels are only rendered on demand (toggled via the header). Lazy-load
+// them so their code is split into separate chunks and fetched only when the
+// user actually opens the panel, keeping the initial bundle lean.
+const PdfJobsPanel = lazy(() => import("./PdfJobsPanel").then(m => ({ default: m.PdfJobsPanel })))
+const DeadLetterOpsPanel = lazy(() => import("./DeadLetterOpsPanel").then(m => ({ default: m.DeadLetterOpsPanel })))
+const LazyReliabilityTelemetry = lazy(() => import("./components/ReliabilityTelemetry").then(m => ({ default: m.ReliabilityTelemetry })))
+const LazyHistoryPanel = lazy(() => import("./components/HistoryPanel").then(m => ({ default: m.HistoryPanel })))
+const LazyDemoGallery = lazy(() => import("./components/DemoGallery").then(m => ({ default: m.DemoGallery })))
 
 function App() {
   const [theme, setTheme] = useTheme()
@@ -825,62 +832,72 @@ function App() {
 
       {/* PDF Jobs panel */}
       {showPdfJobs && (
-        <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} />
+        <Suspense fallback={null}>
+          <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} />
+        </Suspense>
       )}
 
-      <DemoGallery
-        visible={showDemoGallery}
-        onClose={() => setShowDemoGallery(false)}
-        onSetWorkflow={w => setWorkflow(w)}
-        onLoadDemo={preset => {
-          setSourceLang(preset.source)
-          setTargetLang(preset.target)
-          fetch(preset.src)
-            .then(res => res.blob())
-            .then(blob => {
-              const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
-              runImageFile(file, preset.source, preset.target)
-            })
-            .catch(err => pushToast(`Failed to load demo: ${err.message}`, "error"))
-        }}
-      />
+      <Suspense fallback={null}>
+        <LazyDemoGallery
+          visible={showDemoGallery}
+          onClose={() => setShowDemoGallery(false)}
+          onSetWorkflow={w => setWorkflow(w)}
+          onLoadDemo={preset => {
+            setSourceLang(preset.source)
+            setTargetLang(preset.target)
+            fetch(preset.src)
+              .then(res => res.blob())
+              .then(blob => {
+                const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
+                runImageFile(file, preset.source, preset.target)
+              })
+              .catch(err => pushToast(`Failed to load demo: ${err.message}`, "error"))
+          }}
+        />
+      </Suspense>
 
-      <ReliabilityTelemetry
-        visible={showReliability}
-        window={metricsWindow}
-        onWindowChange={w => setMetricsWindow(w)}
-        loading={metricsLoading}
-        error={metricsError}
-        metrics={metrics}
-        providerMetrics={providerMetrics}
-        providerError={providerMetricsError}
-        updatedAt={metricsUpdatedAt}
-      />
+      <Suspense fallback={null}>
+        <LazyReliabilityTelemetry
+          visible={showReliability}
+          window={metricsWindow}
+          onWindowChange={w => setMetricsWindow(w)}
+          loading={metricsLoading}
+          error={metricsError}
+          metrics={metrics}
+          providerMetrics={providerMetrics}
+          providerError={providerMetricsError}
+          updatedAt={metricsUpdatedAt}
+        />
+      </Suspense>
 
       {showDeadOps && (
-        <DeadLetterOpsPanel onToast={pushToast} />
+        <Suspense fallback={null}>
+          <DeadLetterOpsPanel onToast={pushToast} />
+        </Suspense>
       )}
 
-      <HistoryPanel
-        history={history}
-        onClearAll={() => clearHistory()}
-        onRestore={h => {
-          setSourceText(h.sourceText)
-          setSourceLang(h.sourceLang)
-          setTargetLang(h.targetLang)
-          setResult(h.result)
-          setResultKind("translation")
-          setResultImageUrl(null)
-          if (compareOriginalUrl) {
-            URL.revokeObjectURL(compareOriginalUrl)
-            setCompareOriginalUrl(null)
-          }
-          setCompareOverlayUrl(null)
-          setCompareLayoutUrl(null)
-        }}
-        onClose={() => setShowHistory(false)}
-        langLabel={langLabel}
-      />
+      <Suspense fallback={null}>
+        <LazyHistoryPanel
+          history={history}
+          onClearAll={() => clearHistory()}
+          onRestore={h => {
+            setSourceText(h.sourceText)
+            setSourceLang(h.sourceLang)
+            setTargetLang(h.targetLang)
+            setResult(h.result)
+            setResultKind("translation")
+            setResultImageUrl(null)
+            if (compareOriginalUrl) {
+              URL.revokeObjectURL(compareOriginalUrl)
+              setCompareOriginalUrl(null)
+            }
+            setCompareOverlayUrl(null)
+            setCompareLayoutUrl(null)
+          }}
+          onClose={() => setShowHistory(false)}
+          langLabel={langLabel}
+        />
+      </Suspense>
 
       <WorkflowSwitcher
         source={sourceLang}

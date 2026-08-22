@@ -1,3 +1,4 @@
+import { memo } from "react"
 import { IMAGE_PROGRESS_STAGES } from "../constants"
 
 interface ImageProgressProps {
@@ -12,7 +13,7 @@ interface ImageProgressProps {
   translationProgressText: string
 }
 
-export function ImageProgress({
+export const ImageProgress = memo(function ImageProgress({
   status,
   stage,
   completedStages,
@@ -83,4 +84,4 @@ export function ImageProgress({
       </ol>
     </section>
   )
-}
+})

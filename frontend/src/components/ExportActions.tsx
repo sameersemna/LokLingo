@@ -1,3 +1,4 @@
+import { memo } from "react"
 import {
   type ComparisonFocus,
 } from "../constants"
@@ -14,7 +15,7 @@ interface ExportActionsProps {
   onOpenCompare: (focus: ComparisonFocus) => void
 }
 
-export function ExportActions({
+export const ExportActions = memo(function ExportActions({
   result,
   loading,
   resultImageUrl,
@@ -59,4 +60,4 @@ export function ExportActions({
       </div>
     </div>
   )
-}
+})

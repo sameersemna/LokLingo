@@ -1,3 +1,4 @@
+import { memo } from "react"
 import {
   TRUST_SIGNALS,
   OCR_STAGGER_PRESETS,
@@ -40,7 +41,7 @@ interface UploadHeroProps {
   formatFileSize: (bytes: number) => string
 }
 
-export function UploadHero({
+export const UploadHero = memo(function UploadHero({
   workflow,
   uploadSelection,
   uploadDragActive,
@@ -261,4 +262,4 @@ export function UploadHero({
       </div>
     </section>
   )
-}
+})

@@ -1,3 +1,5 @@
+import { memo } from "react"
+
 interface IntelligencePanelProps {
   regionCount: number
   languageCount: number
@@ -9,7 +11,7 @@ interface IntelligencePanelProps {
   langLabel: (code: string) => string
 }
 
-export function IntelligencePanel({
+export const IntelligencePanel = memo(function IntelligencePanel({
   regionCount,
   languageCount,
   languageCodes,
@@ -58,4 +60,4 @@ export function IntelligencePanel({
       </div>
     </section>
   )
-}
+})
