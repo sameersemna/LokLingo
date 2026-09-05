@@ -72,6 +72,34 @@ OCR_CORRECTION_TIMEOUT = _get_env_int("OCR_CORRECTION_TIMEOUT", 25)
 OCR_CORRECTION_MAX_RETRIES = _get_env_int("OCR_CORRECTION_MAX_RETRIES", 2)
 OCR_CORRECTION_BLOCK_CONFIDENCE_THRESHOLD = _get_env_float("OCR_CORRECTION_BLOCK_CONFIDENCE_THRESHOLD", 0.80)
 OCR_CORRECTION_CHUNK_CHARS = _get_env_int("OCR_CORRECTION_CHUNK_CHARS", 1400)
+# Languages eligible for LLM post-correction (ISO 639-1 codes, comma-separated).
+# "auto" allows correction when no explicit language hint was supplied.
+OCR_CORRECTION_LANGS = {
+    code.strip().lower()
+    for code in os.getenv("OCR_CORRECTION_LANGS", "de,auto").split(",")
+    if code.strip()
+} or {"de", "auto"}
+# Minimum difflib similarity ratio between an original OCR line and its LLM
+# correction. Lines below this are rejected as likely hallucinations — zero-shot
+# LLM correction can degrade CER (arXiv:2502.01205), so large rewrites of a
+# single line are treated as unsafe.
+OCR_CORRECTION_MIN_SIMILARITY = _get_env_float("OCR_CORRECTION_MIN_SIMILARITY", 0.55)
+# VLM OCR fallback: for Arabic-script languages, when all PaddleOCR
+# preprocessing variants score below the confidence threshold, re-OCR the page
+# with a vision-language model served by the local Ollama instance
+# (KITAB-Bench, arXiv:2502.14949: VLMs beat PaddleOCR by ~60% CER on Arabic).
+OCR_VLM_FALLBACK_ENABLED = os.getenv("OCR_VLM_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+OCR_VLM_MODEL = os.getenv("OCR_VLM_MODEL", "qwen2.5-vl").strip() or "qwen2.5-vl"
+OCR_VLM_LANGS = {
+    code.strip().lower()
+    for code in os.getenv("OCR_VLM_LANGS", "ar,ur,fa,he").split(",")
+    if code.strip()
+} or {"ar", "ur", "fa", "he"}
+OCR_VLM_CONFIDENCE_THRESHOLD = _get_env_float("OCR_VLM_CONFIDENCE_THRESHOLD", 0.72)
+OCR_VLM_TIMEOUT = _get_env_int("OCR_VLM_TIMEOUT", 60)
+# Confidence assigned to VLM-produced blocks: high enough to pass downstream
+# min-confidence filters, below 1.0 to stay distinguishable from verified text.
+OCR_VLM_BLOCK_CONFIDENCE = 0.85
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://loklingo-ollama:11434").strip() or "http://loklingo-ollama:11434"
 OCR_SHARED_STORAGE_DIR = os.path.realpath(os.getenv("OCR_SHARED_STORAGE_DIR", "")) if os.getenv("OCR_SHARED_STORAGE_DIR", "") else ""
 
@@ -307,6 +335,7 @@ class CorrectionStats:
     corrected_blocks: int = 0
     considered_blocks: int = 0
     retries: int = 0
+    rejected_lines: int = 0
     reason: str = ""
 
 
@@ -356,7 +385,7 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
         if not blocks:
             continue
 
-        ordered_blocks = _assign_reading_order_with_layout(blocks, image.width, image.height)
+        ordered_blocks = _assign_reading_order_with_layout(blocks, image.width, image.height, lang=lang)
         _, confidence = _summarise(ordered_blocks)
         if confidence > best_confidence:
             best_blocks = ordered_blocks
@@ -377,7 +406,32 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
                 "ocr_low_confidence_fallback",
                 extra={"lang": lang, "stage": best_stage, "confidence": best_confidence, "threshold": threshold},
             )
+        if _should_vlm_fallback(lang, best_confidence):
+            vlm_text = _vlm_ocr_image(image, lang)
+            if vlm_text:
+                vlm_blocks = _vlm_text_to_blocks(vlm_text, image, lang)
+                if vlm_blocks:
+                    logger.info(
+                        "vlm_ocr_fallback_succeeded",
+                        extra={"lang": lang, "model": OCR_VLM_MODEL, "paddle_confidence": best_confidence, "lines": len(vlm_blocks)},
+                    )
+                    return vlm_blocks
+            logger.warning(
+                "vlm_ocr_fallback_failed_using_paddle",
+                extra={"lang": lang, "model": OCR_VLM_MODEL, "paddle_confidence": best_confidence},
+            )
         return best_blocks
+    # PaddleOCR produced nothing at all — still try the VLM as a last resort.
+    if _should_vlm_fallback(lang, best_confidence):
+        vlm_text = _vlm_ocr_image(image, lang)
+        if vlm_text:
+            vlm_blocks = _vlm_text_to_blocks(vlm_text, image, lang)
+            if vlm_blocks:
+                logger.info(
+                    "vlm_ocr_fallback_succeeded",
+                    extra={"lang": lang, "model": OCR_VLM_MODEL, "paddle_confidence": best_confidence, "lines": len(vlm_blocks)},
+                )
+                return vlm_blocks
     return []
 
 
@@ -467,6 +521,117 @@ def _summarise(blocks: list[TextBlock]) -> tuple[str, float]:
     text = "\n".join(b.text for b in blocks)
     avg_conf = sum(b.confidence for b in blocks) / len(blocks)
     return text, round(avg_conf, 4)
+
+
+# ---------------------------------------------------------------------------
+# VLM OCR fallback (Arabic-script languages)
+# ---------------------------------------------------------------------------
+
+def _should_vlm_fallback(lang: str, best_confidence: float) -> bool:
+    """Gate for the VLM OCR fallback: enabled, eligible language, local Ollama,
+    and PaddleOCR's best result still below the VLM confidence threshold."""
+    if not OCR_VLM_FALLBACK_ENABLED:
+        return False
+    if (lang or "").strip().lower() not in OCR_VLM_LANGS:
+        return False
+    if not _is_local_ollama_url(OLLAMA_BASE_URL):
+        logger.warning("VLM OCR fallback disabled because OLLAMA_BASE_URL is not local: %s", OLLAMA_BASE_URL)
+        return False
+    return best_confidence < OCR_VLM_CONFIDENCE_THRESHOLD
+
+
+def _build_vlm_ocr_prompt(lang: str) -> str:
+    lang_name = _LANG_NAMES.get((lang or "").strip().lower(), "Arabic")
+    return (
+        f"Transcribe ALL text visible in this image. The document is primarily {lang_name}.\n"
+        "Rules:\n"
+        "1) Output plain text only — no commentary, no markdown fences, no JSON.\n"
+        "2) One line of text per output line, in natural reading order.\n"
+        "3) Preserve the original script exactly; never translate or transliterate.\n"
+        "4) If a word is illegible, make your best guess from context rather than skipping it.\n"
+    )
+
+
+def _vlm_ocr_image(image: Image.Image, lang: str) -> str | None:
+    """Re-OCR a full page image with the local VLM via Ollama /api/generate.
+
+    Returns the transcribed text, or None on any failure (caller falls back to
+    the best PaddleOCR result). Mirrors OllamaCorrectionProvider's HTTP pattern:
+    base64 PNG, temperature 0, one retry.
+    """
+    available, reason = _check_model_available_cached(_ollama_correction_provider, OCR_VLM_MODEL, OCR_VLM_TIMEOUT)
+    if not available:
+        logger.warning("vlm_ocr_model_unavailable: %s", reason)
+        return None
+
+    image_bytes = io.BytesIO()
+    image.convert("RGB").save(image_bytes, format="PNG")
+    encoded_image = base64.b64encode(image_bytes.getvalue()).decode("ascii")
+    endpoint = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+    payload = {
+        "model": OCR_VLM_MODEL,
+        "prompt": _build_vlm_ocr_prompt(lang),
+        "stream": False,
+        "images": [encoded_image],
+        "options": {
+            "temperature": 0,
+            "top_p": 0.2,
+            "num_predict": 4096,
+        },
+    }
+
+    last_error = ""
+    for attempt in range(2):
+        req = urllib_request.Request(
+            endpoint,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload).encode("utf-8"),
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=max(1, OCR_VLM_TIMEOUT)) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        answer = str(data.get("response") or "").strip()
+        if not answer:
+            last_error = "empty response from ollama"
+            continue
+        # Strip accidental markdown fences some VLM builds emit.
+        if answer.startswith("```"):
+            parts = answer.split("```")
+            if len(parts) >= 3:
+                answer = parts[1].strip()
+        if answer:
+            return answer
+        last_error = "empty transcription after cleaning"
+
+    logger.warning("vlm_ocr_failed: %s", last_error)
+    return None
+
+
+def _vlm_text_to_blocks(text: str, image: Image.Image, lang: str) -> list[TextBlock]:
+    """Convert VLM plain-text output into TextBlocks.
+
+    The VLM returns no geometry, so each line gets a full-width pseudo-bbox
+    with an evenly estimated row height; reading order is then assigned by the
+    standard layout pass (which applies RTL ordering for Arabic-script langs).
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    width = float(max(1, image.width))
+    row_height = float(max(1, image.height)) / len(lines)
+    blocks = [
+        TextBlock(
+            text=line,
+            confidence=OCR_VLM_BLOCK_CONFIDENCE,
+            bbox=[0.0, round(idx * row_height, 2), width, round((idx + 1) * row_height, 2)],
+        )
+        for idx, line in enumerate(lines)
+    ]
+    return _assign_reading_order_with_layout(blocks, image.width, image.height, lang=lang)
 
 
 def _normalize_image_dpi(image: Image.Image, source_dpi: int | None, target_dpi: int) -> Image.Image:
@@ -572,6 +737,16 @@ def _assign_reading_order(blocks: list[TextBlock]) -> list[TextBlock]:
     for index, block in enumerate(blocks, start=1):
         ordered.append(block.model_copy(update={"reading_order": index}))
     return ordered
+
+
+# Scripts read right-to-left: column order and within-row block order are
+# mirrored for these languages (PaddleOCR emits geometry in image space, so
+# without this, Arabic/Urdu pages come out in LTR order — see SO #79540177).
+RTL_LANGS: frozenset[str] = frozenset({"ar", "ur", "fa", "he", "ps", "sd", "ug"})
+
+
+def _is_rtl_lang(lang: str) -> bool:
+    return (lang or "").strip().lower() in RTL_LANGS
 
 
 # ---------------------------------------------------------------------------
@@ -719,16 +894,20 @@ def _classify_region(block: TextBlock, all_blocks: list[TextBlock], image_width:
     return "body", 0
 
 
-def _assign_reading_order_with_layout(blocks: list[TextBlock], image_width: int = 0, image_height: int = 0) -> list[TextBlock]:
+def _assign_reading_order_with_layout(blocks: list[TextBlock], image_width: int = 0, image_height: int = 0, lang: str = "") -> list[TextBlock]:
     """Assign reading_order, region_class, hierarchy_level and column_id.
 
     Reading order:
     1. Detect columns using x-gap analysis.
-    2. Within each column, sort top-to-bottom then left-to-right.
-    3. Columns are read left-to-right across the page.
+    2. Within each column, sort top-to-bottom then left-to-right
+       (right-to-left within a row for RTL scripts such as Arabic/Urdu).
+    3. Columns are read left-to-right across the page
+       (right-to-left for RTL scripts).
     """
     if not blocks:
         return []
+
+    rtl = _is_rtl_lang(lang)
 
     # Assign column IDs
     col_ids = _detect_columns(blocks, image_width)
@@ -750,11 +929,42 @@ def _assign_reading_order_with_layout(blocks: list[TextBlock], image_width: int 
     for item, col_id in classified:
         columns[col_id].append((item, col_id))
 
-    # Sort each column by y1 (top) then x1 (left)
-    for col in columns:
-        col.sort(key=lambda t: (t[0].bbox[1], t[0].bbox[0]))
+    # Sort each column by y1 (top); within a visual row, LTR scripts go
+    # left-to-right (x1 ascending), RTL scripts right-to-left (x1 descending).
+    # Blocks are clustered into rows when their vertical spans overlap.
+    def _sort_column(col: list[tuple[TextBlock, int]]) -> None:
+        col.sort(key=lambda t: (t[0].bbox[1], -t[0].bbox[0] if rtl else t[0].bbox[0]))
+        if not rtl:
+            return
+        # Row-cluster pass: group blocks whose y-spans overlap, then order each
+        # row strictly right-to-left so mixed-height blocks on one visual line
+        # keep correct RTL sequence.
+        rows: list[list[tuple[TextBlock, int]]] = []
+        for item in col:
+            y1, y2 = item[0].bbox[1], item[0].bbox[3]
+            placed = False
+            for row in rows:
+                ry1 = min(r[0].bbox[1] for r in row)
+                ry2 = max(r[0].bbox[3] for r in row)
+                if min(y2, ry2) - max(y1, ry1) > 0:
+                    row.append(item)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([item])
+        rows.sort(key=lambda row: min(r[0].bbox[1] for r in row))
+        for row in rows:
+            row.sort(key=lambda t: -t[0].bbox[0])
+        col[:] = [item for row in rows for item in row]
 
-    # Flatten columns left-to-right to get global reading order
+    for col in columns:
+        _sort_column(col)
+
+    # Flatten columns to get global reading order; RTL pages read columns
+    # right-to-left (highest column id first).
+    if rtl:
+        columns.reverse()
+
     ordered: list[TextBlock] = []
     order_counter = 1
     for col in columns:
@@ -988,7 +1198,20 @@ def _check_model_available_cached(provider: OCRCorrectionProvider, model: str, t
     return ok, reason
 
 
-def _build_german_cleanup_prompt(blocks: list[TextBlock], line_text: list[str]) -> str:
+_LANG_NAMES: dict[str, str] = {
+    "de": "German",
+    "ar": "Arabic",
+    "ur": "Urdu",
+    "fa": "Persian",
+    "hi": "Hindi",
+    "bn": "Bengali",
+    "en": "English",
+    "fr": "French",
+}
+
+
+def _build_cleanup_prompt(blocks: list[TextBlock], line_text: list[str], lang: str = "de") -> str:
+    lang_name = _LANG_NAMES.get((lang or "").strip().lower(), "German")
     lines = []
     for idx, block in enumerate(blocks):
         source = line_text[idx] if idx < len(line_text) else block.text
@@ -1001,14 +1224,15 @@ def _build_german_cleanup_prompt(blocks: list[TextBlock], line_text: list[str]) 
         })
     payload = json.dumps(lines, ensure_ascii=False)
     return (
-        "You are an OCR correction specialist for German bureaucracy letters, invoices, forms, and noisy scans.\n"
+        f"You are an OCR correction specialist for {lang_name} documents: bureaucracy letters, invoices, forms, and noisy scans.\n"
         "Correct ONLY OCR mistakes in the provided lines.\n"
         "Rules:\n"
         "1) Preserve line count exactly.\n"
         "2) Preserve table/form alignment and separators, including colon alignment and checkbox markers.\n"
         "3) Preserve line breaks exactly per line.\n"
         "4) Do not hallucinate new entities, dates, amounts, or addresses.\n"
-        "5) If uncertain, keep the original text unchanged.\n"
+        "5) Preserve the original script and writing direction; never transliterate or translate.\n"
+        "6) If uncertain, keep the original text unchanged.\n"
         "Return strictly JSON: {\"lines\":[\"...\", ...]} with exactly the same number of lines as input.\n"
         f"Input lines: {payload}"
     )
@@ -1065,6 +1289,7 @@ def _dict_from_stats(stats: CorrectionStats) -> dict[str, Any]:
         "corrected_blocks": stats.corrected_blocks,
         "considered_blocks": stats.considered_blocks,
         "retries": stats.retries,
+        "rejected_lines": stats.rejected_lines,
         "reason": stats.reason,
     }
 
@@ -1088,7 +1313,7 @@ def _should_apply_correction(*, lang: str, mode: str, enabled_override: bool | N
     if not OCR_CORRECTION_ENABLED:
         return False
     lang = (lang or "").strip().lower()
-    if lang not in {"de", "auto"}:
+    if lang not in OCR_CORRECTION_LANGS:
         return False
     # Keep Fast mode snappy; correction is primarily for Studio/layout and OCR-only extraction.
     return mode in {"layout", "ocr_only"}
@@ -1144,7 +1369,7 @@ def _apply_llm_correction(
     for idx_group in chunk_indexes:
         sub_blocks = [corrected[idx] for idx in idx_group]
         sub_lines = [corrected[idx].text for idx in idx_group]
-        prompt = _build_german_cleanup_prompt(sub_blocks, sub_lines)
+        prompt = _build_cleanup_prompt(sub_blocks, sub_lines, lang=lang)
         corrected_lines, retries, err = provider.correct_chunk(
             model=stats.model,
             prompt=prompt,
@@ -1166,6 +1391,19 @@ def _apply_llm_correction(
             after_text = corrected_lines[local_idx]
             low_before.append(before.confidence)
             if after_text != before_text:
+                # Hallucination guard: reject corrections that diverge too far
+                # from the raw OCR line. Zero-shot LLM correction can degrade
+                # CER (arXiv:2502.01205); a low character-level similarity is a
+                # strong signal the model rewrote rather than corrected.
+                similarity = difflib.SequenceMatcher(None, before_text, after_text).ratio()
+                if similarity < OCR_CORRECTION_MIN_SIMILARITY:
+                    stats.rejected_lines += 1
+                    logger.info(
+                        "ocr_correction_line_rejected",
+                        extra={"lang": lang, "similarity": round(similarity, 4), "threshold": OCR_CORRECTION_MIN_SIMILARITY},
+                    )
+                    low_after.append(before.confidence)
+                    continue
                 total_changed_chars += abs(len(after_text) - len(before_text)) + sum(
                     1 for a, b in zip(before_text, after_text) if a != b
                 )
@@ -1486,6 +1724,9 @@ def health() -> dict:
         "models_warmed_count": len(warmed_models),
         "ocr_correction_enabled": OCR_CORRECTION_ENABLED,
         "ocr_correction_model": OCR_CORRECTION_MODEL,
+        "ocr_vlm_fallback_enabled": OCR_VLM_FALLBACK_ENABLED,
+        "ocr_vlm_model": OCR_VLM_MODEL,
+        "ocr_vlm_langs": sorted(OCR_VLM_LANGS),
         "ollama_base_url": OLLAMA_BASE_URL,
         "ollama_local_only": _is_local_ollama_url(OLLAMA_BASE_URL),
         "ocr_correction_metrics": {

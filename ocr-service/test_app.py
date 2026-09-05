@@ -668,5 +668,207 @@ class TestHealthEndpoint(unittest.TestCase):
         self.assertIsInstance(resp.json()["gpu_available"], bool)
 
 
+# ---------------------------------------------------------------------------
+# Tests: RTL reading order
+# ---------------------------------------------------------------------------
+
+class TestRTLReadingOrder(unittest.TestCase):
+    def _block(self, text: str, x1: float, y1: float, x2: float, y2: float):
+        return ocr_app.TextBlock(text=text, confidence=0.9, bbox=[x1, y1, x2, y2])
+
+    def test_ltr_columns_left_to_right(self):
+        # Two columns: left column block and right column block
+        blocks = [
+            self._block("right-col", 500, 10, 590, 30),
+            self._block("left-col", 10, 10, 90, 30),
+        ]
+        ordered = ocr_app._assign_reading_order_with_layout(blocks, image_width=600, image_height=100, lang="en")
+        self.assertEqual(ordered[0].text, "left-col")
+        self.assertEqual(ordered[1].text, "right-col")
+
+    def test_rtl_columns_right_to_left(self):
+        blocks = [
+            self._block("right-col", 500, 10, 590, 30),
+            self._block("left-col", 10, 10, 90, 30),
+        ]
+        ordered = ocr_app._assign_reading_order_with_layout(blocks, image_width=600, image_height=100, lang="ar")
+        self.assertEqual(ordered[0].text, "right-col")
+        self.assertEqual(ordered[1].text, "left-col")
+
+    def test_rtl_within_row_right_to_left(self):
+        # Same visual row (overlapping y-spans), two blocks side by side
+        blocks = [
+            self._block("left-word", 10, 10, 90, 30),
+            self._block("right-word", 110, 12, 190, 32),
+        ]
+        ordered = ocr_app._assign_reading_order_with_layout(blocks, image_width=200, image_height=100, lang="ur")
+        self.assertEqual(ordered[0].text, "right-word")
+        self.assertEqual(ordered[1].text, "left-word")
+
+    def test_ltr_within_row_unchanged(self):
+        blocks = [
+            self._block("left-word", 10, 10, 90, 30),
+            self._block("right-word", 110, 12, 190, 32),
+        ]
+        ordered = ocr_app._assign_reading_order_with_layout(blocks, image_width=200, image_height=100, lang="de")
+        self.assertEqual(ordered[0].text, "left-word")
+        self.assertEqual(ordered[1].text, "right-word")
+
+    def test_is_rtl_lang(self):
+        self.assertTrue(ocr_app._is_rtl_lang("ar"))
+        self.assertTrue(ocr_app._is_rtl_lang("UR"))
+        self.assertFalse(ocr_app._is_rtl_lang("de"))
+        self.assertFalse(ocr_app._is_rtl_lang(""))
+
+
+# ---------------------------------------------------------------------------
+# Tests: LLM correction similarity guard + language gate
+# ---------------------------------------------------------------------------
+
+class _FakeCorrectionProvider:
+    """Provider stub returning canned corrected lines."""
+
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+
+    def name(self) -> str:
+        return "fake"
+
+    def check_model_available(self, model: str, timeout_sec: int) -> tuple[bool, str]:
+        return True, ""
+
+    def correct_chunk(self, *, model, prompt, image, timeout_sec, max_retries):
+        return self._lines, 0, None
+
+
+class TestCorrectionSimilarityGuard(unittest.TestCase):
+    def _blocks(self, texts: list[str], confidence: float = 0.5):
+        return [
+            ocr_app.TextBlock(text=t, confidence=confidence, bbox=[0.0, 0.0, 10.0, 10.0])
+            for t in texts
+        ]
+
+    def _run_correction(self, raw: list[str], corrected: list[str]):
+        provider = _FakeCorrectionProvider(corrected)
+        with mock.patch.object(ocr_app, "OCR_CORRECTION_ENABLED", True), \
+             mock.patch.object(ocr_app, "_get_correction_provider", return_value=provider), \
+             mock.patch.object(ocr_app, "_check_model_available_cached", return_value=(True, "")):
+            return ocr_app._apply_llm_correction(
+                image=_fake_pil_image(),
+                blocks=self._blocks(raw),
+                lang="de",
+                mode="ocr_only",
+                enabled_override=None,
+                model_override=None,
+            )
+
+    def test_hallucinated_line_rejected(self):
+        raw = ["Rechnung Nr. 1245"]
+        hallucinated = ["Completely different sentence with no overlap"]
+        blocks, stats, _ = self._run_correction(raw, hallucinated)
+        self.assertEqual(blocks[0].text, raw[0])
+        self.assertEqual(stats.rejected_lines, 1)
+        self.assertFalse(stats.applied)
+
+    def test_plausible_correction_accepted(self):
+        raw = ["Rechnung Nr. I245"]  # OCR confuses 1/I
+        fixed = ["Rechnung Nr. 1245"]
+        blocks, stats, _ = self._run_correction(raw, fixed)
+        self.assertEqual(blocks[0].text, fixed[0])
+        self.assertEqual(stats.rejected_lines, 0)
+        self.assertTrue(stats.applied)
+
+    def test_correction_language_gate(self):
+        self.assertTrue(ocr_app._should_apply_correction(lang="de", mode="ocr_only", enabled_override=None) or not ocr_app.OCR_CORRECTION_ENABLED)
+        with mock.patch.object(ocr_app, "OCR_CORRECTION_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_CORRECTION_LANGS", {"de", "auto", "ar"}):
+            self.assertTrue(ocr_app._should_apply_correction(lang="ar", mode="ocr_only", enabled_override=None))
+            self.assertFalse(ocr_app._should_apply_correction(lang="fr", mode="ocr_only", enabled_override=None))
+            self.assertFalse(ocr_app._should_apply_correction(lang="ar", mode="fast", enabled_override=None))
+
+    def test_correction_stats_include_rejected_lines(self):
+        stats = ocr_app.CorrectionStats(rejected_lines=3)
+        payload = ocr_app._dict_from_stats(stats)
+        self.assertEqual(payload["rejected_lines"], 3)
+
+
+# ---------------------------------------------------------------------------
+# Tests: VLM OCR fallback
+# ---------------------------------------------------------------------------
+
+class TestVLMFallback(unittest.TestCase):
+    def test_gate_requires_enabled(self):
+        with mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", False):
+            self.assertFalse(ocr_app._should_vlm_fallback("ar", 0.1))
+
+    def test_gate_requires_eligible_lang(self):
+        with mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_VLM_LANGS", {"ar", "ur"}):
+            self.assertFalse(ocr_app._should_vlm_fallback("de", 0.1))
+            self.assertTrue(ocr_app._should_vlm_fallback("ar", 0.1))
+
+    def test_gate_requires_low_confidence(self):
+        with mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_VLM_CONFIDENCE_THRESHOLD", 0.72):
+            self.assertFalse(ocr_app._should_vlm_fallback("ar", 0.9))
+            self.assertTrue(ocr_app._should_vlm_fallback("ar", 0.5))
+
+    def test_vlm_text_to_blocks_shape_and_rtl_order(self):
+        image = _fake_pil_image()
+        blocks = ocr_app._vlm_text_to_blocks("سطر أول\nسطر ثان", image, "ar")
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0].text, "سطر أول")
+        self.assertEqual(blocks[0].reading_order, 1)
+        self.assertAlmostEqual(blocks[0].confidence, ocr_app.OCR_VLM_BLOCK_CONFIDENCE, places=4)
+        self.assertEqual(blocks[0].bbox[2], float(image.width))
+
+    def test_vlm_text_to_blocks_empty(self):
+        self.assertEqual(ocr_app._vlm_text_to_blocks("  \n  ", _fake_pil_image(), "ar"), [])
+
+    def test_fallback_replaces_low_confidence_paddle(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["garbled"], confidence=0.3))
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+             mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_VLM_LANGS", {"ar"}), \
+             mock.patch.object(ocr_app, "_vlm_ocr_image", return_value="نص عربي سليم"):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "ar", min_confidence=0.8)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].text, "نص عربي سليم")
+
+    def test_fallback_failure_keeps_paddle_result(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["garbled"], confidence=0.3))
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+             mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_VLM_LANGS", {"ar"}), \
+             mock.patch.object(ocr_app, "_vlm_ocr_image", return_value=None):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "ar", min_confidence=0.8)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].text, "garbled")
+
+    def test_fallback_not_triggered_for_ineligible_lang(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["unsicher"], confidence=0.3))
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+             mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_VLM_LANGS", {"ar"}), \
+             mock.patch.object(ocr_app, "_vlm_ocr_image", return_value="should not be used") as vlm_mock:
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "de", min_confidence=0.8)
+        vlm_mock.assert_not_called()
+        self.assertEqual(blocks[0].text, "unsicher")
+
+    def test_health_includes_vlm_fields(self):
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            self.skipTest("fastapi TestClient not available")
+        client = TestClient(ocr_app.app)
+        body = client.get("/health").json()
+        self.assertIn("ocr_vlm_fallback_enabled", body)
+        self.assertIn("ocr_vlm_model", body)
+        self.assertIn("ocr_vlm_langs", body)
+
+
 if __name__ == "__main__":
     unittest.main()

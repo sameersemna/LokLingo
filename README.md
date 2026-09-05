@@ -192,6 +192,13 @@ Important variables:
 * `OCR_CORRECTION_RETRIES`: retry attempts for correction calls (default `1`)
 * `OCR_CORRECTION_LOW_CONFIDENCE_THRESHOLD`: confidence threshold used to select candidate blocks for correction (default `0.78`)
 * `OCR_CORRECTION_MAX_CHUNK_BLOCKS`: max OCR blocks per correction chunk (default `24`)
+* `OCR_CORRECTION_LANGS`: comma-separated ISO 639-1 codes eligible for LLM post-correction; `auto` covers requests without a language hint (default `de,auto`)
+* `OCR_CORRECTION_MIN_SIMILARITY`: minimum character-level similarity ratio between an OCR line and its LLM correction; lower-similarity lines are rejected as likely hallucinations (default `0.55`)
+* `OCR_VLM_FALLBACK_ENABLED`: re-OCR low-confidence pages with a local vision-language model via Ollama (default `false`)
+* `OCR_VLM_MODEL`: VLM used for the fallback (default `qwen2.5-vl`)
+* `OCR_VLM_LANGS`: languages eligible for VLM fallback (default `ar,ur,fa,he`)
+* `OCR_VLM_CONFIDENCE_THRESHOLD`: page-level PaddleOCR confidence below which the VLM fallback triggers (default `0.72`)
+* `OCR_VLM_TIMEOUT`: per-call VLM timeout in seconds (default `60`)
 * `WRITE_API_TOKEN`: protects write routes (`POST /api/v1/translate*`, `POST /api/v1/jobs*`); required in `production`, optional in `development`
 * `GLOBAL_RATE_LIMIT_PER_MINUTE`: per-IP request cap for non-health routes, defaults to `120`
 * `WRITE_RATE_LIMIT_PER_MINUTE`: per-IP cap for authenticated write requests, defaults to `40`
@@ -263,7 +270,7 @@ In production, `REDIS_URL` must point to an external Redis instance.
 
 ## 🤖 Local OCR Correction With Ollama
 
-OCR correction is local-only and designed to improve German scanned document quality by correcting only low-confidence OCR regions.
+OCR correction is local-only and designed to improve scanned document quality by correcting only low-confidence OCR regions. It ships with a German fine-tuned model by default; additional languages can be enabled via `OCR_CORRECTION_LANGS` with a suitable per-language model. Corrected lines that diverge too far from the raw OCR output are rejected automatically (`OCR_CORRECTION_MIN_SIMILARITY`) to guard against LLM hallucination. Arabic-script languages (`ar`, `ur`, `fa`, `he`) use right-to-left reading order automatically.
 
 Pull required local models:
 
@@ -290,6 +297,15 @@ curl http://localhost:8000/health
 ```
 
 The OCR health payload includes correction status, selected model, and cumulative correction metrics. If Ollama is unavailable or the model is missing, OCR falls back to raw PaddleOCR output without failing the request.
+
+### VLM OCR fallback for Arabic-script documents
+
+PaddleOCR's Arabic recognition is weak (KITAB-Bench, ACL 2025: ~0.79 CER vs. ~0.46 for Qwen2.5-VL). When `OCR_VLM_FALLBACK_ENABLED=true`, pages in `OCR_VLM_LANGS` whose PaddleOCR confidence stays below `OCR_VLM_CONFIDENCE_THRESHOLD` after all preprocessing variants are re-OCR'd with the local VLM (`qwen2.5-vl` by default — already pulled above). The VLM returns plain text without geometry, so blocks get full-width pseudo-bboxes and fixed confidence `0.85`; RTL reading order is applied automatically. Any VLM failure (Ollama down, model missing, timeout, empty response) degrades gracefully to the best PaddleOCR result.
+
+```bash
+OCR_VLM_FALLBACK_ENABLED=true
+OCR_VLM_MODEL=qwen2.5-vl
+```
 
 ## ✅ Smoke Test
 
