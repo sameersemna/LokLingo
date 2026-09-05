@@ -199,6 +199,11 @@ Important variables:
 * `OCR_VLM_LANGS`: languages eligible for VLM fallback (default `ar,ur,fa,he`)
 * `OCR_VLM_CONFIDENCE_THRESHOLD`: page-level PaddleOCR confidence below which the VLM fallback triggers (default `0.72`)
 * `OCR_VLM_TIMEOUT`: per-call VLM timeout in seconds (default `60`)
+* `OCR_SURYA_ENABLED`: enables the optional Surya OCR engine as a middle fallback tier (requires `surya-ocr` + torch in the OCR image; default `false`)
+* `OCR_SURYA_LANGS`: languages eligible for Surya fallback (default `ar,ur,hi,bn,fa`)
+* `OCR_SURYA_CONFIDENCE_THRESHOLD`: page-level confidence below which Surya triggers (default `0.72`)
+* `OCR_ENSEMBLE_ENABLED`: merge PaddleOCR and Surya blocks by bbox overlap, higher confidence wins (default `false`)
+* `OCR_ENSEMBLE_IOU_THRESHOLD`: minimum bbox IoU to consider two blocks the same line (default `0.3`)
 * `WRITE_API_TOKEN`: protects write routes (`POST /api/v1/translate*`, `POST /api/v1/jobs*`); required in `production`, optional in `development`
 * `GLOBAL_RATE_LIMIT_PER_MINUTE`: per-IP request cap for non-health routes, defaults to `120`
 * `WRITE_RATE_LIMIT_PER_MINUTE`: per-IP cap for authenticated write requests, defaults to `40`
@@ -306,6 +311,20 @@ PaddleOCR's Arabic recognition is weak (KITAB-Bench, ACL 2025: ~0.79 CER vs. ~0.
 OCR_VLM_FALLBACK_ENABLED=true
 OCR_VLM_MODEL=qwen2.5-vl
 ```
+
+### Surya engine + ensemble
+
+The full fallback chain for low-confidence pages is: PaddleOCR preprocessing variants → Surya (optional, real geometry, 91 languages) → VLM (text-only, last resort). With `OCR_ENSEMBLE_ENABLED=true`, PaddleOCR and Surya blocks are merged per-line by bbox overlap, keeping the higher-confidence text. Surya requires extra dependencies (`surya-ocr`, torch) in the OCR image; if the package is missing, the tier is skipped automatically.
+
+### Measuring OCR quality
+
+Use the eval harness with image/reference-text pairs to track CER/WER per language and validate engine or config changes:
+
+```bash
+python ocr-service/eval_ocr.py eval-data --lang ar --json-out reports/ar-baseline.json
+```
+
+See [guide/ocr-fine-tuning-workflow.md](guide/ocr-fine-tuning-workflow.md) for the full measure → configure → fine-tune workflow.
 
 ## ✅ Smoke Test
 

@@ -870,5 +870,105 @@ class TestVLMFallback(unittest.TestCase):
         self.assertIn("ocr_vlm_langs", body)
 
 
+# ---------------------------------------------------------------------------
+# Tests: Surya engine + ensemble merge
+# ---------------------------------------------------------------------------
+
+class TestSuryaFallback(unittest.TestCase):
+    def test_gate(self):
+        with mock.patch.object(ocr_app, "OCR_SURYA_ENABLED", False):
+            self.assertFalse(ocr_app._should_surya_fallback("ar", 0.1))
+        with mock.patch.object(ocr_app, "OCR_SURYA_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_SURYA_LANGS", {"ar", "hi"}), \
+             mock.patch.object(ocr_app, "OCR_SURYA_CONFIDENCE_THRESHOLD", 0.72):
+            self.assertTrue(ocr_app._should_surya_fallback("ar", 0.5))
+            self.assertFalse(ocr_app._should_surya_fallback("de", 0.5))
+            self.assertFalse(ocr_app._should_surya_fallback("ar", 0.9))
+
+    def test_surya_replaces_low_confidence_paddle(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["garbled"], confidence=0.3))
+        surya_blocks = [ocr_app.TextBlock(text="نص سليم", confidence=0.9, bbox=[0.0, 0.0, 100.0, 50.0])]
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+             mock.patch.object(ocr_app, "OCR_SURYA_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_SURYA_LANGS", {"ar"}), \
+             mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", False), \
+             mock.patch.object(ocr_app, "OCR_ENSEMBLE_ENABLED", False), \
+             mock.patch.object(ocr_app, "_surya_ocr_image", return_value=surya_blocks):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "ar", min_confidence=0.8)
+        self.assertEqual(blocks[0].text, "نص سليم")
+
+    def test_surya_failure_falls_through_to_paddle(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["garbled"], confidence=0.3))
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+             mock.patch.object(ocr_app, "OCR_SURYA_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_SURYA_LANGS", {"ar"}), \
+             mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", False), \
+             mock.patch.object(ocr_app, "_surya_ocr_image", return_value=None):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "ar", min_confidence=0.8)
+        self.assertEqual(blocks[0].text, "garbled")
+
+
+class TestEnsembleMerge(unittest.TestCase):
+    def _block(self, text, conf, bbox):
+        return ocr_app.TextBlock(text=text, confidence=conf, bbox=bbox)
+
+    def test_iou(self):
+        a = [0.0, 0.0, 10.0, 10.0]
+        b = [5.0, 0.0, 15.0, 10.0]
+        self.assertAlmostEqual(ocr_app._bbox_iou(a, b), 1 / 3, places=3)
+        self.assertEqual(ocr_app._bbox_iou(a, [20.0, 0.0, 30.0, 10.0]), 0.0)
+
+    def test_higher_confidence_wins_on_overlap(self):
+        paddle = [self._block("paddle-text", 0.5, [0, 0, 100, 20])]
+        surya = [self._block("surya-text", 0.9, [5, 2, 95, 18])]
+        merged = ocr_app._ensemble_merge(paddle, surya)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].text, "surya-text")
+        self.assertEqual(merged[0].reading_order, 1)
+
+    def test_paddle_kept_when_more_confident(self):
+        paddle = [self._block("paddle-text", 0.95, [0, 0, 100, 20])]
+        surya = [self._block("surya-text", 0.6, [5, 2, 95, 18])]
+        merged = ocr_app._ensemble_merge(paddle, surya)
+        self.assertEqual(merged[0].text, "paddle-text")
+
+    def test_unmatched_blocks_kept(self):
+        paddle = [self._block("p1", 0.9, [0, 0, 100, 20])]
+        surya = [self._block("s1", 0.9, [0, 100, 100, 120])]
+        merged = ocr_app._ensemble_merge(paddle, surya)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual([b.reading_order for b in merged], [1, 2])
+
+
+# ---------------------------------------------------------------------------
+# Tests: eval harness metrics
+# ---------------------------------------------------------------------------
+
+class TestEvalMetrics(unittest.TestCase):
+    def test_cer_wer_perfect(self):
+        import eval_ocr
+        self.assertEqual(eval_ocr.cer("مرحبا بالعالم", "مرحبا بالعالم"), 0.0)
+        self.assertEqual(eval_ocr.wer("مرحبا بالعالم", "مرحبا بالعالم"), 0.0)
+
+    def test_cer_single_substitution(self):
+        import eval_ocr
+        self.assertAlmostEqual(eval_ocr.cer("abcde", "abXde"), 0.2, places=4)
+
+    def test_wer_single_substitution(self):
+        import eval_ocr
+        self.assertAlmostEqual(eval_ocr.wer("one two three four", "one two X four"), 0.25, places=4)
+
+    def test_empty_reference(self):
+        import eval_ocr
+        self.assertEqual(eval_ocr.cer("", ""), 0.0)
+        self.assertEqual(eval_ocr.cer("", "extra"), 1.0)
+
+    def test_normalization_collapses_whitespace(self):
+        import eval_ocr
+        self.assertEqual(eval_ocr.cer("a  b\n c", "a b c"), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

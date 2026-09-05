@@ -100,6 +100,22 @@ OCR_VLM_TIMEOUT = _get_env_int("OCR_VLM_TIMEOUT", 60)
 # Confidence assigned to VLM-produced blocks: high enough to pass downstream
 # min-confidence filters, below 1.0 to stay distinguishable from verified text.
 OCR_VLM_BLOCK_CONFIDENCE = 0.85
+# Surya OCR engine (optional, lazy-loaded): multilingual line-level OCR
+# (91 languages, incl. Arabic/Devanagari/Bengali) as a middle fallback tier
+# between PaddleOCR and the VLM. Requires the surya-ocr package + torch;
+# absent package degrades gracefully to the next tier.
+OCR_SURYA_ENABLED = os.getenv("OCR_SURYA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+OCR_SURYA_LANGS = {
+    code.strip().lower()
+    for code in os.getenv("OCR_SURYA_LANGS", "ar,ur,hi,bn,fa").split(",")
+    if code.strip()
+} or {"ar", "ur", "hi", "bn", "fa"}
+OCR_SURYA_CONFIDENCE_THRESHOLD = _get_env_float("OCR_SURYA_CONFIDENCE_THRESHOLD", 0.72)
+# Ensemble reconciliation: when both PaddleOCR and Surya produce blocks for a
+# low-confidence page, merge per-block by bbox overlap, keeping the
+# higher-confidence text (ensemble voting improves char accuracy — arXiv:1802.10038).
+OCR_ENSEMBLE_ENABLED = os.getenv("OCR_ENSEMBLE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+OCR_ENSEMBLE_IOU_THRESHOLD = _get_env_float("OCR_ENSEMBLE_IOU_THRESHOLD", 0.3)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://loklingo-ollama:11434").strip() or "http://loklingo-ollama:11434"
 OCR_SHARED_STORAGE_DIR = os.path.realpath(os.getenv("OCR_SHARED_STORAGE_DIR", "")) if os.getenv("OCR_SHARED_STORAGE_DIR", "") else ""
 
@@ -406,6 +422,22 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
                 "ocr_low_confidence_fallback",
                 extra={"lang": lang, "stage": best_stage, "confidence": best_confidence, "threshold": threshold},
             )
+        # Middle tier: Surya multilingual engine (real geometry, cheaper than VLM)
+        if _should_surya_fallback(lang, best_confidence):
+            surya_blocks = _surya_ocr_image(image, lang)
+            if surya_blocks:
+                if OCR_ENSEMBLE_ENABLED and best_blocks:
+                    merged = _ensemble_merge(best_blocks, surya_blocks)
+                    logger.info(
+                        "ocr_ensemble_merged",
+                        extra={"lang": lang, "paddle_blocks": len(best_blocks), "surya_blocks": len(surya_blocks), "merged_blocks": len(merged)},
+                    )
+                    return merged
+                logger.info(
+                    "surya_ocr_fallback_succeeded",
+                    extra={"lang": lang, "paddle_confidence": best_confidence, "blocks": len(surya_blocks)},
+                )
+                return surya_blocks
         if _should_vlm_fallback(lang, best_confidence):
             vlm_text = _vlm_ocr_image(image, lang)
             if vlm_text:
@@ -421,7 +453,12 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
                 extra={"lang": lang, "model": OCR_VLM_MODEL, "paddle_confidence": best_confidence},
             )
         return best_blocks
-    # PaddleOCR produced nothing at all — still try the VLM as a last resort.
+    # PaddleOCR produced nothing at all — try Surya, then the VLM as a last resort.
+    if _should_surya_fallback(lang, best_confidence):
+        surya_blocks = _surya_ocr_image(image, lang)
+        if surya_blocks:
+            logger.info("surya_ocr_fallback_succeeded", extra={"lang": lang, "blocks": len(surya_blocks)})
+            return surya_blocks
     if _should_vlm_fallback(lang, best_confidence):
         vlm_text = _vlm_ocr_image(image, lang)
         if vlm_text:
@@ -632,6 +669,147 @@ def _vlm_text_to_blocks(text: str, image: Image.Image, lang: str) -> list[TextBl
         for idx, line in enumerate(lines)
     ]
     return _assign_reading_order_with_layout(blocks, image.width, image.height, lang=lang)
+
+
+# ---------------------------------------------------------------------------
+# Surya OCR engine (optional, lazy-loaded)
+# ---------------------------------------------------------------------------
+
+_surya_predictor: Any = None
+_surya_lock = threading.Lock()
+_surya_available: bool | None = None
+
+
+def _get_surya_predictor() -> Any:
+    """Return a cached Surya RecognitionPredictor, or None if unavailable.
+
+    Lazy import keeps the OCR image lean when Surya is not installed/enabled.
+    """
+    global _surya_predictor, _surya_available
+    if _surya_available is False:
+        return None
+    with _surya_lock:
+        if _surya_predictor is not None:
+            return _surya_predictor
+        try:
+            from surya.inference import SuryaInferenceManager  # type: ignore
+            from surya.recognition import RecognitionPredictor  # type: ignore
+            manager = SuryaInferenceManager()
+            _surya_predictor = RecognitionPredictor(manager)
+            _surya_available = True
+            logger.info("Surya OCR engine initialised")
+            return _surya_predictor
+        except Exception as exc:
+            _surya_available = False
+            logger.warning("Surya OCR unavailable: %s", exc)
+            return None
+
+
+def _should_surya_fallback(lang: str, best_confidence: float) -> bool:
+    if not OCR_SURYA_ENABLED:
+        return False
+    if (lang or "").strip().lower() not in OCR_SURYA_LANGS:
+        return False
+    return best_confidence < OCR_SURYA_CONFIDENCE_THRESHOLD
+
+
+def _surya_ocr_image(image: Image.Image, lang: str) -> list[TextBlock] | None:
+    """Run Surya full-page OCR. Returns TextBlocks with real geometry, or None
+    on any failure (caller falls back to the next tier)."""
+    predictor = _get_surya_predictor()
+    if predictor is None:
+        return None
+    try:
+        results = predictor([image.convert("RGB")], full_page=True)
+    except Exception as exc:
+        logger.warning("surya_ocr_failed: %s", exc)
+        return None
+    if not results:
+        return None
+
+    page = results[0]
+    raw_blocks = getattr(page, "blocks", None) or []
+    blocks: list[TextBlock] = []
+    for raw in raw_blocks:
+        text = ""
+        for attr in ("text", "html", "label"):
+            value = getattr(raw, attr, None)
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                break
+        if not text:
+            continue
+        bbox_raw = getattr(raw, "bbox", None) or getattr(raw, "polygon", None)
+        if bbox_raw and len(bbox_raw) >= 4:
+            flat = [float(v) for v in bbox_raw[:4]]
+            bbox = flat
+        else:
+            bbox = [0.0, 0.0, float(image.width), float(image.height)]
+        conf_raw = getattr(raw, "confidence", None)
+        try:
+            conf = float(conf_raw) if conf_raw is not None else 0.80
+        except (TypeError, ValueError):
+            conf = 0.80
+        blocks.append(TextBlock(text=text, confidence=round(min(1.0, max(0.0, conf)), 4), bbox=bbox))
+
+    if not blocks:
+        return None
+    return _assign_reading_order_with_layout(blocks, image.width, image.height, lang=lang)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble reconciliation (PaddleOCR × Surya)
+# ---------------------------------------------------------------------------
+
+def _bbox_iou(a: list[float], b: list[float]) -> float:
+    """Intersection-over-union for two [x1, y1, x2, y2] boxes."""
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _ensemble_merge(paddle_blocks: list[TextBlock], engine_blocks: list[TextBlock]) -> list[TextBlock]:
+    """Merge two block lists by bbox overlap; higher-confidence text wins.
+
+    Unmatched blocks from both engines are kept. Reading order is reassigned
+    by position (top-to-bottom, left-to-right) since the merged set may mix
+    engines; callers needing RTL ordering should re-run the layout pass.
+    """
+    matched_engine: set[int] = set()
+    merged: list[TextBlock] = []
+    for p_block in paddle_blocks:
+        best_idx = -1
+        best_iou = 0.0
+        for idx, e_block in enumerate(engine_blocks):
+            if idx in matched_engine:
+                continue
+            iou = _bbox_iou(p_block.bbox, e_block.bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+        if best_idx >= 0 and best_iou >= OCR_ENSEMBLE_IOU_THRESHOLD:
+            matched_engine.add(best_idx)
+            e_block = engine_blocks[best_idx]
+            winner = e_block if e_block.confidence > p_block.confidence else p_block
+            merged.append(winner)
+        else:
+            merged.append(p_block)
+    for idx, e_block in enumerate(engine_blocks):
+        if idx not in matched_engine:
+            merged.append(e_block)
+    merged.sort(key=lambda b: (b.bbox[1], b.bbox[0]))
+    return [
+        block.model_copy(update={"reading_order": order})
+        for order, block in enumerate(merged, start=1)
+    ]
 
 
 def _normalize_image_dpi(image: Image.Image, source_dpi: int | None, target_dpi: int) -> Image.Image:
@@ -1727,6 +1905,9 @@ def health() -> dict:
         "ocr_vlm_fallback_enabled": OCR_VLM_FALLBACK_ENABLED,
         "ocr_vlm_model": OCR_VLM_MODEL,
         "ocr_vlm_langs": sorted(OCR_VLM_LANGS),
+        "ocr_surya_enabled": OCR_SURYA_ENABLED,
+        "ocr_surya_langs": sorted(OCR_SURYA_LANGS),
+        "ocr_ensemble_enabled": OCR_ENSEMBLE_ENABLED,
         "ollama_base_url": OLLAMA_BASE_URL,
         "ollama_local_only": _is_local_ollama_url(OLLAMA_BASE_URL),
         "ocr_correction_metrics": {
