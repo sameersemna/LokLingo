@@ -858,6 +858,41 @@ class TestVLMFallback(unittest.TestCase):
         vlm_mock.assert_not_called()
         self.assertEqual(blocks[0].text, "unsicher")
 
+    def test_fallback_works_for_latin_langs_when_enabled(self):
+        """EN/DE are not in the default VLM lang list (PaddleOCR is strong on
+        Latin print), but enabling them via config must work end-to-end —
+        covers German Fraktur and English handwriting/degraded scans."""
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["gerbled"], confidence=0.3))
+        for lang, vlm_text in [("de", "Korrigierter deutscher Text"), ("en", "Corrected English text")]:
+            with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+                 mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+                 mock.patch.object(ocr_app, "OCR_VLM_LANGS", {"de", "en"}), \
+                 mock.patch.object(ocr_app, "_vlm_ocr_image", return_value=vlm_text):
+                blocks = ocr_app._ocr_pil_image(_fake_pil_image(), lang, min_confidence=0.8)
+            self.assertEqual(blocks[0].text, vlm_text, msg=f"VLM fallback failed for lang={lang}")
+
+    def test_vlm_prompt_uses_language_name(self):
+        self.assertIn("German", ocr_app._build_vlm_ocr_prompt("de"))
+        self.assertIn("English", ocr_app._build_vlm_ocr_prompt("en"))
+        self.assertIn("Arabic", ocr_app._build_vlm_ocr_prompt("ar"))
+
+    def test_bengali_in_default_vlm_langs(self):
+        """Bengali has no official PaddleOCR model (discussion #17751), so bn
+        must be covered by the VLM fallback out of the box."""
+        self.assertIn("bn", ocr_app.OCR_VLM_LANGS)
+        self.assertIn("bn", ocr_app.OCR_SURYA_LANGS)
+
+    def test_fallback_works_for_bengali(self):
+        fake_ocr = mock.MagicMock()
+        fake_ocr.ocr = mock.MagicMock(return_value=_make_ocr_result(["ভুল"], confidence=0.3))
+        with mock.patch.object(ocr_app, "get_ocr", return_value=fake_ocr), \
+             mock.patch.object(ocr_app, "OCR_VLM_FALLBACK_ENABLED", True), \
+             mock.patch.object(ocr_app, "OCR_SURYA_ENABLED", False), \
+             mock.patch.object(ocr_app, "_vlm_ocr_image", return_value="সঠিক বাংলা পাঠ"):
+            blocks = ocr_app._ocr_pil_image(_fake_pil_image(), "bn", min_confidence=0.8)
+        self.assertEqual(blocks[0].text, "সঠিক বাংলা পাঠ")
+
     def test_health_includes_vlm_fields(self):
         try:
             from fastapi.testclient import TestClient

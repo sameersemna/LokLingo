@@ -196,7 +196,7 @@ Important variables:
 * `OCR_CORRECTION_MIN_SIMILARITY`: minimum character-level similarity ratio between an OCR line and its LLM correction; lower-similarity lines are rejected as likely hallucinations (default `0.55`)
 * `OCR_VLM_FALLBACK_ENABLED`: re-OCR low-confidence pages with a local vision-language model via Ollama (default `false`)
 * `OCR_VLM_MODEL`: VLM used for the fallback (default `qwen2.5-vl`)
-* `OCR_VLM_LANGS`: languages eligible for VLM fallback (default `ar,ur,fa,he`)
+* `OCR_VLM_LANGS`: languages eligible for VLM fallback (default `ar,ur,fa,he,bn`)
 * `OCR_VLM_CONFIDENCE_THRESHOLD`: page-level PaddleOCR confidence below which the VLM fallback triggers (default `0.72`)
 * `OCR_VLM_TIMEOUT`: per-call VLM timeout in seconds (default `60`)
 * `OCR_SURYA_ENABLED`: enables the optional Surya OCR engine as a middle fallback tier (requires `surya-ocr` + torch in the OCR image; default `false`)
@@ -325,6 +325,24 @@ python ocr-service/eval_ocr.py eval-data --lang ar --json-out reports/ar-baselin
 ```
 
 See [guide/ocr-fine-tuning-workflow.md](guide/ocr-fine-tuning-workflow.md) for the full measure → configure → fine-tune workflow.
+
+### English & German notes
+
+PaddleOCR's dedicated `en`/`german` models are strong on modern print, so `en` and `de` are intentionally **not** in the default `OCR_VLM_LANGS`/`OCR_SURYA_LANGS` lists — the extra VLM latency rarely pays off. Enable them per-environment when you expect degraded scans, handwriting, or historical print:
+
+```bash
+OCR_VLM_LANGS=ar,ur,fa,he,en,de
+OCR_SURYA_LANGS=ar,ur,hi,bn,fa,en,de
+```
+
+* **German Fraktur / historical print**: pipeline OCR (PaddleOCR, Tesseract) fails on blackletter typefaces; the VLM fallback is the practical fix (see GT4HistOCR for eval data). German correction is already covered by the fine-tuned `Keyvan/german-ocr` model.
+* **English**: no off-the-shelf correction model equivalent to `Keyvan/german-ocr`; the Pleias post-OCR correction dataset (1B words) is the starting point for fine-tuning one — see the workflow guide.
+* **VLM model choice**: `qwen2.5-vl` works well; Ollama also hosts dedicated OCR VLMs (`glm-ocr`, `maternion/Qianfan-OCR`) usable via `OCR_VLM_MODEL`. If you convert a GGUF yourself, use **Q5_K_M or higher** — Q4_K_M quantization measurably destroys OCR accuracy (DeepSeek-OCR: 0.78% → 15.6% CER).
+
+### Hindi & Bengali notes
+
+* **Hindi**: PaddleOCR's `hi` (Devanagari) model is solid on print; `hi` is in the default `OCR_SURYA_LANGS` but not `OCR_VLM_LANGS` — add it for handwriting or degraded scans.
+* **Bengali**: PaddleOCR has **no official Bengali recognition model** (open request: PaddleOCR discussion #17751); the `bn → hi` engine mapping is only a Devanagari-family approximation. `bn` is therefore in the default `OCR_VLM_LANGS` and `OCR_SURYA_LANGS` so low-confidence Bengali pages automatically fall through to engines with real Bengali support.
 
 ## ✅ Smoke Test
 

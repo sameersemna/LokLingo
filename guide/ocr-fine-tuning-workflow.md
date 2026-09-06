@@ -21,6 +21,17 @@ the runtime service stays as-is and consumes the resulting models via Ollama.
   ([Springer](https://link.springer.com/article/10.1007/s10032-025-00522-0)).
 - **Urdu caveat**: Nastaliq does not transfer from Naskh-trained models —
   Urdu needs its own data.
+- **Latin scripts (EN/DE)**: PaddleOCR's `en`/`german` models are strong on
+  modern print; reserve VLM fallback for handwriting, degraded scans, and
+  German Fraktur/historical print (eval data: GT4HistOCR on Zenodo).
+  German correction is covered by `Keyvan/german-ocr`; for English, the
+  Pleias post-OCR correction dataset (1B words, HF `Pclanglais/post-ocr-correction`)
+  is the training base for a future EN corrector.
+- **GGUF quantization warning**: for OCR VLMs use Q5_K_M or higher (ideally
+  BF16/Q8_0) — measured Q4_K_M quantization raised DeepSeek-OCR CER from
+  0.78% to 15.6%. OCR is unusually quantization-sensitive.
+- **Ollama OCR VLMs**: dedicated OCR models on Ollama (`glm-ocr`,
+  `maternion/Qianfan-OCR`) can be set via `OCR_VLM_MODEL` without code changes.
 
 ## Step 1 — Measure first
 

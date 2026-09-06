@@ -84,17 +84,18 @@ OCR_CORRECTION_LANGS = {
 # LLM correction can degrade CER (arXiv:2502.01205), so large rewrites of a
 # single line are treated as unsafe.
 OCR_CORRECTION_MIN_SIMILARITY = _get_env_float("OCR_CORRECTION_MIN_SIMILARITY", 0.55)
-# VLM OCR fallback: for Arabic-script languages, when all PaddleOCR
-# preprocessing variants score below the confidence threshold, re-OCR the page
-# with a vision-language model served by the local Ollama instance
+# VLM OCR fallback: for scripts where PaddleOCR is weak or has no dedicated
+# model (Arabic-script languages; Bengali — PaddleOCR has no official bn model,
+# see PaddleOCR discussion #17751), re-OCR low-confidence pages with a
+# vision-language model served by the local Ollama instance
 # (KITAB-Bench, arXiv:2502.14949: VLMs beat PaddleOCR by ~60% CER on Arabic).
 OCR_VLM_FALLBACK_ENABLED = os.getenv("OCR_VLM_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 OCR_VLM_MODEL = os.getenv("OCR_VLM_MODEL", "qwen2.5-vl").strip() or "qwen2.5-vl"
 OCR_VLM_LANGS = {
     code.strip().lower()
-    for code in os.getenv("OCR_VLM_LANGS", "ar,ur,fa,he").split(",")
+    for code in os.getenv("OCR_VLM_LANGS", "ar,ur,fa,he,bn").split(",")
     if code.strip()
-} or {"ar", "ur", "fa", "he"}
+} or {"ar", "ur", "fa", "he", "bn"}
 OCR_VLM_CONFIDENCE_THRESHOLD = _get_env_float("OCR_VLM_CONFIDENCE_THRESHOLD", 0.72)
 OCR_VLM_TIMEOUT = _get_env_int("OCR_VLM_TIMEOUT", 60)
 # Confidence assigned to VLM-produced blocks: high enough to pass downstream
@@ -206,7 +207,11 @@ LANG_MAP: dict[str, str] = {
     "hi":    "hi",
     "ur":    "arabic",  # Urdu uses Arabic script
     "ar":    "arabic",
-    "bn":    "hi",      # Bengali — closest supported: Hindi (Devanagari family)
+    # Bengali has NO official PaddleOCR recognition model (open request:
+    # PaddleOCR discussion #17751). "hi" (Devanagari) is the closest available
+    # approximation only — enable the VLM/Surya fallback for real bn coverage
+    # (bn is in the default OCR_VLM_LANGS/OCR_SURYA_LANGS).
+    "bn":    "hi",
     "zh":    "ch",
     "ja":    "japan",
     "ko":    "korean",
