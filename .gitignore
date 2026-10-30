@@ -1,7 +1,10 @@
 # --- OS / IDE ---
 .DS_Store
+.venv/
+.qodo/
 .vscode/
 .idea/
+.pytest_cache/
 *.swp
 
 # --- Environment / Secrets ---
