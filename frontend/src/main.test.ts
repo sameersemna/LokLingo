@@ -13,7 +13,6 @@ class Boundary extends Component<{ children?: ReactNode }, { error: Error | null
     return { error }
   }
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // eslint-disable-next-line no-console
     console.error("test: caught", error, info)
   }
   private handleReset = () => this.setState({ error: null })

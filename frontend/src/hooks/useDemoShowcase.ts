@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react"
 import { DEMO_PRESETS, FIRST_VISIT_KEY, type InputWorkflow } from "../constants"
 import { MOTION } from "../motion"
 
@@ -45,6 +45,16 @@ export function useDemoShowcase({
   const [demoModeIndex, setDemoModeIndex] = useState(0)
   const demoModeTimerRef = useRef<number | null>(null)
 
+  const loadDemo = useEffectEvent(async (preset: typeof DEMO_PRESETS[number]) => {
+    setWorkflow("image")
+    setSourceLang(preset.source)
+    setTargetLang(preset.target)
+    const response = await fetch(preset.src)
+    const blob = await response.blob()
+    const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
+    await runImageFile(file, preset.source, preset.target)
+  })
+
   // First-visit onboarding: Auto-load demo for new users
   useEffect(() => {
     const isFirstVisit = !localStorage.getItem(FIRST_VISIT_KEY)
@@ -52,20 +62,9 @@ export function useDemoShowcase({
       localStorage.setItem(FIRST_VISIT_KEY, "true")
       // Auto-load first demo preset (manga) after a short delay to avoid jarring UX
       const demoTimer = window.setTimeout(() => {
-        const demoPreset = DEMO_PRESETS[0]
-        setWorkflow("image")
-        setSourceLang(demoPreset.source)
-        setTargetLang(demoPreset.target)
-
-        // Load and process the demo image
-        fetch(demoPreset.src)
-          .then(res => res.blob())
-          .then(blob => {
-            const file = new File([blob], `demo-${demoPreset.id}.png`, { type: blob.type })
-            runImageFile(file, demoPreset.source, demoPreset.target)
-          })
-          .catch(() => {
-            // Silently fail - demo is optional
+        loadDemo(DEMO_PRESETS[0])
+          .catch(error => {
+            console.warn("Onboarding demo failed", error)
           })
       }, 800)
 
@@ -79,24 +78,21 @@ export function useDemoShowcase({
 
     let currentIndex = 0
     let timerId: number | null = null
+    let cancelled = false
 
     const loadNextDemo = () => {
+      if (cancelled) return
       const preset = DEMO_PRESETS[currentIndex % DEMO_PRESETS.length]
-      setWorkflow("image")
-      setSourceLang(preset.source)
-      setTargetLang(preset.target)
-
-      fetch(preset.src)
-        .then(res => res.blob())
-        .then(blob => {
-          const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
-          runImageFile(file, preset.source, preset.target)
+      loadDemo(preset)
+        .then(() => {
+          if (cancelled) return
           currentIndex++
 
           // Schedule next demo after processing + 6 seconds display time
           timerId = window.setTimeout(loadNextDemo, MOTION.imageProgress.successSettleMs + 6000)
         })
         .catch(() => {
+          if (cancelled) return
           // Skip to next demo on error
           currentIndex++
           timerId = window.setTimeout(loadNextDemo, 2000)
@@ -107,6 +103,7 @@ export function useDemoShowcase({
     const startTimer = window.setTimeout(loadNextDemo, 1000)
 
     return () => {
+      cancelled = true
       window.clearTimeout(startTimer)
       if (timerId !== null) window.clearTimeout(timerId)
     }

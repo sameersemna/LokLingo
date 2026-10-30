@@ -30,6 +30,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func registerWriteRoute(router fiber.Router, path string, guards []fiber.Handler, handlers ...fiber.Handler) {
+	chain := append([]fiber.Handler(nil), guards...)
+	chain = append(chain, handlers...)
+	router.Post(path, chain...)
+}
+
 func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stdout, nil)
 
@@ -154,12 +160,12 @@ func main() {
 
 	api := app.Group("/api/v1")
 	api.Get("/health/dashboard", handlers.NewHealthDashboardHandler(cfg, jobStore, pgPool, startedAt))
-	writeAPI := api.Group("", middleware.WriteAPIAuth(cfg.AppEnv, cfg.WriteAPIToken), middleware.WriteRateLimiter(cfg.WriteRateLimitPerMinute), middleware.UploadRateLimiter(cfg.UploadRateLimitPerMinute))
-	writeAPI.Post("/translate", translateHandler.Translate)
-	writeAPI.Post("/translate/image", middleware.InflightGate(cfg.SyncImageMaxInflight, "/api/v1/translate/image"), translateHandler.TranslateImage)
-	writeAPI.Post("/jobs", jobsHandler.CreateJob)
-	writeAPI.Post("/jobs/pdf", jobsHandler.CreatePDFJob)
-	writeAPI.Post("/jobs/image", jobsHandler.CreateImageJob)
+	writeGuards := []fiber.Handler{middleware.WriteAPIAuth(cfg.AppEnv, cfg.WriteAPIToken), middleware.WriteRateLimiter(cfg.WriteRateLimitPerMinute), middleware.UploadRateLimiter(cfg.UploadRateLimitPerMinute)}
+	registerWriteRoute(api, "/translate", writeGuards, translateHandler.Translate)
+	registerWriteRoute(api, "/translate/image", writeGuards, middleware.InflightGate(cfg.SyncImageMaxInflight, "/api/v1/translate/image"), translateHandler.TranslateImage)
+	registerWriteRoute(api, "/jobs", writeGuards, jobsHandler.CreateJob)
+	registerWriteRoute(api, "/jobs/pdf", writeGuards, jobsHandler.CreatePDFJob)
+	registerWriteRoute(api, "/jobs/image", writeGuards, jobsHandler.CreateImageJob)
 	api.Get("/jobs/dead", middleware.InternalToken(cfg.InternalToken), jobsHandler.ListDeadJobs)
 	api.Post("/jobs/:id/replay", middleware.InternalToken(cfg.InternalToken), jobsHandler.ReplayDeadJob)
 	api.Get("/jobs/:id", jobsHandler.GetJob)

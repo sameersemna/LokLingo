@@ -31,6 +31,29 @@ test.describe('Frontend UI + translation flows', () => {
     expect(body.dependencies).toBeTruthy();
   });
 
+  test('browser text translation produces output and exports a valid PDF', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('loklingo-first-visit', 'false');
+    });
+    await page.goto('/');
+    await page.getByRole('combobox', { name: 'Source language', exact: true }).selectOption('en');
+    await page.getByRole('combobox', { name: 'Target language', exact: true }).selectOption('de');
+    await page.locator('.workflow-card').filter({ hasText: 'Text' }).click();
+    await page.getByRole('textbox', { name: 'Source text' }).fill('Hello world. Thank you for your help.');
+    await page.getByRole('button', { name: 'Translate', exact: true }).click();
+    await expect(page.locator('.result-text')).toHaveText(/\S+/, { timeout: 60_000 });
+    await expect(page.locator('.result-text')).not.toHaveText('Hello world. Thank you for your help.');
+    const downloading = page.waitForEvent('download', { timeout: 15_000 });
+    await page.getByTitle('Download PDF', { exact: true }).click();
+    const download = await downloading;
+    expect(await download.failure()).toBeNull();
+    expect(download.suggestedFilename()).toBe('loklingo-export.pdf');
+    const stream = await download.createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream!) chunks.push(Buffer.from(chunk));
+    expect(Buffer.concat(chunks).subarray(0, 5).toString()).toBe('%PDF-');
+  });
+
   test('text translation API accepts or auth-guards requests', async ({ request }) => {
     const res = await request.post(`${backendURL}/api/v1/translate`, {
       headers: authHeaders(),

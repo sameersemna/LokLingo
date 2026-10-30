@@ -26,7 +26,6 @@ class ErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // eslint-disable-next-line no-console
     console.error('LokLingo: uncaught error in component tree', error, info)
   }
 

@@ -216,7 +216,7 @@ type DegradedModeSnapshot struct {
 // SnapshotProviderMetrics returns a snapshot for every provider that has been
 // observed since process start.
 func SnapshotProviderMetrics() []ProviderSnapshot {
-	var out []ProviderSnapshot
+	out := make([]ProviderSnapshot, 0)
 	providerMetricsMap.Range(func(k, v any) bool {
 		name := k.(string)
 		c := v.(*providerCounters)
@@ -249,7 +249,7 @@ func SnapshotProviderMetrics() []ProviderSnapshot {
 
 // SnapshotTimeoutReasonMetrics returns timeout frequency by classified reason.
 func SnapshotTimeoutReasonMetrics() []TimeoutReasonSnapshot {
-	var out []TimeoutReasonSnapshot
+	out := make([]TimeoutReasonSnapshot, 0)
 	timeoutReasonMetricsMap.Range(func(k, v any) bool {
 		reason := k.(string)
 		c := v.(*timeoutReasonCounters)
@@ -261,7 +261,7 @@ func SnapshotTimeoutReasonMetrics() []TimeoutReasonSnapshot {
 
 // SnapshotRenderFailureMetrics returns render failure counts by mode.
 func SnapshotRenderFailureMetrics() []RenderFailureSnapshot {
-	var out []RenderFailureSnapshot
+	out := make([]RenderFailureSnapshot, 0)
 	renderFailureMetricsMap.Range(func(k, v any) bool {
 		mode := k.(string)
 		c := v.(*renderFailureCounters)

@@ -10,6 +10,102 @@ This document is the source of truth for LokLingo reliability operations.
 It centralizes telemetry interpretation, threshold guidance, incident handling,
 handoff standards, and closure criteria.
 
+## Live End-to-End Validation
+
+Use the running deployment's frontend and backend URLs, not assumed default ports.
+From `e2e/`, run the strict translation and document checks before the full suite:
+
+```bash
+LOKLINGO_E2E_BASE_URL=http://localhost:13000 \
+LOKLINGO_BASE_URL=http://localhost:28080 \
+PLAYWRIGHT_HTML_OPEN=never \
+npm test -- tests/translation-flow.spec.ts tests/image-pdf-smoke.spec.ts
+```
+
+Export `WRITE_API_TOKEN` securely when the deployment requires it; never include
+credential values in reports. These checks use real OCR and translation providers,
+create jobs, require image/PDF job completion, and verify text-to-PDF export. The
+valid PDF fixture is generated in memory by Chromium. Authentication rejection,
+provider errors, and failed jobs are not successful happy-path results.
+
+Run the complete suite with the same environment and `npm test`. Inspect the HTML
+report in `e2e/playwright-report/` and failure artifacts in `e2e/test-results/`.
+Network-mocking tests validate UI resilience, not real provider availability.
+Capture failures before targeted recovery; rerun the failing workflow afterward.
+Do not bulk replay unrelated dead-letter jobs or clear shared queue data.
+
+To validate optional Postgres-backed OCR analytics, securely export the deployment's
+`INTERNAL_TOKEN` and enable `LOKLINGO_E2E_ANALYTICS=1` with the same URL settings:
+
+```bash
+LOKLINGO_E2E_ANALYTICS=1 npm test -- tests/image-pdf-smoke.spec.ts --grep 'persists analytics'
+```
+
+This opt-in check creates a raster-only PDF in memory, requires successful OCR
+fallback, and waits for persisted successful-event counters to increase. It is
+skipped by default because analytics storage is optional. It creates one test job
+and retains its analytics event; it does not purge existing data. Cold OCR models
+can make the check take several minutes; live OCR fallback can also remain slow
+on repeated runs. Image jobs and PDFs with embedded text
+do not establish coverage of the PDF-fallback analytics table.
+
+OCR `succeeded_total` and `success_rate_pct` include both `succeeded` and `cached`
+outcomes. The `outcomes` breakdown keeps those categories separate; a cached
+translation is a completed job, not a failed OCR event.
+
+### OCR Performance Controls
+
+On the one-page raster-only English fixture rendered at 200 DPI, container-side
+profiling measured 118.8 seconds before tuning: text detection dominated, while
+eager preprocessing took about 4 seconds. Bounded detection and opt-in document
+preprocessing reduced the profiled call to about 5 seconds; the deployed OCR HTTP
+request measured 4.3 seconds and the full analytics job test about 9 seconds.
+The enhanced E2E test requires the complete source sentence, not merely nonempty
+OCR output. These measurements are fixture-specific, not a multilingual accuracy
+or throughput certification.
+
+Compose forwards these OCR settings:
+
+- `OCR_DET_LIMIT_SIDE_LEN=1280`: maximum detector side length; recognition still
+    uses crops from the original-resolution input. Raise this for dense, small text
+    after measuring accuracy and latency on representative documents.
+- `OCR_DOC_UNWARPING=false`: enable for documents that need Paddle document
+    unwarping; it truncated text on the flat benchmark fixture.
+- `OCR_DOC_ORIENTATION_CLASSIFY=false`: opt into whole-document orientation when
+    needed. Text-line orientation and confidence-based preprocessing fallback remain
+    enabled independently.
+
+Fallback images are generated only when a previous OCR pass needs them. The
+`ocr_models` volume retains Paddle model downloads across OCR container recreation.
+Access to cached Paddle predictors is serialized: concurrent native inference
+caused segmentation faults during E2E load. The concurrency regression and the
+live suite verify this boundary without relaxing health or success assertions.
+
+### Isolated Production Runtime Check
+
+After building the local service images and populating the OCR model-cache volume:
+
+```bash
+node scripts/validate-prod.mjs --check
+node scripts/validate-prod.mjs
+```
+
+The harness resolves the production overlay into a uniquely named temporary
+project with loopback-only free ports, temporary strong tokens, isolated Redis
+and upload/model volumes, and the repository's explicit mock translation gateway.
+It checks readiness, write/internal-token enforcement, non-root users, dropped
+capabilities, resource limits, read-only backend/frontend filesystems, and real
+OCR/image/PDF/export workflows. Only its temporary resources are removed afterward;
+the live queue and database are not used. Postgres analytics is validated in the
+development E2E check above, not in this disposable production stack.
+
+This verifies the hardened runtime with a mock translation provider, not real
+production gateway credentials, external database access, or production load.
+Keep `OCR_SERVICE_URL=http://loklingo-ocr:8000` for an in-Compose OCR service and
+configure real non-placeholder production secrets separately. Write guards attach
+to write endpoints only; public job reads remain public and internal endpoints
+require their internal token independently of the write token.
+
 ## 📊 Reliability Telemetry
 
 LokLingo can persist OCR and LiteLLM reliability events into Postgres for
@@ -125,6 +221,19 @@ Important auth note:
 - Keep `INTERNAL_TOKEN` set consistently for backend and observability stack so secured scraping continues to work.
 
 ### 1) Apply analytics migrations
+
+The backend reads `POSTGRES_DSN` only; separate `POSTGRES_HOST`, `POSTGRES_PORT`,
+`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_SSLMODE` values
+are not assembled automatically. In Compose's `.env`, define the DSN using those
+existing values:
+
+```dotenv
+POSTGRES_DSN="host=${POSTGRES_HOST} port=${POSTGRES_PORT} dbname=${POSTGRES_DB} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} sslmode=${POSTGRES_SSLMODE}"
+```
+
+After changing it, recreate the backend container; restarting an existing container
+does not load updated Compose environment values. This example assumes values
+without spaces or quote characters; escape those correctly for libpq when needed.
 
 If `POSTGRES_DSN` is configured for backend analytics logging, apply SQL
 migrations in order:

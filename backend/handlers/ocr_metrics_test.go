@@ -40,6 +40,31 @@ func TestOCRMetricsSummary_InvalidWindow_Returns400(t *testing.T) {
 	}
 }
 
+func TestOCRSuccessTotals(t *testing.T) {
+	cases := []struct {
+		name      string
+		total     int64
+		outcomes  map[string]int64
+		wantCount int64
+		wantRate  float64
+	}{
+		{name: "empty"},
+		{name: "succeeded", total: 2, outcomes: map[string]int64{"succeeded": 2}, wantCount: 2, wantRate: 100},
+		{name: "cached", total: 2, outcomes: map[string]int64{"cached": 2}, wantCount: 2, wantRate: 100},
+		{name: "success and cache", total: 2, outcomes: map[string]int64{"succeeded": 1, "cached": 1}, wantCount: 2, wantRate: 100},
+		{name: "mixed failures", total: 4, outcomes: map[string]int64{"succeeded": 1, "cached": 1, "also_failed": 2}, wantCount: 2, wantRate: 50},
+		{name: "failures only", total: 2, outcomes: map[string]int64{"also_failed": 2}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			count, rate := ocrSuccessTotals(testCase.total, testCase.outcomes)
+			if count != testCase.wantCount || rate != testCase.wantRate {
+				t.Fatalf("got count=%d rate=%g, want count=%d rate=%g", count, rate, testCase.wantCount, testCase.wantRate)
+			}
+		})
+	}
+}
+
 func TestParseWindow(t *testing.T) {
 	cases := []struct {
 		input     string

@@ -16,9 +16,11 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
 import types
 import unittest
 import unittest.mock as mock
+from concurrent.futures import ThreadPoolExecutor
 
 # ---------------------------------------------------------------------------
 # Stub out heavy C extensions BEFORE app.py is imported so we don't need
@@ -126,6 +128,95 @@ class TestParseDpi(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Tests: _summarise
 # ---------------------------------------------------------------------------
+
+class TestOCRInferenceConcurrency(unittest.TestCase):
+    def test_cached_predictor_calls_are_serialized(self):
+        entered = threading.Event()
+        concurrent = threading.Event()
+        release = threading.Event()
+        counter_lock = threading.Lock()
+        active = 0
+
+        def predict(*args, **kwargs):
+            nonlocal active
+            with counter_lock:
+                active += 1
+                if active > 1:
+                    concurrent.set()
+            entered.set()
+            try:
+                release.wait(timeout=2)
+                return _make_ocr_result(["Readable text"])
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        engine = mock.Mock()
+        engine.ocr.side_effect = predict
+        with mock.patch.object(ocr_app, "get_ocr", return_value=engine), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(ocr_app._ocr_pil_image_once, _fake_pil_image(), "en")
+            self.assertTrue(entered.wait(timeout=1))
+            second = pool.submit(ocr_app._ocr_pil_image_once, _fake_pil_image(), "en")
+            try:
+                self.assertFalse(concurrent.wait(timeout=0.1))
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=2)[0].text, "Readable text")
+            self.assertEqual(second.result(timeout=2)[0].text, "Readable text")
+
+
+class TestOCREngineConfig(unittest.TestCase):
+    def test_detector_has_configurable_maximum_side_length(self):
+        for configured, expected in [("", 1280), ("1920", 1920)]:
+            with self.subTest(configured=configured), mock.patch.dict(os.environ, {"OCR_DET_LIMIT_SIDE_LEN": configured}):
+                with mock.patch.object(ocr_app, "PaddleOCR") as engine:
+                    ocr_app._build_ocr_engine("en")
+                self.assertEqual(engine.call_args.kwargs["det_limit_side_len"], expected)
+                self.assertEqual(engine.call_args.kwargs["det_limit_type"], "max")
+
+    def test_document_preprocessing_is_opt_in(self):
+        for configured, expected in [("false", False), ("true", True)]:
+            settings = {"OCR_DOC_UNWARPING": configured, "OCR_DOC_ORIENTATION_CLASSIFY": configured}
+            with self.subTest(configured=configured), mock.patch.dict(os.environ, settings):
+                with mock.patch.object(ocr_app, "PaddleOCR") as engine:
+                    ocr_app._build_ocr_engine("en")
+                self.assertEqual(engine.call_args.kwargs["use_doc_unwarping"], expected)
+                self.assertEqual(engine.call_args.kwargs["use_doc_orientation_classify"], expected)
+
+
+class TestLazyPreprocessing(unittest.TestCase):
+    def test_confident_first_pass_skips_fallback_preprocessing(self):
+        image = _fake_pil_image()
+        blocks = [ocr_app.TextBlock(text="Readable text", confidence=0.99, bbox=[0, 0, 80, 20])]
+        with (
+            mock.patch.object(ocr_app, "_ocr_pil_image_once", return_value=blocks),
+            mock.patch.object(ocr_app, "_denoise_image") as denoise,
+            mock.patch.object(ocr_app, "_deskew_image") as deskew,
+            mock.patch.object(ocr_app, "_adaptive_threshold_image") as threshold,
+        ):
+            result = ocr_app._ocr_pil_image(image, "en")
+        self.assertEqual(result[0].text, "Readable text")
+        denoise.assert_not_called()
+        deskew.assert_not_called()
+        threshold.assert_not_called()
+
+    def test_low_confidence_first_pass_uses_next_variant(self):
+        image = _fake_pil_image()
+        weak = [ocr_app.TextBlock(text="Weak", confidence=0.1, bbox=[0, 0, 80, 20])]
+        strong = [ocr_app.TextBlock(text="Readable text", confidence=0.99, bbox=[0, 0, 80, 20])]
+        with (
+            mock.patch.object(ocr_app, "_ocr_pil_image_once", side_effect=[weak, strong]) as infer,
+            mock.patch.object(ocr_app, "_denoise_image", return_value=image) as denoise,
+            mock.patch.object(ocr_app, "_deskew_image") as deskew,
+            mock.patch.object(ocr_app, "_adaptive_threshold_image") as threshold,
+        ):
+            result = ocr_app._ocr_pil_image(image, "en")
+        self.assertEqual(result[0].text, "Readable text")
+        self.assertEqual(infer.call_count, 2)
+        denoise.assert_called_once()
+        deskew.assert_not_called()
+        threshold.assert_not_called()
+
 
 class TestSummarise(unittest.TestCase):
     def _make_blocks(self, entries: list[tuple[str, float]]) -> list:

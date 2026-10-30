@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import difflib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -227,6 +227,7 @@ LANG_MAP: dict[str, str] = {
 # Cache PaddleOCR instances keyed by paddle_lang to avoid re-loading models
 _ocr_cache: dict[str, PaddleOCR] = {}
 _cache_lock = threading.Lock()
+_inference_lock = threading.Lock()
 
 
 def _build_ocr_engine(paddle_lang: str) -> PaddleOCR:
@@ -237,6 +238,10 @@ def _build_ocr_engine(paddle_lang: str) -> PaddleOCR:
         "show_log": False,
         "use_gpu": False,
         "rec_batch_num": 6,     # process multiple lines at once
+        "det_limit_side_len": _get_env_int("OCR_DET_LIMIT_SIDE_LEN", 1280),
+        "det_limit_type": "max",
+        "use_doc_unwarping": os.getenv("OCR_DOC_UNWARPING", "false").strip().lower() in {"1", "true", "yes", "on"},
+        "use_doc_orientation_classify": os.getenv("OCR_DOC_ORIENTATION_CLASSIFY", "false").strip().lower() in {"1", "true", "yes", "on"},
     }
     while True:
         try:
@@ -400,8 +405,11 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
     best_blocks: list[TextBlock] = []
     best_confidence = -1.0
     best_stage = ""
+    initial_stage = ""
 
     for stage, candidate in variants:
+        if not initial_stage:
+            initial_stage = stage
         blocks = _ocr_pil_image_once(candidate, lang)
         if not blocks:
             continue
@@ -414,7 +422,7 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
             best_stage = stage
 
         if confidence >= threshold:
-            if stage != variants[0][0]:
+            if stage != initial_stage:
                 logger.info(
                     "ocr_preprocess_fallback_succeeded",
                     extra={"lang": lang, "stage": stage, "confidence": confidence, "threshold": threshold},
@@ -479,15 +487,16 @@ def _ocr_pil_image(image: Image.Image, lang: str, source_dpi: int | None = None,
 
 def _ocr_pil_image_once(image: Image.Image, lang: str) -> list[TextBlock]:
     """Run PaddleOCR on a PIL Image and return structured TextBlock list."""
-    ocr = get_ocr(lang)
     img_array = np.array(image.convert("RGB"))
-    try:
-        result = ocr.ocr(img_array, cls=True)
-    except TypeError as exc:
-        if "unexpected keyword argument 'cls'" not in str(exc):
-            raise
-        logger.warning("PaddleOCR ocr() does not accept cls kwarg; retrying without it")
-        result = ocr.ocr(img_array)
+    with _inference_lock:
+        ocr = get_ocr(lang)
+        try:
+            result = ocr.ocr(img_array, cls=True)
+        except TypeError as exc:
+            if "unexpected keyword argument 'cls'" not in str(exc):
+                raise
+            logger.warning("PaddleOCR ocr() does not accept cls kwarg; retrying without it")
+            result = ocr.ocr(img_array)
 
     def _to_bbox(poly: Any) -> list[float]:
         xs: list[float] = []
@@ -902,17 +911,15 @@ def _adaptive_threshold_image(image: Image.Image, window_size: int = 31, offset:
     return output
 
 
-def _preprocess_variants(image: Image.Image, source_dpi: int | None) -> list[tuple[str, Image.Image]]:
+def _preprocess_variants(image: Image.Image, source_dpi: int | None) -> Iterator[tuple[str, Image.Image]]:
     normalized = _normalize_image_dpi(image, source_dpi, OCR_TARGET_DPI)
+    yield "normalized", normalized
     denoised = _denoise_image(normalized)
+    yield "denoised", denoised
     deskewed = _deskew_image(denoised)
+    yield "deskewed", deskewed
     thresholded = _adaptive_threshold_image(deskewed)
-    return [
-        ("normalized", normalized),
-        ("denoised", denoised),
-        ("deskewed", deskewed),
-        ("adaptive_threshold", thresholded),
-    ]
+    yield "adaptive_threshold", thresholded
 
 
 def _assign_reading_order(blocks: list[TextBlock]) -> list[TextBlock]:

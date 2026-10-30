@@ -33,7 +33,12 @@ test.describe('Visual regression snapshots', () => {
     await expect(page).toHaveScreenshot('demo-gallery.png', { fullPage: false });
   });
 
-  test('reliability panel open', async ({ page }) => {
+  test('reliability panel unavailable state', async ({ page }) => {
+    await page.route(/\/api\/v1\/metrics\/ocr(?:\?|$)/, route => route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'ocr metrics unavailable' }),
+    }));
     await page.addInitScript(() => {
       localStorage.setItem('loklingo-first-visit', 'false');
     });
@@ -46,6 +51,8 @@ test.describe('Visual regression snapshots', () => {
       await page.waitForTimeout(500);
     }
 
+    await expect(page.locator('.reliability-panel')).toBeVisible();
+    await expect(page.getByText('ocr metrics unavailable', { exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot('reliability-panel.png', { fullPage: false });
   });
 

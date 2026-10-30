@@ -63,6 +63,9 @@ services:
       MAX_PDF_UPLOAD_BYTES: "${MAX_PDF_UPLOAD_BYTES:-104857600}"
       MAX_PDF_PAGES: "${MAX_PDF_PAGES:-200}"
       OLLAMA_BASE_URL: "${OCR_OLLAMA_BASE_URL:-http://loklingo-ollama:11434}"
+      OCR_DET_LIMIT_SIDE_LEN: "${OCR_DET_LIMIT_SIDE_LEN:-1280}"
+      OCR_DOC_UNWARPING: "${OCR_DOC_UNWARPING:-false}"
+      OCR_DOC_ORIENTATION_CLASSIFY: "${OCR_DOC_ORIENTATION_CLASSIFY:-false}"
       OCR_CORRECTION_ENABLED: "${OCR_CORRECTION_ENABLED:-false}"
       OCR_CORRECTION_MODEL: "${OCR_CORRECTION_MODEL:-Keyvan/german-ocr}"
       OCR_CORRECTION_TIMEOUT: "${OCR_CORRECTION_TIMEOUT:-8.0}"
@@ -71,6 +74,7 @@ services:
       OCR_CORRECTION_MAX_CHUNK_BLOCKS: "${OCR_CORRECTION_MAX_CHUNK_BLOCKS:-24}"
     volumes:
       - pdf_uploads:${OCR_SHARED_STORAGE_DIR:-/tmp/loklingo}:ro
+      - ocr_models:/home/ocr/.paddlex
     ports:
       - "${OCR_HOST_PORT:-8000}:8000"
     depends_on:
@@ -137,3 +141,4 @@ networks:
 volumes:
   pdf_uploads:
   ollama_data:
+  ocr_models:

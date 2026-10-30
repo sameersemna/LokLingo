@@ -1,6 +1,31 @@
 package observability
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestEmptyProviderMetricCollectionsSerializeAsArrays(t *testing.T) {
+	cases := []struct {
+		name     string
+		snapshot any
+	}{
+		{name: "providers", snapshot: SnapshotProviderMetrics()},
+		{name: "timeout reasons", snapshot: SnapshotTimeoutReasonMetrics()},
+		{name: "render failures", snapshot: SnapshotRenderFailureMetrics()},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			encoded, err := json.Marshal(testCase.snapshot)
+			if err != nil {
+				t.Fatalf("marshal snapshot: %v", err)
+			}
+			if string(encoded) != "[]" {
+				t.Fatalf("empty collection encoded as %s, want []", encoded)
+			}
+		})
+	}
+}
 
 func TestSnapshotReliability_LiteLLMCountersIncrease(t *testing.T) {
 	before := SnapshotReliability()

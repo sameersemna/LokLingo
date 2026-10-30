@@ -139,8 +139,6 @@ function App() {
   const compareSectionRef = useRef<HTMLElement>(null)
   const sliderDraggingRef = useRef(false)
   const autoCompareKeyRef = useRef<string | null>(null)
-  const compareFlashTimerRef = useRef<number | null>(null)
-  const modalFlashTimerRef = useRef<number | null>(null)
   const compareRevealKeyRef = useRef<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -207,7 +205,7 @@ function App() {
     setModalFocus("layout")
     setModalSliderTarget2("layout")
     setModalFlashTarget2("layout")
-  }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl])
+  }, [ocrLoading, compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, setModalFocus, setModalSliderTarget2, setModalFlashTarget2])
 
   useEffect(() => {
     if (!showStatusDetail) return
@@ -218,7 +216,7 @@ function App() {
     }
     document.addEventListener("mousedown", handler)
     return () => document.removeEventListener("mousedown", handler)
-  }, [showStatusDetail, setShowStatusDetail])
+  }, [showStatusDetail, setShowStatusDetail, chipRef])
 
   useEffect(() => {
     if (!showReliability) return
@@ -334,7 +332,7 @@ function App() {
     setComparisonQuickToggle(false)
     resetComparisonModalZoom()
     openModal()
-  }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl])
+  }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl, setModalFocus, setModalSliderTarget2, setModalFlashTarget2, setModalSliderPercent2, setModalView2, setComparisonQuickToggle, resetComparisonModalZoom, openModal])
 
   const openComparisonSliderModal = useCallback((focus: ComparisonFocus = "layout") => {
     const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
@@ -347,7 +345,7 @@ function App() {
     setComparisonQuickToggle(false)
     resetComparisonModalZoom()
     openModal()
-  }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl])
+  }, [compareOriginalUrl, compareOverlayUrl, compareLayoutUrl, resultImageUrl, setModalFocus, setModalSliderTarget2, setModalFlashTarget2, setModalSliderPercent2, setModalView2, setComparisonQuickToggle, resetComparisonModalZoom, openModal])
 
   const closeComparisonModal = () => {
     setModalPanning(false)
@@ -401,17 +399,6 @@ function App() {
     resetComparisonModalZoom,
     openModal,
   })
-
-  useEffect(() => {
-    return () => {
-      if (compareFlashTimerRef.current !== null) {
-        window.clearInterval(compareFlashTimerRef.current)
-      }
-      if (modalFlashTimerRef.current !== null) {
-        window.clearInterval(modalFlashTimerRef.current)
-      }
-    }
-  }, [])
 
   const hasModalComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
 
@@ -588,7 +575,7 @@ function App() {
     } catch (err) {
       pushToast(getErrorMessage(err, "Demo preset failed"), "error")
     }
-  }, [compareOriginalUrl, ocrLoading, pushToast, runImageFile])
+  }, [compareOriginalUrl, ocrLoading, pushToast, runImageFile, setSourceLang, setTargetLang])
 
   const { showcaseMode, toggleShowcase, demoModeActive, toggleDemoMode, stopDemoMode } = useDemoShowcase({
     runImageFile,

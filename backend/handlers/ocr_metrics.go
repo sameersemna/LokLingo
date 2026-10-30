@@ -44,6 +44,14 @@ func parseWindow(raw string) (label string, interval string, ok bool) {
 	return "", "", false
 }
 
+func ocrSuccessTotals(eventsTotal int64, outcomes map[string]int64) (int64, float64) {
+	succeededTotal := outcomes["succeeded"] + outcomes["cached"]
+	if eventsTotal == 0 {
+		return succeededTotal, 0
+	}
+	return succeededTotal, float64(succeededTotal) * 100 / float64(eventsTotal)
+}
+
 func (h *OCRMetricsHandler) Summary(c *fiber.Ctx) error {
 	if h.pool == nil {
 		return errResponse(c, fiber.StatusServiceUnavailable, "ocr metrics unavailable")
@@ -84,7 +92,6 @@ func (h *OCRMetricsHandler) Summary(c *fiber.Ctx) error {
 	defer rows.Close()
 
 	outcomes := map[string]int64{}
-	var succeededTotal int64
 	for rows.Next() {
 		var outcome string
 		var count int64
@@ -92,15 +99,9 @@ func (h *OCRMetricsHandler) Summary(c *fiber.Ctx) error {
 			continue
 		}
 		outcomes[outcome] = count
-		if outcome == "succeeded" {
-			succeededTotal = count
-		}
 	}
 
-	successRate := float64(0)
-	if eventsTotal > 0 {
-		successRate = (float64(succeededTotal) * 100) / float64(eventsTotal)
-	}
+	succeededTotal, successRate := ocrSuccessTotals(eventsTotal, outcomes)
 
 	reliabilityCounts, err := h.queryReliabilityCounts(c, pgInterval)
 	if err != nil {
