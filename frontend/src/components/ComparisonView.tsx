@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef } from "react"
+import { Columns2, SlidersHorizontal, Maximize2, Download, Minus, Plus, Scan, X } from "lucide-react"
 import { createPortal } from "react-dom"
 import { type ProductMode, DEMO_PRESETS } from "../constants"
 
@@ -80,8 +81,6 @@ export const ComparisonView = memo(function ComparisonView({
   compareView,
   sliderTarget,
   sliderPercent,
-  demoModeActive,
-  loading,
   modalImageSrc,
   modalTransform,
   hasModalComparison,
@@ -115,8 +114,6 @@ export const ComparisonView = memo(function ComparisonView({
   onPointerMove,
   onPointerUp,
   onCloseModal,
-  onToggleDemoMode,
-  onOpenDemoPreset,
   sliderDraggingRef,
 }: ComparisonViewProps) {
   const inProgress = ocrLoading && compareOriginalUrl
@@ -182,21 +179,21 @@ export const ComparisonView = memo(function ComparisonView({
                 className={`icon-btn${compareView === "side" ? " is-active" : ""}`}
                 onClick={() => onSetCompareView("side")}
               >
-                Grid
+                  <Columns2 size={16} aria-hidden="true" /> Grid
               </button>
               <button
                 type="button"
                 className={`icon-btn${compareView === "slider" ? " is-active" : ""}`}
                 onClick={() => onSetCompareView("slider")}
               >
-                Slider
+                  <SlidersHorizontal size={16} aria-hidden="true" /> Slider
               </button>
               <button
                 type="button"
                 className="icon-btn"
                 onClick={() => onOpenSliderModal("layout")}
               >
-                Fullscreen
+                <Maximize2 size={16} aria-hidden="true" /> Fullscreen
               </button>
             </div>
             {compareView === "slider" && (
@@ -240,7 +237,7 @@ export const ComparisonView = memo(function ComparisonView({
                     title="Download fast result"
                     onClick={() => compareOverlayUrl && onDownload(compareOverlayUrl, "overlay-translation")}
                   >
-                    ⬇ Download
+                    <Download size={15} aria-hidden="true" /> Download
                   </button>
                 </div>
                 <img
@@ -260,7 +257,7 @@ export const ComparisonView = memo(function ComparisonView({
                     title="Download studio result"
                     onClick={() => compareLayoutUrl && onDownload(compareLayoutUrl, "layout-translation")}
                   >
-                    ⬇ Download
+                    <Download size={15} aria-hidden="true" /> Download
                   </button>
                 </div>
                 <img
@@ -306,7 +303,7 @@ export const ComparisonView = memo(function ComparisonView({
                 />
                 <div
                   className="compare-slider-overlay"
-                  style={{ width: `${sliderPercent}%` }}
+                  style={{ width: "100%", clipPath: `inset(0 ${100 - sliderPercent}% 0 0)` }}
                   aria-hidden="true"
                 >
                   <img
@@ -320,7 +317,7 @@ export const ComparisonView = memo(function ComparisonView({
               {compareView === "slider" && (
                 <>
                   <label className="compare-slider-label">
-                    Original vs {sliderTarget === "overlay" ? "Fast" : "Studio"} — drag to reveal
+                    Original vs {sliderTarget === "overlay" ? "Fast" : "Studio"}
                     <input
                       type="range"
                       min={0}
@@ -335,14 +332,14 @@ export const ComparisonView = memo(function ComparisonView({
                       className="icon-btn"
                       onClick={() => compareOverlayUrl && onDownload(compareOverlayUrl, "overlay-translation")}
                     >
-                      ⬇ Download Fast
+                      <Download size={15} aria-hidden="true" /> Download Fast
                     </button>
                     <button
                       type="button"
                       className="icon-btn"
                       onClick={() => compareLayoutUrl && onDownload(compareLayoutUrl, "layout-translation")}
                     >
-                      ⬇ Download Studio
+                      <Download size={15} aria-hidden="true" /> Download Studio
                     </button>
                   </div>
                 </>
@@ -365,20 +362,20 @@ export const ComparisonView = memo(function ComparisonView({
         >
           <div className="comparison-modal-card" ref={modalCardRef} onClick={e => e.stopPropagation()}>
             <div className="comparison-modal-header">
-              <strong>Translation Quality Viewer</strong>
+              <strong>Image inspector</strong>
               <div className="comparison-modal-header-actions">
                 <button type="button" className="icon-btn" onClick={() => onAdjustZoom(-0.2)} title="Zoom out">
-                  −
+                  <Minus size={16} aria-hidden="true" />
                 </button>
                 <span className="comparison-modal-zoom-label">{Math.round(comparisonModalZoom * 100)}%</span>
                 <button type="button" className="icon-btn" onClick={() => onAdjustZoom(0.2)} title="Zoom in">
-                  +
+                  <Plus size={16} aria-hidden="true" />
                 </button>
                 <button type="button" className="icon-btn" onClick={onResetZoom} title="Reset zoom">
-                  Reset
+                  <Scan size={16} aria-hidden="true" />
                 </button>
                 <button type="button" className="icon-btn" onClick={onCloseModal} aria-label="Close comparison viewer">
-                  ✕
+                  <X size={18} aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -464,7 +461,7 @@ export const ComparisonView = memo(function ComparisonView({
                     }}
                     title="Download this image"
                   >
-                    ⬇ Download
+                    <Download size={16} aria-hidden="true" /> Download
                   </button>
                   <button
                     type="button"
@@ -475,7 +472,7 @@ export const ComparisonView = memo(function ComparisonView({
                     }}
                     title="Fullscreen view"
                   >
-                    ⛶ Fullscreen
+                    <Maximize2 size={16} aria-hidden="true" /> Fullscreen
                   </button>
                 </div>
 
@@ -656,34 +653,6 @@ export const ComparisonView = memo(function ComparisonView({
         document.body,
       )}
 
-      {/* Demo presets */}
-      {!ocrLoading && (
-        <div className="demo-presets" role="group" aria-label="Demo presets">
-          <span className="demo-presets-label">Sample images:</span>
-          <button
-            type="button"
-            className={`icon-btn demo-mode-btn${demoModeActive ? " is-active" : ""}`}
-            onClick={onToggleDemoMode}
-            title="Cycle sample images automatically"
-          >
-            {demoModeActive ? "⏹ Stop demo" : "▶ Demo mode"}
-          </button>
-          {DEMO_PRESETS.map(preset => (
-            <button
-              key={preset.id}
-              type="button"
-              className="demo-preset-btn"
-              disabled={loading || demoModeActive}
-              onClick={() => onOpenDemoPreset(preset)}
-              title={`${preset.label} — ${preset.source === "auto" ? "auto" : preset.source} → ${preset.target}`}
-            >
-              <span className="demo-preset-thumb-wrap">
-                <img className="demo-preset-thumb" src={preset.src} alt="" />
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
     </>
   )
 })

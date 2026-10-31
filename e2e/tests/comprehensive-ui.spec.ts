@@ -6,6 +6,94 @@ const BACKEND = process.env.LOKLINGO_BASE_URL || 'http://localhost:28080';
 test.describe('Comprehensive UI smoke + self-heal checks', () => {
   test.use({ baseURL: BASE });
 
+  test('Stitch workspaces keep translation and operational views separate', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Image translation', exact: true })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Source text' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Studio', exact: true }).click();
+    await page.getByRole('button', { name: 'PDF', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Fast', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: 'Text', exact: true }).click();
+    await expect(page.locator('.upload-hero')).toHaveCount(0);
+    await expect(page.getByRole('group', { name: 'Translation mode' })).toHaveCount(0);
+    await page.getByRole('textbox', { name: 'Source text' }).fill('Keep this draft while navigating.');
+    await page.getByRole('button', { name: 'PDF Jobs', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'PDF translation jobs' })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Source text' })).toBeHidden();
+    await page.getByRole('button', { name: 'Open translation workspace', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Source text' })).toHaveValue('Keep this draft while navigating.');
+    await page.getByRole('button', { name: 'History', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Recent translations' })).toBeVisible();
+    await page.getByRole('button', { name: 'Open translation workspace', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Recent translations' })).toHaveCount(0);
+  });
+
+  test('Stitch history restores text through a keyboard accessible action', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('loklingo-history', JSON.stringify([
+      { id: 1, sourceText: 'Original document text.', sourceLang: 'en', targetLang: 'de', result: 'Stored translated result.', ts: 1 },
+    ])));
+    await page.goto('/');
+    await page.getByRole('button', { name: /^History/ }).click();
+    const restore = page.getByRole('button', { name: 'Restore', exact: true });
+    await restore.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('heading', { name: 'Text translation', exact: true })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Source text' })).toHaveValue('Original document text.');
+    await expect(page.locator('.result-text')).toHaveText('Stored translated result.');
+  });
+
+  test('Stitch responsive workflows render assets without horizontal overflow', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('loklingo-theme', 'light'));
+    await page.goto('/');
+    for (const width of [1440, 768, 390, 360]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const workflow of ['Image', 'PDF', 'Text']) {
+        await page.getByRole('button', { name: workflow, exact: true }).click();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await expect(page.getByRole('combobox', { name: 'Source language', exact: true })).toBeVisible();
+        await expect(page.getByRole('combobox', { name: 'Target language', exact: true })).toBeVisible();
+        const heading = await page.locator('.workspace-heading').boundingBox();
+        const languages = await page.locator('.lang-selectors').boundingBox();
+        expect(languages!.y - heading!.y).toBeLessThan(width > 760 ? 160 : 260);
+        if (workflow === 'Image') {
+          await expect.poll(() => page.locator('.sample-item img').evaluateAll(images => images.every(image => (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
+        }
+        await page.screenshot({ path: test.info().outputPath(`stitch-${workflow.toLowerCase()}-${width}.png`), fullPage: true });
+      }
+    }
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.getByRole('button', { name: 'PDF Jobs', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'PDF translation jobs' })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+
+  test('Stitch image inspection preserves full-size slider geometry and overlay toggles', async ({ page, request }) => {
+    await page.route('**/ocr/image', route => route.fulfill({ json: { text: 'Source fixture', confidence: 0.95, blocks: [{ text: 'Source fixture', confidence: 0.95, reading_order: 0, bbox: [10, 10, 200, 80] }] } }));
+    await page.route('**/api/v1/jobs/image', route => route.fulfill({ status: 202, json: { job_id: 'design-image' } }));
+    await page.route('**/api/v1/jobs/design-image', route => route.fulfill({ json: { job_id: 'design-image', status: 'completed', translated_text: 'Translated fixture text', source: 'en', target: 'de', image_url: '/samples/before_bold_style.png' } }));
+    await page.route('**/api/v1/jobs/design-image/events', route => route.fulfill({ contentType: 'text/event-stream', body: '' }));
+    await page.goto('/');
+    const image = await request.get(`${BASE}/samples/before_bold_style.png`);
+    await page.locator('input[type="file"]').setInputFiles({ name: 'inspection.png', mimeType: 'image/png', buffer: await image.body() });
+    await expect(page.locator('.comparison-wrap')).toBeAttached();
+    await expect(page.getByRole('textbox', { name: 'Source text' })).toHaveValue('Source fixture');
+    if (await page.getByRole('dialog').isVisible()) await page.getByRole('button', { name: 'Close comparison viewer' }).click();
+    await page.locator('.overlay-inspector summary').click();
+    await page.getByRole('button', { name: 'Hide overlay', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Show overlay', exact: true })).toHaveAttribute('aria-pressed', 'false');
+    await page.getByRole('button', { name: 'Show overlay', exact: true }).click();
+    await page.locator('.overlay-inspector summary').click();
+    await page.getByRole('button', { name: 'Slider', exact: true }).click();
+    const slider = page.locator('.compare-slider-label input');
+    await slider.fill('25');
+    const frame = await page.locator('.comparison-wrap .compare-slider-frame').boundingBox();
+    const overlay = await page.locator('.comparison-wrap .compare-slider-overlay').boundingBox();
+    expect(frame).not.toBeNull();
+    expect(overlay!.width).toBeCloseTo(frame!.width - 2, 0);
+    await expect(page.locator('.comparison-wrap .compare-slider-overlay')).toHaveCSS('clip-path', 'inset(0px 75% 0px 0px)');
+    await page.screenshot({ path: test.info().outputPath('stitch-image-inspection.png'), fullPage: true });
+  });
+
   test('home page renders without console errors', async ({ page }) => {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -33,7 +121,7 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
     await expect(page).toHaveTitle(/LokLingo/i);
 
     // Sanity: at least one primary CTA is present.
-    const translateBtn = page.getByRole('button', { name: /translate/i }).first();
+    const translateBtn = page.getByRole('button', { name: 'Upload image', exact: true });
     await expect(translateBtn).toBeVisible({ timeout: 5000 });
 
     // Suppress benign "Failed to load resource" console errors that match known
@@ -170,6 +258,7 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
 
   test('XSS hardening: input does not execute as HTML', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Text', exact: true }).click();
     const textarea = page.locator('textarea').first();
     if (await textarea.isVisible().catch(() => false)) {
       const malicious = '<script>window.__pwned=true</script><img src=x onerror="window.__pwned2=true">';

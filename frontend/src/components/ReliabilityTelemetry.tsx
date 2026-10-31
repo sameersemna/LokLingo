@@ -35,8 +35,9 @@ export function ReliabilityTelemetry({
     <section className="reliability-panel" aria-live="polite">
       <div className="reliability-header">
         <div>
+          <span className="workspace-eyebrow">OPERATIONS</span>
           <h2>Reliability telemetry</h2>
-          <p>Live counters and windowed event aggregates from /api/v1/metrics/ocr.</p>
+          <p>{updatedAt ? `Updated ${new Date(updatedAt).toLocaleTimeString()}` : "Awaiting service metrics"}</p>
         </div>
         <label className="reliability-window-control">
           Window
@@ -55,7 +56,7 @@ export function ReliabilityTelemetry({
         <>
           <div className="reliability-summary-grid">
             <article className="reliability-card">
-              <h3>LiteLLM</h3>
+              <h3>LiteLLM <span className="metric-scope">Lifetime counters</span></h3>
               <dl>
                 <div><dt>Retries</dt><dd>{metrics.reliability.litellm.retry_attempts_total}</dd></div>
                 <div><dt>Cancelled retries</dt><dd>{metrics.reliability.litellm.retry_cancelled_total}</dd></div>
@@ -67,7 +68,7 @@ export function ReliabilityTelemetry({
             </article>
 
             <article className="reliability-card">
-              <h3>OCR</h3>
+              <h3>OCR <span className="metric-scope">Lifetime retry counters</span></h3>
               <dl>
                 <div><dt>Retries</dt><dd>{metrics.reliability.ocr.retry_attempts_total}</dd></div>
                 <div><dt>Retry-After honored</dt><dd>{metrics.reliability.ocr.retry_after_honored_total}</dd></div>

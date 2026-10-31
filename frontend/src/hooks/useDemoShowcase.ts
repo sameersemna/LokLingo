@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react"
-import { DEMO_PRESETS, FIRST_VISIT_KEY, type InputWorkflow } from "../constants"
+import { DEMO_PRESETS, type InputWorkflow } from "../constants"
 import { MOTION } from "../motion"
 
 export interface UseDemoShowcaseParams {
@@ -24,9 +24,7 @@ export interface UseDemoShowcaseApi {
 }
 
 /**
- * First-visit onboarding auto-load, the "Showcase" auto-cycle-through-demos
- * mode, and the comparison view's own demo-cycling mode. All three load a
- * DEMO_PRESETS entry and run it through the image pipeline on a timer.
+ * User-requested Showcase and comparison demo cycling.
  */
 export function useDemoShowcase({
   runImageFile,
@@ -54,23 +52,6 @@ export function useDemoShowcase({
     const file = new File([blob], `demo-${preset.id}.png`, { type: blob.type })
     await runImageFile(file, preset.source, preset.target)
   })
-
-  // First-visit onboarding: Auto-load demo for new users
-  useEffect(() => {
-    const isFirstVisit = !localStorage.getItem(FIRST_VISIT_KEY)
-    if (isFirstVisit) {
-      localStorage.setItem(FIRST_VISIT_KEY, "true")
-      // Auto-load first demo preset (manga) after a short delay to avoid jarring UX
-      const demoTimer = window.setTimeout(() => {
-        loadDemo(DEMO_PRESETS[0])
-          .catch(error => {
-            console.warn("Onboarding demo failed", error)
-          })
-      }, 800)
-
-      return () => window.clearTimeout(demoTimer)
-    }
-  }, [])
 
   // Showcase mode: Auto-cycle through demos
   useEffect(() => {

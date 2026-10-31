@@ -1,5 +1,6 @@
 import { memo } from "react"
-import { LANGUAGES, TARGET_LANGUAGES, WORKFLOWS, type ProductMode, type InputWorkflow } from "../constants"
+import { Image, FileText, Text, ArrowLeftRight, Check } from "lucide-react"
+import { LANGUAGES, TARGET_LANGUAGES, WORKFLOWS, PRODUCT_MODES, type ProductMode, type InputWorkflow } from "../constants"
 
 interface WorkflowSwitcherProps {
   source: string
@@ -31,9 +32,19 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
   onFileChange,
 }: WorkflowSwitcherProps) {
   return (
-    <section className="translator" aria-label="Translation controls">
+    <section className="translator workspace-controls" aria-label="Translation controls">
+      <div className="workspace-heading">
+        <div><span className="workspace-eyebrow">TRANSLATE</span><h2>{workflow === "image" ? "Image translation" : workflow === "pdf" ? "Document translation" : "Text translation"}</h2></div>
+        <div className="workflow-tabs" role="group" aria-label="Input workflow">
+          {WORKFLOWS.map(item => {
+            const WorkflowIcon = item.value === "image" ? Image : item.value === "pdf" ? FileText : Text
+            return <button key={item.value} type="button" className={`workflow-card${workflow === item.value ? " is-active" : ""}`} onClick={() => onWorkflowChange(item.value)} aria-pressed={workflow === item.value}><WorkflowIcon size={17} aria-hidden="true" /><span>{item.label}</span></button>
+          })}
+        </div>
+      </div>
       <div className="lang-selectors">
         <div className="lang-select-wrap">
+          <span className="field-caption">Source language</span>
           <select
             aria-label="Source language"
             value={source}
@@ -46,7 +57,7 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
             ))}
           </select>
           {detectedLang && (
-            <span className="detected-badge">✓ {langLabel(detectedLang)}</span>
+            <span className="detected-badge"><Check size={13} aria-hidden="true" /> {langLabel(detectedLang)}</span>
           )}
         </div>
 
@@ -56,9 +67,11 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
           disabled={source === "auto"}
           onClick={onSwap}
         >
-          ⇄
+          <ArrowLeftRight size={18} aria-hidden="true" />
         </button>
 
+        <div className="lang-select-wrap">
+        <span className="field-caption">Target language</span>
         <select
           aria-label="Target language"
           value={target}
@@ -68,30 +81,15 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
             <option key={l.code} value={l.code}>{l.label}</option>
           ))}
         </select>
+        </div>
       </div>
 
-      <div className="mode-row">
-        <label className="mode-label" htmlFor="translation-mode">Mode</label>
-        <select
-          id="translation-mode"
-          className="mode-select"
-          aria-label="Translation mode"
-          value={mode}
-          onChange={e => onModeChange(e.target.value as ProductMode)}
-        >
-          {["fast", "studio", "extract"].map(m => (
-            <option key={m} value={m}>{m}</option>
-          ))}
-        </select>
-      </div>
-
-      <p className="mode-help" role="note" aria-live="polite">
-        {mode === "extract"
-          ? "OCR text extraction only — no translation"
-          : mode === "studio"
-            ? "Premium layout fidelity with dual rendering"
-            : "Quick visual draft — fast translation overlay"}
-      </p>
+      {workflow !== "text" && <div className="mode-row" role="group" aria-label="Translation mode">
+        <span className="field-caption">Processing mode</span>
+        <div className="mode-segments">
+          {PRODUCT_MODES.filter(item => workflow === "image" || item.value !== "studio").map(item => <button key={item.value} type="button" className={`mode-option${mode === item.value ? " is-active" : ""}`} onClick={() => onModeChange(item.value)} aria-pressed={mode === item.value}>{item.value === "extract" ? "Extract" : item.label}</button>)}
+        </div>
+      </div>}
 
       <input
         type="file"
@@ -101,27 +99,6 @@ export const WorkflowSwitcher = memo(function WorkflowSwitcher({
         onChange={e => onFileChange(e.target.files?.[0] ?? null)}
       />
 
-      <section className="workflow-switch-wrap" aria-label="Input workflow">
-        <div className="workflow-switch-heading">Choose workflow: Image, PDF, or Text</div>
-        <div className="workflow-switch">
-          {WORKFLOWS.map(item => (
-            <button
-              key={item.value}
-              type="button"
-              className={`workflow-card${workflow === item.value ? " is-active" : ""}${item.value === "image" ? " is-primary" : ""}`}
-              onClick={() => onWorkflowChange(item.value)}
-              aria-pressed={workflow === item.value}
-            >
-              <span className="workflow-card-top">
-                <span className="workflow-card-icon" aria-hidden="true">{item.icon}</span>
-                <span className="workflow-card-title">{item.label}</span>
-                {item.value === "image" && <span className="workflow-card-badge">Primary</span>}
-              </span>
-              <span className="workflow-card-detail">{item.detail}</span>
-            </button>
-          ))}
-        </div>
-      </section>
     </section>
   )
 })

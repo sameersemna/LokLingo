@@ -1,4 +1,5 @@
 import { memo, useState } from "react"
+import { Languages, Files, Activity, Wrench, History, Images, Play, Sun, Moon, Menu, X, ChevronDown, ArrowLeft } from "lucide-react"
 import { type DependencyStatus } from "../api/health"
 import { type OCRMetricsResponse } from "../api/metrics"
 
@@ -33,6 +34,7 @@ interface HeaderProps {
   readinessPressureLevel: "normal" | "warn" | "critical"
   miniSparklinePoints: string | null
   onOpenReliability: () => void
+  onOpenTranslate: () => void
 }
 
 export const Header = memo(function Header({
@@ -66,27 +68,35 @@ export const Header = memo(function Header({
   readinessPressureLevel,
   miniSparklinePoints,
   onOpenReliability,
+  onOpenTranslate,
 }: HeaderProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   return (
     <header className="app-header">
       <div className="header-row">
-        <h1>LokLingo</h1>
+        <div className="brand">
+          <span className="brand-symbol"><Languages size={23} aria-hidden="true" /></span>
+          <div><h1>LokLingo</h1><span className="brand-caption">Translation workspace</span></div>
+        </div>
         <button
           type="button"
           className="mobile-nav-toggle"
+          aria-label="Menu"
           aria-expanded={mobileNavOpen}
           aria-controls="header-actions-menu"
           onClick={() => setMobileNavOpen(open => !open)}
         >
-          Menu {mobileNavOpen ? "▲" : "▼"}
+          {mobileNavOpen ? <X size={20} /> : <Menu size={20} />} <span>Menu</span>
         </button>
         <div
           id="header-actions-menu"
           className={`header-actions${mobileNavOpen ? " is-open" : ""}`}
           onClick={() => setMobileNavOpen(false)}
         >
+          <button className={`icon-btn nav-translate${!showPdfJobs && !showReliability && !showDeadOps && !showHistory ? " is-active" : ""}`} type="button" onClick={onOpenTranslate} aria-label="Open translation workspace">
+            <ArrowLeft size={16} aria-hidden="true" /> Translate
+          </button>
           <button
             className={`icon-btn${showPdfJobs ? " is-active" : ""}`}
             type="button"
@@ -94,7 +104,7 @@ export const Header = memo(function Header({
             aria-pressed={showPdfJobs}
             title="PDF translation jobs"
           >
-            📄 PDF Jobs
+            <Files size={16} aria-hidden="true" /> PDF Jobs
           </button>
           <button
             className={`icon-btn${showReliability ? " is-active" : ""}`}
@@ -103,7 +113,7 @@ export const Header = memo(function Header({
             aria-pressed={showReliability}
             title="Reliability telemetry"
           >
-            📊 Reliability
+            <Activity size={16} aria-hidden="true" /> Reliability
           </button>
           <button
             className={`icon-btn${showDeadOps ? " is-active" : ""}`}
@@ -112,7 +122,7 @@ export const Header = memo(function Header({
             aria-pressed={showDeadOps}
             title="Dead-letter operations"
           >
-            🛠 Dead Ops
+            <Wrench size={16} aria-hidden="true" /> Dead Ops
           </button>
           <button
             className={`icon-btn${showHistory ? " is-active" : ""}`}
@@ -121,7 +131,7 @@ export const Header = memo(function Header({
             aria-pressed={showHistory}
             title="Translation history"
           >
-            ⏱ History {historyCount > 0 && <span className="badge">{historyCount}</span>}
+            <History size={16} aria-hidden="true" /> History {historyCount > 0 && <span className="badge">{historyCount}</span>}
           </button>
           <button
             className={`icon-btn${showDemoGallery ? " is-active" : ""}`}
@@ -130,7 +140,7 @@ export const Header = memo(function Header({
             aria-pressed={showDemoGallery}
             title="Try demo examples"
           >
-            🎨 Demos
+            <Images size={16} aria-hidden="true" /> Demos
           </button>
           <button
             className="icon-btn"
@@ -139,7 +149,7 @@ export const Header = memo(function Header({
             aria-pressed={showcaseMode}
             title="Auto-play demo showcase"
           >
-            ▶ Showcase
+            <Play size={16} aria-hidden="true" /> Showcase
           </button>
           <button
             className="theme-btn"
@@ -148,11 +158,10 @@ export const Header = memo(function Header({
             aria-pressed={theme === "dark"}
             onClick={onToggleTheme}
           >
-            {theme === "dark" ? "☀ Light" : "☾ Dark"}
+            {theme === "dark" ? <Sun size={18} aria-hidden="true" /> : <Moon size={18} aria-hidden="true" />}
           </button>
         </div>
       </div>
-      <p className="tagline">Self-hosted translation &mdash; no limits</p>
       <div className="readiness-chip-wrap" ref={chipRef}>
         <button
           type="button"
@@ -161,7 +170,7 @@ export const Header = memo(function Header({
           aria-expanded={showStatusDetail}
           aria-haspopup="true"
         >
-          {readinessLabel} <span className="chip-caret">{showStatusDetail ? "▲" : "▼"}</span>
+          <span className="service-dot" aria-hidden="true" /> {readinessLabel} <ChevronDown size={14} aria-hidden="true" />
         </button>
         {showStatusDetail && (
           <div className="readiness-popover" role="status">

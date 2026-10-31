@@ -1,4 +1,5 @@
 import { memo } from "react"
+import { Image, FileText, Copy, Maximize2 } from "lucide-react"
 import {
   type ComparisonFocus,
 } from "../constants"
@@ -41,13 +42,13 @@ export const ExportActions = memo(function ExportActions({
           disabled={!resultImageUrl}
           onClick={onDownloadPNG}
         >
-          🖼 PNG
+          <Image size={15} aria-hidden="true" /> PNG
         </button>
         <button className="icon-btn" title="Download PDF" onClick={onDownloadPDF}>
-          📄 PDF
+          <FileText size={15} aria-hidden="true" /> PDF
         </button>
         <button className="icon-btn" title="Copy translation" onClick={onCopy}>
-          ⎘ Copy text
+          <Copy size={15} aria-hidden="true" /> Copy text
         </button>
         <button
           className="icon-btn"
@@ -55,7 +56,7 @@ export const ExportActions = memo(function ExportActions({
           disabled={!(compareOriginalUrl || resultImageUrl)}
           onClick={() => onOpenCompare("layout")}
         >
-          ⟲ Open compare
+          <Maximize2 size={15} aria-hidden="true" /> Open compare
         </button>
       </div>
     </div>

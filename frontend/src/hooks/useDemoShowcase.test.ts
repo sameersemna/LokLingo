@@ -70,11 +70,17 @@ describe("useDemoShowcase", () => {
     }
   })
 
-  it("cancels the onboarding timer on unmount", async () => {
+  it("does not start a demo or change workflow on first visit", async () => {
     localStorage.removeItem(FIRST_VISIT_KEY)
-    const hook = renderHook(() => useDemoShowcase(demoParams()))
-    hook.unmount()
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
-    expect(fetch).not.toHaveBeenCalled()
+    const params = demoParams()
+    const hook = renderHook(() => useDemoShowcase(params))
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      expect(fetch).not.toHaveBeenCalled()
+      expect(params.setWorkflow).not.toHaveBeenCalled()
+      expect(params.runImageFile).not.toHaveBeenCalled()
+    } finally {
+      hook.unmount()
+    }
   })
 })

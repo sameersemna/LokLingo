@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { listDeadJobs, replayDeadJob, type DeadLetterJobItem } from "./api/deadletter"
+import { RefreshCw, RotateCcw, ShieldCheck } from "lucide-react"
 import { getErrorMessage } from "./utils/errors"
 
 type ToastFn = (msg: string, type: "success" | "error") => void
@@ -200,8 +201,9 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
     <section className="dead-ops-panel" aria-live="polite">
       <div className="dead-ops-header">
         <div>
+          <span className="workspace-eyebrow">OPERATIONS</span>
           <h2>Recovery queue</h2>
-          <p>Inspect failed jobs and replay them safely.</p>
+          <p>Dead-letter jobs</p>
         </div>
         <div className="dead-ops-actions">
           <button
@@ -211,7 +213,7 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
             aria-pressed={autoRefresh}
             title="Toggle auto-refresh every 30 seconds"
           >
-            {autoRefresh ? "⟳ Auto-refresh on" : "⟳ Auto-refresh off"}
+            <RefreshCw size={15} aria-hidden="true" /> {autoRefresh ? "Auto-refresh on" : "Auto-refresh off"}
           </button>
           <label>
             Limit
@@ -223,7 +225,7 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
             </select>
           </label>
           <button type="button" className="icon-btn" onClick={refresh} disabled={loading || replaying !== null}>
-            {loading ? "Refreshing..." : "Refresh"}
+            <RefreshCw size={15} aria-hidden="true" /> {loading ? "Refreshing..." : "Refresh"}
           </button>
           <button
             type="button"
@@ -232,7 +234,7 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
             disabled={loading || bulkReplayBusy || replaying !== null || visibleItems.length === 0}
             title="Replay all currently filtered dead-letter jobs"
           >
-            {bulkReplayBusy
+            <RotateCcw size={15} aria-hidden="true" /> {bulkReplayBusy
               ? `Replaying ${bulkReplayProgress ?? "..."}`
               : `Replay filtered (${visibleItems.length})`}
           </button>
@@ -240,7 +242,7 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
       </div>
 
       <div className="dead-ops-token-row">
-        <label htmlFor="dead-ops-token">X-Internal-Token</label>
+        <label htmlFor="dead-ops-token"><ShieldCheck size={16} aria-hidden="true" /> X-Internal-Token</label>
         <input
           id="dead-ops-token"
           type="password"
@@ -341,7 +343,7 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
                         onClick={() => handleReplay(item.job_id)}
                         disabled={replayBusy || replaying !== null}
                       >
-                        {replayBusy ? "Replaying..." : "Replay"}
+                        <RotateCcw size={15} aria-hidden="true" /> {replayBusy ? "Replaying..." : "Replay"}
                       </button>
                     </td>
                   </tr>

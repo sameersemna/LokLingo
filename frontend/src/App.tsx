@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
+import { Image, Languages, X, ScanLine } from "lucide-react"
 import { translate, translateImage, uploadPDF } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
 import { getOCRMetrics, getProviderMetrics, type MetricsWindow, type OCRMetricsResponse, type ProviderMetricsResponse } from "./api/metrics"
@@ -37,6 +38,9 @@ import {
   type ComparisonFocus,
 } from "./constants"
 import "./App.css"
+import "@fontsource/ibm-plex-sans/latin-400.css"
+import "@fontsource/ibm-plex-sans/latin-500.css"
+import "@fontsource/ibm-plex-sans/latin-600.css"
 import { Header, WorkflowSwitcher, UploadHero, ImageProgress, IntelligencePanel, PipelineWarning, ExportActions, ComparisonView } from "./components"
 
 // Heavy panels are only rendered on demand (toggled via the header). Lazy-load
@@ -53,7 +57,7 @@ function App() {
   const { toasts, push: pushToast } = useToasts()
   const { handleCopy: copyText, handleDownload, handleDownloadPDF: downloadPDF } = useExportActions(pushToast)
   const { source: sourceLang, target: targetLang, setSource: setSourceLang, setTarget: setTargetLang } = useLanguageSelection()
-  const { show: showOCROverlay, staggerMs: ocrStaggerMs, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
+  const { show: showOCROverlay, setShow: setShowOCROverlay, staggerMs: ocrStaggerMs, setStaggerMs: setOcrStaggerMs } = useOCRVisualization()
   const { history, add: addHistoryEntry, clear: clearHistory } = useHistory()
   const modal = useComparisonModal()
   /* eslint-disable react-hooks/refs */
@@ -101,6 +105,7 @@ function App() {
   const readinessPressureSeries = readinessApi.state.pressureSeries
   const readinessPressureLevel = readinessApi.state.pressureLevel
   const [sourceText, setSourceText] = useState("")
+  const [extractedSourceText, setExtractedSourceText] = useState("")
   const [mode, setMode] = useState<ProductMode>("fast")
   const [workflow, setWorkflow] = useState<InputWorkflow>("image")
   const [uploadSelection, setUploadSelection] = useState<UploadSelection | null>(null)
@@ -421,6 +426,7 @@ function App() {
 
   const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
+    setExtractedSourceText("")
     setPipelineWarning(null)
     startImageProgress()
     resetOCRVisualization()
@@ -433,6 +439,7 @@ function App() {
     let translatedOverlayText = ""
     extractTextFromImage(file, src)
       .then(ocrRes => {
+        setExtractedSourceText(ocrRes.text)
         setOcrConfidence(Number.isFinite(ocrRes.confidence) ? ocrRes.confidence * 100 : null)
         ocrBlocks = ocrRes.blocks.filter(isRenderableOCRBlock)
         setTranslationRegionTotal(ocrBlocks.length)
@@ -786,15 +793,16 @@ function App() {
     <div className="app" inert={comparisonModalOpen}>
       <Header
         theme={theme}
+        onOpenTranslate={() => { setShowPdfJobs(false); setShowHistory(false); setShowReliability(false); setShowDeadOps(false); setShowDemoGallery(false) }}
         onToggleTheme={() => setTheme(t => t === "dark" ? "light" : "dark")}
         showPdfJobs={showPdfJobs}
-        onTogglePdfJobs={() => { setShowPdfJobs(p => !p); setShowHistory(false) }}
+        onTogglePdfJobs={() => { setShowPdfJobs(p => !p); setShowHistory(false); setShowReliability(false); setShowDeadOps(false) }}
         showReliability={showReliability}
-        onToggleReliability={() => setShowReliability(v => !v)}
+        onToggleReliability={() => { setShowReliability(v => !v); setShowPdfJobs(false); setShowHistory(false); setShowDeadOps(false) }}
         showDeadOps={showDeadOps}
-        onToggleDeadOps={() => setShowDeadOps(v => !v)}
+        onToggleDeadOps={() => { setShowDeadOps(v => !v); setShowPdfJobs(false); setShowHistory(false); setShowReliability(false) }}
         showHistory={showHistory}
-        onToggleHistory={() => { setShowHistory(h => !h); setShowPdfJobs(false) }}
+        onToggleHistory={() => { setShowHistory(h => !h); setShowPdfJobs(false); setShowReliability(false); setShowDeadOps(false) }}
         showDemoGallery={showDemoGallery}
         onToggleDemoGallery={() => setShowDemoGallery(g => !g)}
         showcaseMode={showcaseMode}
@@ -814,13 +822,14 @@ function App() {
         readinessPressureLabel={readinessPressureLabel}
         readinessPressureLevel={readinessPressureLevel}
         miniSparklinePoints={miniSparklinePoints}
-        onOpenReliability={() => { setShowReliability(true); setShowStatusDetail(false) }}
+        onOpenReliability={() => { setShowReliability(true); setShowPdfJobs(false); setShowHistory(false); setShowDeadOps(false); setShowStatusDetail(false) }}
       />
 
+      <main className="app-main">
       {/* PDF Jobs panel */}
       {showPdfJobs && (
         <Suspense fallback={null}>
-          <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} />
+          <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} onNewJob={() => { setShowPdfJobs(false); setWorkflow("pdf"); if (mode === "studio") setMode("fast") }} />
         </Suspense>
       )}
 
@@ -863,11 +872,12 @@ function App() {
         </Suspense>
       )}
 
-      <Suspense fallback={null}>
+      {showHistory && <Suspense fallback={<p className="panel-loading" role="status">Loading history...</p>}>
         <LazyHistoryPanel
           history={history}
           onClearAll={() => clearHistory()}
           onRestore={h => {
+            setWorkflow("text")
             setSourceText(h.sourceText)
             setSourceLang(h.sourceLang)
             setTargetLang(h.targetLang)
@@ -884,8 +894,9 @@ function App() {
           onClose={() => setShowHistory(false)}
           langLabel={langLabel}
         />
-      </Suspense>
+      </Suspense>}
 
+      <div className="translation-workspace" hidden={showPdfJobs || showHistory || showReliability || showDeadOps}>
       <WorkflowSwitcher
         source={sourceLang}
         target={targetLang}
@@ -896,12 +907,12 @@ function App() {
         onTargetChange={v => setTargetLang(v)}
         onSwap={handleSwap}
         onModeChange={v => setMode(v)}
-        onWorkflowChange={v => setWorkflow(v)}
+        onWorkflowChange={v => { setWorkflow(v); if (v === "pdf" && mode === "studio") setMode("fast") }}
         langLabel={langLabel}
         onFileChange={f => { if (f) handleOCRFile(f) }}
       />
 
-      <main className="translator">
+      <section className="translator workspace-content" aria-label="Translation workspace">
         <UploadHero
           workflow={workflow}
           uploadSelection={uploadSelection}
@@ -936,10 +947,16 @@ function App() {
           }}
           onOpenUploadPicker={accept => openUploadPicker(accept)}
           onReplayDemo={runOverlayDemo}
+          onToggleOverlay={() => setShowOCROverlay(value => !value)}
           onStaggerChange={ms => setOcrStaggerMs(ms)}
           onStaggerPreset={ms => setOcrStaggerMs(ms)}
           formatFileSize={formatFileSize}
         />
+
+        {workflow === "image" && !uploadSelection && <section className="sample-strip" aria-label="Sample images">
+          <div className="sample-strip-heading"><h3>Sample images</h3><button type="button" className="text-action" onClick={() => setShowDemoGallery(true)}>All samples</button></div>
+          <div className="sample-grid">{DEMO_PRESETS.slice(0, 4).map(preset => <button key={preset.id} type="button" className="sample-item" onClick={() => handleDemoPreset(preset)} disabled={ocrLoading}><img src={preset.src} alt="" loading="lazy" /><span>{preset.label}</span><Image size={15} aria-hidden="true" /></button>)}</div>
+        </section>}
 
         <ImageProgress
           status={imageProgressStatus}
@@ -968,7 +985,7 @@ function App() {
 
         <PipelineWarning
           warning={pipelineWarning}
-          onOpenReliability={() => { setShowReliability(true); setShowStatusDetail(false) }}
+          onOpenReliability={() => { setShowReliability(true); setShowPdfJobs(false); setShowHistory(false); setShowDeadOps(false); setShowStatusDetail(false) }}
           onDismiss={() => setPipelineWarning(null)}
         />
 
@@ -1024,23 +1041,20 @@ function App() {
           sliderDraggingRef={sliderDraggingRef}
         />
 
-        {workflow !== "text" && (
-          <p className="text-mode-hint">Switch to Text workflow to translate typed text with the Translate button.</p>
-        )}
-
+        {(workflow === "text" || workflow === "image" && (result || loading || ocrLoading)) && <>
         <div className={`panels panels-workflow-${workflow}`}>
           {/* Source panel */}
           <div className={`panel panel-source${workflow !== "text" ? " panel-muted" : ""}`}>
+            <div className="editor-heading"><span>{workflow === "text" ? "Source text" : "Extracted text"}</span><span className="editor-language">{langLabel(sourceLang)}</span></div>
             <textarea
               aria-label="Source text"
-              placeholder="Enter text to translate…"
-              value={sourceText}
+              placeholder={workflow === "text" ? "Enter text to translate..." : "Extracted text will appear here"}
+              value={workflow === "text" ? sourceText : extractedSourceText}
+              readOnly={workflow !== "text"}
+              dir="auto"
               maxLength={MAX_CHARS}
               onChange={e => {
                 setSourceText(e.target.value)
-                if (workflow !== "text") setWorkflow("text")
-              }}
-              onFocus={() => {
                 if (workflow !== "text") setWorkflow("text")
               }}
               rows={8}
@@ -1050,10 +1064,11 @@ function App() {
                 {charCount}/{MAX_CHARS} · {sourceText.trim() ? sourceText.trim().split(/\s+/).length : 0}w
               </span>
               <div className="panel-footer-actions">
-                {sourceText && (
+                {workflow === "text" && sourceText && (
                   <button
                     className="icon-btn"
                     title="Clear"
+                    aria-label="Clear source text"
                     onClick={() => {
                       setSourceText("")
                       setResult("")
@@ -1068,7 +1083,7 @@ function App() {
                       setDetectedLang("")
                     }}
                   >
-                    ✕ Clear
+                    <X size={16} aria-hidden="true" /> Clear
                   </button>
                 )}
               </div>
@@ -1077,6 +1092,7 @@ function App() {
 
           {/* Output panel */}
           <div className={`panel panel-output${workflow === "text" ? " panel-priority" : ""}`}>
+            <div className="editor-heading"><span>{resultKind === "ocr" ? "Extracted text" : "Translated text"}</span><span className="editor-language">{langLabel(targetLang)}</span></div>
             <div className="output-body">
               {loading || pdfLoading ? (
                 <span className="status">
@@ -1090,7 +1106,7 @@ function App() {
                       {resultKind === "ocr" ? "Extracted text" : "Translated text"}
                     </div>
                   )}
-                  <div className="result-text">{result}</div>
+                  {result ? <div className="result-text" dir="auto">{result}</div> : <div className="output-empty"><Languages size={28} aria-hidden="true" /><span>Translation will appear here</span></div>}
                   {resultImageUrl && !(compareOverlayUrl && compareLayoutUrl) && (
                     <div className="result-image-wrap">
                       <img
@@ -1124,11 +1140,6 @@ function App() {
         </div>
 
         <div className="actions">
-          <span className="hint">
-            {workflow === "text"
-              ? "Ctrl+Enter to translate text"
-              : "Image/PDF upload starts processing automatically"}
-          </span>
           {ocrLoading && (
             <button
               type="button"
@@ -1138,7 +1149,7 @@ function App() {
               Cancel
             </button>
           )}
-          <button
+          {workflow === "text" && <button
             className="translate-btn"
             onClick={handleTranslate}
             disabled={loading || pdfLoading || ocrLoading || workflow !== "text" || !sourceText.trim()}
@@ -1149,10 +1160,14 @@ function App() {
               ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating PDF…</>
               : ocrLoading
               ? <><span className="spinner spinner-sm spinner-white" aria-hidden="true" /> Translating image…</>
-              : "Translate"}
-          </button>
+              : <><Languages size={18} aria-hidden="true" /> Translate</>}
+          </button>}
         </div>
+        </>}
+      </section>
+      </div>
       </main>
+      <footer className="workspace-footer"><span><ScanLine size={14} aria-hidden="true" /> LokLingo</span><span>Self-hosted translation</span><span className="footer-workflow">{workflow === "image" ? "Image workspace" : workflow === "pdf" ? "Document workspace" : "Text workspace"}</span></footer>
 
       {/* Toast notifications */}
       <div className="toast-container" aria-live="polite">

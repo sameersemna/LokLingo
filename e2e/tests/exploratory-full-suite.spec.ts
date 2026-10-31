@@ -29,11 +29,8 @@ test.describe('Full exploratory E2E suite', () => {
     await expect(page.getByRole('button', { name: /pdf/i }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: /text/i }).first()).toBeVisible();
 
-    // Source textarea
-    await expect(page.locator('textarea').first()).toBeVisible();
-
-    // Translate button
-    await expect(page.getByRole('button', { name: /^translate$/i }).first()).toBeVisible();
+    await expect(page.locator('.upload-drop-target')).toBeVisible();
+    await expect(page.locator('textarea')).toHaveCount(0);
 
     // Header action buttons
     await expect(page.getByRole('button', { name: /pdf jobs/i }).first()).toBeVisible();
@@ -83,7 +80,7 @@ test.describe('Full exploratory E2E suite', () => {
 
     const sourceSelect = page.locator('select').first();
     const targetSelect = page.locator('select').nth(1);
-    const swapBtn = page.getByRole('button', { name: '⇄' });
+    const swapBtn = page.getByTitle('Swap languages', { exact: true });
 
     await sourceSelect.selectOption('en');
     await targetSelect.selectOption('es');
@@ -98,20 +95,12 @@ test.describe('Full exploratory E2E suite', () => {
   test('4. translation mode switching', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
 
-    const modeSelect = page.locator('select').nth(2);
-    const modes = await modeSelect.evaluate(el => Array.from(el.options).map(o => o.value));
-    expect(modes).toContain('fast');
-    expect(modes).toContain('studio');
-    expect(modes).toContain('extract');
-
-    await modeSelect.selectOption('studio');
-    expect(await modeSelect.inputValue()).toBe('studio');
-
-    await modeSelect.selectOption('extract');
-    expect(await modeSelect.inputValue()).toBe('extract');
-
-    await modeSelect.selectOption('fast');
-    expect(await modeSelect.inputValue()).toBe('fast');
+    const modes = page.getByRole('group', { name: 'Translation mode' });
+    for (const mode of ['Studio', 'Extract', 'Fast']) {
+      const option = modes.getByRole('button', { name: mode, exact: true });
+      await option.click();
+      await expect(option).toHaveAttribute('aria-pressed', 'true');
+    }
   });
 
   test('5. text translation flow end-to-end', async ({ page }) => {
@@ -149,6 +138,7 @@ test.describe('Full exploratory E2E suite', () => {
 
   test('6. textarea character limit and clear', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Text', exact: true }).click();
 
     const textarea = page.locator('textarea').first();
     const maxLength = await textarea.evaluate(el => (el as HTMLTextAreaElement).maxLength);
@@ -173,7 +163,7 @@ test.describe('Full exploratory E2E suite', () => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
 
     // Click PDF workflow
-    const pdfBtn = page.getByRole('button', { name: /pdf/i }).first();
+    const pdfBtn = page.getByRole('button', { name: 'PDF', exact: true });
     await pdfBtn.click();
     await page.waitForTimeout(300);
 
@@ -195,7 +185,7 @@ test.describe('Full exploratory E2E suite', () => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
 
     // Theme button text changes: "☾ Dark" in light mode, "☀ Light" in dark mode
-    const themeBtn = page.locator('button').filter({ hasText: /dark|light|☾|☀/i }).first();
+    const themeBtn = page.getByRole('button', { name: 'Toggle color scheme', exact: true });
     await expect(themeBtn).toBeVisible();
 
     // Toggle to dark
@@ -341,6 +331,7 @@ test.describe('Full exploratory E2E suite', () => {
 
   test('18. XSS injection does not execute', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Text', exact: true }).click();
 
     const textarea = page.locator('textarea').first();
     await expect(textarea).toBeVisible();
@@ -592,6 +583,7 @@ test.describe('Full exploratory E2E suite', () => {
 
   test('39. keyboard shortcut Ctrl+Enter triggers translate', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Text', exact: true }).click();
 
     const textarea = page.locator('textarea').first();
     await textarea.fill('Testing keyboard shortcut');

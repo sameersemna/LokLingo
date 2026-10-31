@@ -1,6 +1,6 @@
 import { memo } from "react"
+import { Upload, Image, FileText, ScanLine, Play, ChevronDown } from "lucide-react"
 import {
-  TRUST_SIGNALS,
   OCR_STAGGER_PRESETS,
   type OverlayStage,
   type UploadSelection,
@@ -36,6 +36,7 @@ interface UploadHeroProps {
   onOverlayImageLoad: (e: React.SyntheticEvent<HTMLImageElement>) => void
   onOpenUploadPicker: (accept: string) => void
   onReplayDemo: () => void
+  onToggleOverlay: () => void
   onStaggerChange: (ms: number) => void
   onStaggerPreset: (ms: number) => void
   formatFileSize: (bytes: number) => string
@@ -59,9 +60,7 @@ export const UploadHero = memo(function UploadHero({
   uploadBackendState,
   uploadBackendHint,
   uploadBackendLabel,
-  uploadHeroSubtitle,
   uploadEmptyTitle,
-  uploadEmptySupport,
   uploadBrowseAccept,
   onDragEnter,
   onDragOver,
@@ -70,11 +69,14 @@ export const UploadHero = memo(function UploadHero({
   onOverlayImageLoad,
   onOpenUploadPicker,
   onReplayDemo,
+  onToggleOverlay,
   onStaggerChange,
   onStaggerPreset,
   formatFileSize,
 }: UploadHeroProps) {
   const busy = ocrLoading || pdfLoading
+  const selection = uploadSelection?.kind === workflow ? uploadSelection : null
+  if (workflow === "text") return null
 
   return (
     <section
@@ -86,31 +88,19 @@ export const UploadHero = memo(function UploadHero({
       aria-label="Upload image or PDF"
     >
       <div className="upload-hero-head">
-        <h2>Visual localization</h2>
+        <h3>{selection ? "Source file" : workflow === "pdf" ? "New PDF job" : "Source image"}</h3>
         <div className="upload-hero-head-right">
-          <span className="upload-hero-pill">Local by default</span>
-          <button
-            type="button"
+          <span
             className={`upload-backend-chip upload-backend-${uploadBackendState}`}
-            onClick={() => {
-              /* showReliability handled by parent toggle */
-            }}
             title={uploadBackendHint}
           >
             <span className="upload-backend-dot" aria-hidden="true" />
             <span>{uploadBackendLabel}</span>
-          </button>
+          </span>
         </div>
       </div>
-      <p className="upload-hero-subtitle">{uploadHeroSubtitle}</p>
 
-      <div className="upload-trust-row" aria-label="Trust indicators">
-        {TRUST_SIGNALS.map(signal => (
-          <span key={signal} className="upload-trust-pill">{signal}</span>
-        ))}
-      </div>
-
-      {uploadSelection?.kind === "image" && uploadSelection.previewUrl ? (
+      {selection?.kind === "image" && selection.previewUrl ? (
         <div className="upload-preview upload-preview-image">
           <div className="upload-preview-image-stage">
             <div className="ocr-pipeline-legend" aria-label="Visual pipeline legend">
@@ -119,7 +109,7 @@ export const UploadHero = memo(function UploadHero({
               <span className={`ocr-pipeline-step${!ocrLoading && overlayStage === "translated" ? " is-done" : ""}${legendActiveStage === "rendering" ? " is-active" : ""}`}>Render</span>
             </div>
             <img
-              src={uploadSelection.previewUrl}
+              src={selection.previewUrl}
               alt="Selected upload preview"
               onLoad={onOverlayImageLoad}
             />
@@ -155,8 +145,8 @@ export const UploadHero = memo(function UploadHero({
             )}
           </div>
           <div className="upload-preview-meta">
-            <strong>{uploadSelection.name}</strong>
-            <span>{formatFileSize(uploadSelection.size)} · Image</span>
+            <strong>{selection.name}</strong>
+            <span>{formatFileSize(selection.size)} · Image</span>
             {overlayStage === "ocr" && (
               <span className="upload-preview-stage-note">Animating scan regions…</span>
             )}
@@ -168,12 +158,12 @@ export const UploadHero = memo(function UploadHero({
             )}
           </div>
         </div>
-      ) : uploadSelection?.kind === "pdf" ? (
+      ) : selection?.kind === "pdf" ? (
         <div className="upload-preview upload-preview-pdf">
           <div className="upload-preview-file-icon" aria-hidden="true">PDF</div>
           <div className="upload-preview-meta">
-            <strong>{uploadSelection.name}</strong>
-            <span>{formatFileSize(uploadSelection.size)} · queued for background translation</span>
+            <strong>{selection.name}</strong>
+            <span>{formatFileSize(selection.size)} · queued for background translation</span>
           </div>
         </div>
       ) : (
@@ -184,11 +174,12 @@ export const UploadHero = memo(function UploadHero({
             disabled={busy}
             onClick={() => onOpenUploadPicker(uploadBrowseAccept)}
           >
+            <span className="upload-symbol" aria-hidden="true">{workflow === "pdf" ? <FileText size={32} /> : <Image size={32} />}</span>
             <strong>{uploadDragActive ? "Release to upload" : uploadEmptyTitle}</strong>
-            <span>{uploadEmptySupport}</span>
+            <span>{workflow === "pdf" ? "PDF document" : "Image file"}</span>
+            <span className="upload-browse-label"><Upload size={16} aria-hidden="true" /> Browse files</span>
           </button>
           <div className="upload-example-grid" role="group" aria-label="Example files">
-            {/* Demo preset icons rendered by parent DemoGallery */}
           </div>
         </div>
       )}
@@ -198,33 +189,21 @@ export const UploadHero = memo(function UploadHero({
           type="button"
           className="upload-primary-btn"
           disabled={busy}
-          onClick={() => onOpenUploadPicker("image/*")}
+          onClick={() => onOpenUploadPicker(uploadBrowseAccept)}
         >
-          {ocrLoading ? "Translating image..." : "Upload image"}
+          <Upload size={16} aria-hidden="true" /> {busy ? "Processing..." : selection ? "Replace file" : workflow === "pdf" ? "Upload PDF" : "Upload image"}
         </button>
-        <button
-          type="button"
-          className="icon-btn"
-          disabled={busy}
-          onClick={() => onOpenUploadPicker("application/pdf")}
-        >
-          {pdfLoading ? "Uploading PDF..." : "Upload PDF"}
-        </button>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => {} /* workflow switch handled by parent */}
-        >
-          Use text input
-        </button>
+        {selection?.kind === "image" && <details className="overlay-inspector">
+        <summary><ScanLine size={16} aria-hidden="true" /> Text regions <ChevronDown size={14} aria-hidden="true" /></summary>
+        <div className="overlay-inspector-controls">
         <button
           type="button"
           className={`icon-btn${showOCROverlay ? " is-active" : ""}`}
-          onClick={() => {}}
+          onClick={onToggleOverlay}
           aria-pressed={showOCROverlay}
           title="Show or hide visual overlay"
         >
-          {showOCROverlay ? "Hide overlay" : "Show overlay"}
+          <ScanLine size={16} aria-hidden="true" /> {showOCROverlay ? "Hide overlay" : "Show overlay"}
         </button>
         <label className="ocr-stagger-control">
           Region stagger
@@ -257,8 +236,10 @@ export const UploadHero = memo(function UploadHero({
           disabled={busy || overlayStage === "idle" || overlayBlocks.length === 0}
           title="Replay visual pipeline stages on the current preview"
         >
-          {overlayDemoRunning ? "Replaying demo..." : "Replay demo"}
+          <Play size={16} aria-hidden="true" /> {overlayDemoRunning ? "Replaying demo..." : "Replay demo"}
         </button>
+        </div>
+        </details>}
       </div>
     </section>
   )

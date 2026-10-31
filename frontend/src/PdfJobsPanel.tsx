@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { FileText, Copy, ChevronDown, ChevronUp, X, Plus, Trash2 } from "lucide-react"
 import { fetchJob, subscribeJobEvents, type JobResponse } from './api/translate'
 import {
   clearStoredJobs,
@@ -30,7 +31,6 @@ function getFriendlyFailureMessage(statusError?: string): string {
 function inferPdfStage(job: JobResponse | null): PdfStageKey {
   if (!job) return 'queued'
   if (job.status === 'completed') return 'complete'
-  if (job.status === 'failed') return 'render'
   const stage = (job.stage ?? '').toLowerCase()
   const message = (job.stage_message ?? '').toLowerCase()
   const marker = `${stage} ${message}`
@@ -131,9 +131,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
   const activeStageIdx = PDF_STAGE_LABELS.findIndex(stage => stage.key === currentStage)
   const normalizedProgress = status === 'completed'
     ? 1
-    : status === 'failed'
-    ? Math.max(0.05, stageProgress ?? activeStageIdx / PDF_STAGE_LABELS.length)
-    : stageProgress ?? Math.max(0.05, (activeStageIdx + 0.35) / PDF_STAGE_LABELS.length)
+    : stageProgress
   const stageLeadText = status === 'processing'
     ? `${statusLabel}${typeof live?.processed_pages === 'number' && typeof live?.total_pages === 'number' && live.total_pages > 0 ? ` · page ${Math.min(live.processed_pages, live.total_pages)}/${live.total_pages}` : ''}`
     : status === 'failed'
@@ -148,11 +146,11 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
     ? 'Translation engine recovering...'
     : status === 'processing' && (liveMessage.includes('fallback') || liveMessage.includes('switch'))
     ? 'Switching rendering strategy...'
-    : status === 'processing' && normalizedProgress < 0.22
+    : status === 'processing' && currentStage === 'queued'
     ? 'Warming OCR pipeline...'
-    : status === 'processing' && normalizedProgress < 0.5
+    : status === 'processing' && currentStage === 'extract'
     ? 'Detecting complex layout...'
-    : status === 'processing' && normalizedProgress < 0.84
+    : status === 'processing' && currentStage === 'translate'
     ? 'Translating unstable regions...'
     : status === 'processing'
     ? 'Final rendering pass...'
@@ -209,12 +207,12 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
 
           {status === 'completed' && text && (
             <button className="icon-btn" title="Show / hide translation" onClick={() => setExpanded(e => !e)}>
-              {expanded ? '▲' : '▼'}
+              {expanded ? <ChevronUp size={16} aria-hidden="true" /> : <ChevronDown size={16} aria-hidden="true" />}
             </button>
           )}
           {status === 'completed' && text && (
             <button className="icon-btn" title="Copy translation" onClick={handleCopy}>
-              ⎘
+              <Copy size={16} aria-hidden="true" />
             </button>
           )}
           {isTerminal && (
@@ -223,7 +221,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
               title="Remove from list"
               onClick={() => { removeStoredJob(stored.job_id); onRemove(stored.job_id) }}
             >
-              ✕
+              <X size={16} aria-hidden="true" />
             </button>
           )}
         </div>
@@ -231,11 +229,11 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
 
       {(status === 'processing' || status === 'completed' || status === 'failed') && (
         <>
-          <div className="pdf-job-progress" aria-label={`Progress ${Math.round(normalizedProgress * 100)} percent`}>
+          <div className="pdf-job-progress" aria-label={normalizedProgress === null ? 'Progress unavailable' : `Progress ${Math.round(normalizedProgress * 100)} percent`}>
             <div className="pdf-job-progress-bar">
-              <div className="pdf-job-progress-fill" style={{ transform: `scaleX(${normalizedProgress})` }} />
+              <div className={`pdf-job-progress-fill${normalizedProgress === null && status === 'processing' ? ' is-indeterminate' : ''}`} style={{ transform: `scaleX(${normalizedProgress ?? 0})` }} />
             </div>
-            <span className="pdf-job-progress-value">{Math.round(normalizedProgress * 100)}%</span>
+            <span className="pdf-job-progress-value">{normalizedProgress === null ? status === 'failed' ? 'Interrupted' : 'Processing' : `${Math.round(normalizedProgress * 100)}%`}</span>
           </div>
           <div className="pdf-job-progress-live-row">
             <span>{stageLeadText}</span>
@@ -258,7 +256,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
       )}
 
       {expanded && text && (
-        <div className="pdf-job-result">{text}</div>
+        <div className="pdf-job-result" dir="auto">{text}</div>
       )}
       {status === 'failed' && live?.error && (
         <div className="pdf-job-error">{getFriendlyFailureMessage(live.error)}</div>
@@ -279,9 +277,10 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
 
 interface PdfJobsPanelProps {
   onToast: (msg: string, type: 'success' | 'error') => void
+  onNewJob: () => void
 }
 
-export function PdfJobsPanel({ onToast }: PdfJobsPanelProps) {
+export function PdfJobsPanel({ onToast, onNewJob }: PdfJobsPanelProps) {
   const [jobs, setJobs] = useState<StoredPdfJob[]>(loadStoredJobs)
 
   const handleRemove = (jobId: string) => {
@@ -289,23 +288,27 @@ export function PdfJobsPanel({ onToast }: PdfJobsPanelProps) {
   }
 
   const clearAll = () => {
+    if (!window.confirm('Remove the PDF job list from this browser? Background jobs will continue running.')) return
     clearStoredJobs()
     setJobs([])
   }
 
   return (
-    <section className="history-panel">
+    <section className="history-panel pdf-jobs-panel" aria-label="PDF translation jobs">
       <div className="history-header">
-        <span>PDF translation jobs</span>
+        <div><span className="workspace-eyebrow">DOCUMENTS</span><h2>PDF translation jobs</h2></div>
+        <div className="jobs-header-actions">
+        <button type="button" className="upload-primary-btn" onClick={onNewJob}><Plus size={17} aria-hidden="true" /> New PDF job</button>
         {jobs.length > 0 && (
           <button className="icon-btn" onClick={clearAll}>
-            Clear all
+            <Trash2 size={16} aria-hidden="true" /> Clear all
           </button>
         )}
+        </div>
       </div>
 
       {jobs.length === 0 ? (
-        <p className="history-empty">No PDF jobs yet. Upload a PDF using the PDF button.</p>
+        <div className="history-empty"><FileText size={36} aria-hidden="true" /><span>No PDF jobs yet.</span><button type="button" className="text-action" onClick={onNewJob}>Upload a PDF</button></div>
       ) : (
         <ul className="pdf-job-list">
           {jobs.map(j => (
