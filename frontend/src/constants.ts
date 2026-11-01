@@ -122,3 +122,14 @@ export function pressureLevel(score: number): "normal" | "warn" | "critical" {
   if (score >= PRESSURE_WARN_THRESHOLD) return "warn"
   return "normal"
 }
+
+export const WORKSPACE_PATHS = {
+  jobs: "/jobs",
+  history: "/history",
+  operations: "/operations",
+  recovery: "/operations/recovery",
+  settings: "/settings",
+  samples: "/samples",
+} as const
+
+export type WorkspaceView = "translate" | "job-detail" | keyof typeof WORKSPACE_PATHS | "not-found"

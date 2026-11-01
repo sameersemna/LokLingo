@@ -6,6 +6,17 @@ const BASE = process.env.LOKLINGO_E2E_BASE_URL || 'http://localhost:3000';
 test.describe('Accessibility (WCAG 2.2 AA) Audit', () => {
   test.use({ baseURL: BASE });
 
+  test('production routes stay accessible on narrow screens', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const path of ['/settings', '/jobs', '/history', '/operations', '/operations/recovery', '/missing']) {
+      await page.goto(path, { waitUntil: 'networkidle' });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const audit = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag22aa', 'best-practice']).analyze();
+      expect(audit.violations, `${path}: ${JSON.stringify(audit.violations)}`).toEqual([]);
+      await page.screenshot({ path: test.info().outputPath(`production-${path.replaceAll('/', '-')}.png`), fullPage: true });
+    }
+  });
+
   test('home page has no critical or serious axe violations', async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem('loklingo-first-visit', 'false');

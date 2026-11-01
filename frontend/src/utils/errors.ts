@@ -32,13 +32,23 @@ export async function parseApiErrorBody(res: Response): Promise<ApiErrorBody> {
   }
 }
 
-export function buildApiError(_status: number, body: ApiErrorBody, fallback: string): Error {
+export class ApiError extends Error {
+  readonly status: number
+  readonly requestId?: string
+
+  constructor(message: string, status: number, requestId?: string) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.requestId = requestId
+  }
+}
+
+export function buildApiError(status: number, body: ApiErrorBody, fallback: string): ApiError {
   const msg = typeof body.error === "string" && body.error.trim()
     ? body.error
     : typeof body.detail === "string" && body.detail.trim()
       ? body.detail
       : fallback
-  const error = new Error(msg)
-  error.name = "ApiError"
-  return error
+  return new ApiError(msg, status, typeof body.request_id === "string" ? body.request_id : undefined)
 }

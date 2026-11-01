@@ -56,10 +56,44 @@ Frontend-only deployment uses the `loklingo-frontend` Compose service with
 
 ## Verified Results
 
-- Frontend production build, 28 unit tests, and lint passed.
-- Deployed Chromium suite: 88 passed, one opt-in Postgres analytics test skipped.
-- Four existing local visual baselines regenerated and passed on a subsequent run.
+- Frontend production build, 38 unit tests, and lint passed.
+- Backend build and complete Go unit suite passed.
+- Deployed Chromium suite: 95 passed, one opt-in Postgres analytics test skipped.
+- Four existing local visual baselines regenerated and passed without update mode afterward.
 - Isolated production runtime: authorization/hardening assertions and four E2E flows passed.
-- LAN frontend at `http://promaxgb10-6116:13000/` returned HTTP 200.
-- Dependency audit reported 21 findings (15 moderate, five high, one critical).
-	Neither Lucide nor the new font package was flagged. Broad upgrades remain separate.
+- LAN deep link at `http://promaxgb10-6116:13000/settings` returned HTTP 200.
+- Compiled assets do not contain the configured internal operator credential;
+	the frontend Compose build has no token argument.
+- Runtime dependency audit: zero findings. Full audit: 12 moderate findings
+	in development lint tooling; no high or critical findings remain.
+
+## Production Enhancements
+
+The November 1 implementation retains the original Stitch visual foundation.
+Two requested external refinement calls were cancelled; no new generated screens
+are claimed. The production components were refined locally within that design.
+
+Routes now include `/translate/image`, `/translate/pdf`, `/translate/text`,
+`/jobs`, `/jobs/:id`, `/history`, `/operations`, `/operations/recovery`,
+`/settings`, and `/samples`. `/` remains the default image workspace. Browser
+history and query parameters are preserved, unknown routes have a recovery view,
+and route transitions update the page title and main-content focus.
+
+Settings stores masked write and operator credentials in sessionStorage. The
+frontend image no longer receives `VITE_INTERNAL_TOKEN`; internal headers use
+the runtime session credential instead. Legacy persistent operator credentials
+are removed. Operators must supply authorized credentials through Settings.
+Rotate the previously bundled `INTERNAL_TOKEN` before exposing this deployment
+outside its trusted network: removing it from new assets does not revoke old copies.
+
+Jobs supports search, live status filters that keep hidden rows tracking,
+expired-job handling, and shareable details with available text/image exports.
+Operations includes explicit permission, unavailable and stale-snapshot states.
+Measured image progress comes from backend events, not elapsed-time stages,
+fabricated retry claims, or an artificial region ticker. Image inspection is
+opened explicitly; successful output is preserved when another rendering pass fails.
+
+Non-breaking dependency audit fixes removed all high and critical findings.
+Moderate development-tooling findings remain; forced downgrades are not applied.
+The new regression checks cover routes, session credentials, both partial-output
+cases, live Jobs filtering, service states, and mobile accessibility.

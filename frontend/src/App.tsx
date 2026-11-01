@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { Image, Languages, X, ScanLine } from "lucide-react"
-import { translate, translateImage, uploadPDF } from "./api/translate"
+import { Image, Languages, X, ScanLine, Activity, Wrench } from "lucide-react"
+import { translate, translateImage, uploadPDF, type TranslateResponse } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
 import { getOCRMetrics, getProviderMetrics, type MetricsWindow, type OCRMetricsResponse, type ProviderMetricsResponse } from "./api/metrics"
 import { saveStoredJob } from "./pdfJobsStorage"
@@ -8,6 +8,7 @@ import { saveStoredJob } from "./pdfJobsStorage"
 import { useTheme } from "./hooks/useTheme"
 import { useToasts } from "./hooks/useToasts"
 import { useLanguageSelection } from "./hooks/useLanguageSelection"
+import { useWorkspaceNavigation } from "./hooks/useWorkspaceNavigation"
 import { useOCRVisualization } from "./hooks/useOCRVisualization"
 import { useHistory } from "./hooks/useHistory"
 import { useComparisonModal } from "./hooks/useComparisonModal"
@@ -18,7 +19,8 @@ import { useDemoShowcase } from "./hooks/useDemoShowcase"
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts"
 import { useImageProgress } from "./hooks/useImageProgress"
 import { useOverlayVisualization } from "./hooks/useOverlayVisualization"
-import { getErrorMessage } from "./utils/errors"
+import { ApiError, getErrorMessage } from "./utils/errors"
+import { removeStorageItem, STORAGE_KEYS } from "./utils/storage"
 import {
   isRenderableOCRBlock,
   formatFileSize,
@@ -33,7 +35,6 @@ import {
   DEMO_PRESETS,
   IMAGE_PROGRESS_STAGES,
   type ProductMode,
-  type InputWorkflow,
   type UploadSelection,
   type ComparisonFocus,
 } from "./constants"
@@ -51,8 +52,16 @@ const DeadLetterOpsPanel = lazy(() => import("./DeadLetterOpsPanel").then(m => (
 const LazyReliabilityTelemetry = lazy(() => import("./components/ReliabilityTelemetry").then(m => ({ default: m.ReliabilityTelemetry })))
 const LazyHistoryPanel = lazy(() => import("./components/HistoryPanel").then(m => ({ default: m.HistoryPanel })))
 const LazyDemoGallery = lazy(() => import("./components/DemoGallery").then(m => ({ default: m.DemoGallery })))
+const LazySettingsPanel = lazy(() => import("./components/SettingsPanel").then(module => ({ default: module.SettingsPanel })))
+const LazyJobDetailPanel = lazy(() => import("./components/JobDetailPanel").then(module => ({ default: module.JobDetailPanel })))
 
 function App() {
+  const { view, workflow, openView, setWorkflow, openJob, jobId } = useWorkspaceNavigation()
+  const showPdfJobs = view === "jobs"
+  const showHistory = view === "history"
+  const showReliability = view === "operations"
+  const showDeadOps = view === "recovery"
+  const showDemoGallery = view === "samples"
   const [theme, setTheme] = useTheme()
   const { toasts, push: pushToast } = useToasts()
   const { handleCopy: copyText, handleDownload, handleDownloadPDF: downloadPDF } = useExportActions(pushToast)
@@ -107,7 +116,6 @@ function App() {
   const [sourceText, setSourceText] = useState("")
   const [extractedSourceText, setExtractedSourceText] = useState("")
   const [mode, setMode] = useState<ProductMode>("fast")
-  const [workflow, setWorkflow] = useState<InputWorkflow>("image")
   const [uploadSelection, setUploadSelection] = useState<UploadSelection | null>(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
   const [result, setResult] = useState("")
@@ -125,13 +133,10 @@ function App() {
   const [detectedLang, setDetectedLang] = useState("")
   const [pipelineWarning, setPipelineWarning] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [translationError, setTranslationError] = useState<string | null>(null)
+  const [retryImageFile, setRetryImageFile] = useState<File | null>(null)
   const [ocrLoading, setOcrLoading] = useState(false)
   const [pdfLoading, setPdfLoading] = useState(false)
-  const [showHistory, setShowHistory] = useState(false)
-  const [showPdfJobs, setShowPdfJobs] = useState(false)
-  const [showReliability, setShowReliability] = useState(false)
-  const [showDemoGallery, setShowDemoGallery] = useState(false)
-  const [showDeadOps, setShowDeadOps] = useState(false)
   const [pdfJobsVersion, setPdfJobsVersion] = useState(0)
   const [metricsWindow, setMetricsWindow] = useState<MetricsWindow>("24h")
   const [metrics, setMetrics] = useState<OCRMetricsResponse | null>(null)
@@ -140,12 +145,22 @@ function App() {
   const [metricsError, setMetricsError] = useState<string | null>(null)
   const [providerMetricsError, setProviderMetricsError] = useState<string | null>(null)
   const [metricsUpdatedAt, setMetricsUpdatedAt] = useState<number | null>(null)
+  const [credentialsVersion, setCredentialsVersion] = useState(0)
+  const [metricsRefresh, setMetricsRefresh] = useState(0)
   const fileRef = useRef<HTMLInputElement>(null)
   const compareSectionRef = useRef<HTMLElement>(null)
   const sliderDraggingRef = useRef(false)
   const autoCompareKeyRef = useRef<string | null>(null)
   const compareRevealKeyRef = useRef<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => { removeStorageItem(STORAGE_KEYS.INTERNAL_TOKEN) }, [])
+
+  useEffect(() => {
+    const title = view === "translate" ? `${workflow[0].toUpperCase()}${workflow.slice(1)} translation` : view === "job-detail" ? "Job details" : view === "not-found" ? "Page not found" : `${view[0].toUpperCase()}${view.slice(1)}`
+    document.title = `${title} | LokLingo`
+    document.getElementById("workspace-main")?.focus({ preventScroll: true })
+  }, [view, workflow])
 
   useEffect(() => {
     return () => {
@@ -240,7 +255,7 @@ function App() {
           setMetrics(ocrResult.value)
           setMetricsError(null)
         } else {
-          setMetricsError(ocrResult.reason instanceof Error ? ocrResult.reason.message : "Failed to load reliability metrics")
+          setMetricsError(ocrResult.reason instanceof ApiError && [401, 403].includes(ocrResult.reason.status) ? "Operator access required." : getErrorMessage(ocrResult.reason, "Failed to load reliability metrics"))
         }
 
         if (providerResult.status === "fulfilled") {
@@ -250,7 +265,7 @@ function App() {
           setProviderMetricsError(providerResult.reason instanceof Error ? providerResult.reason.message : "Failed to load provider metrics")
         }
 
-        setMetricsUpdatedAt(Date.now())
+        if (ocrResult.status === "fulfilled") setMetricsUpdatedAt(Date.now())
       } catch (err) {
         if (cancelled) return
         setMetricsError(getErrorMessage(err, "Failed to load reliability metrics"))
@@ -267,12 +282,12 @@ function App() {
       cancelled = true
       clearInterval(interval)
     }
-  }, [showReliability, metricsWindow])
+  }, [showReliability, metricsWindow, credentialsVersion, metricsRefresh])
 
   const handleTranslate = useCallback(async () => {
     if (!sourceText.trim()) return
     setLoading(true)
-    setResult("")
+    setTranslationError(null)
     setResultKind("translation")
     setResultImageUrl(null)
     if (compareOriginalUrl) {
@@ -301,6 +316,7 @@ function App() {
         result: res.translated_text,
       })
     } catch (err) {
+      setTranslationError(err instanceof ApiError && [401, 403].includes(err.status) ? "Write access required." : getErrorMessage(err, "Translation failed"))
       pushToast(getErrorMessage(err, "Translation failed"), "error")
     } finally {
       setLoading(false)
@@ -426,6 +442,7 @@ function App() {
 
   const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
+    setRetryImageFile(file)
     setExtractedSourceText("")
     setPipelineWarning(null)
     startImageProgress()
@@ -486,14 +503,18 @@ function App() {
         return
       }
 
-      const overlayRes = await translateImage(file, src, tgt, "overlay", handleImageJobProgress, controller.signal)
-      const layoutRes = await translateImage(file, src, tgt, "layout", handleImageJobProgress, controller.signal)
-
-      if (!overlayRes.image_url || !layoutRes.image_url) {
-        throw new Error("Image comparison requires both overlay and layout outputs")
+      const renderPass = async (renderMode: "overlay" | "layout"): Promise<TranslateResponse | null> => {
+        try {
+          return await translateImage(file, src, tgt, renderMode, handleImageJobProgress, controller.signal)
+        } catch (failure) {
+          if (controller.signal.aborted || failure instanceof ApiError && [401, 403, 429].includes(failure.status)) throw failure
+          return null
+        }
       }
-
-      const activeRes = mode === "studio" ? layoutRes : overlayRes
+      const overlayRes = await renderPass("overlay")
+      const layoutRes = await renderPass("layout")
+      const activeRes = mode === "studio" ? layoutRes ?? overlayRes : overlayRes ?? layoutRes
+      if (!activeRes || !activeRes.translated_text.trim() && !activeRes.image_url) throw new Error("No usable translation output was returned.")
       translatedOverlayText = activeRes.translated_text ?? ""
       if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
         revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
@@ -502,30 +523,31 @@ function App() {
       setResult(activeRes.translated_text)
       setResultKind("translation")
       setResultImageUrl(activeRes.image_url ?? null)
-      setCompareOverlayUrl(overlayRes.image_url)
-      setCompareLayoutUrl(layoutRes.image_url)
+      setCompareOverlayUrl(overlayRes?.image_url ?? null)
+      setCompareLayoutUrl(layoutRes?.image_url ?? null)
 
       if (src === "auto") {
-        const resolved = overlayRes.source && overlayRes.source !== "auto"
+        const resolved = overlayRes?.source && overlayRes.source !== "auto"
           ? overlayRes.source
-          : layoutRes.source && layoutRes.source !== "auto"
+          : layoutRes?.source && layoutRes.source !== "auto"
           ? layoutRes.source
           : ""
         if (resolved) setDetectedLang(resolved)
       }
-      setPipelineWarning(null)
+      const partial = !overlayRes?.image_url || !layoutRes?.image_url
+      setPipelineWarning(partial ? "Some image outputs are unavailable. The available result has been preserved." : null)
       completeImageProgress()
-      pushToast("Image translated", "success")
+      if (!partial) pushToast("Image translated", "success")
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         setPipelineWarning("Translation cancelled.")
         failImageProgress()
         return
       }
-      const friendlyWarning = getPipelineHelpMessage(err) ?? "Translation engine recovering. Please retry in a moment if processing does not complete."
+      const friendlyWarning = getPipelineHelpMessage(err) ?? getErrorMessage(err, "Image translation failed.")
       setPipelineWarning(friendlyWarning)
       failImageProgress()
-      pushToast("Image translation paused. Retry to continue.", "error")
+      pushToast("Image translation interrupted.", "error")
     } finally {
       setOcrLoading(false)
       if (abortControllerRef.current === controller) {
@@ -627,8 +649,7 @@ function App() {
         })
         // Force panel refresh by bumping key, then show it
         setPdfJobsVersion(v => v + 1)
-        setShowPdfJobs(true)
-        setShowHistory(false)
+        openView("jobs", "pdf")
         pushToast('PDF uploaded — translating in background', 'success')
       } catch (err) {
         pushToast(getErrorMessage(err, "PDF upload failed"), "error")
@@ -698,10 +719,11 @@ function App() {
   const uploadEmptySupport = workflow === "pdf"
     ? "PDF files are queued and tracked in PDF Jobs."
     : "Supports JPG, PNG, WEBP, and other image formats."
-  const readinessState = readiness?.status ?? "checking"
+  const readinessState = readinessApi.state.readinessError ? "unavailable" : readiness?.status ?? "checking"
   const readinessLabel =
     readinessState === "ok" ? "System healthy" :
     readinessState === "degraded" ? "System degraded" :
+    readinessState === "unavailable" ? "System unavailable" :
     "Checking system"
   const failedDependencyNames = readiness
     ? Object.entries(readiness.dependencies)
@@ -709,7 +731,9 @@ function App() {
         .map(([name]) => name)
     : []
   const uploadBackendState: "checking" | "online" | "degraded" | "offline" =
-    readinessState === "checking"
+    readinessState === "unavailable"
+      ? "offline"
+      : readinessState === "checking"
       ? "checking"
       : failedDependencyNames.length === 0
       ? "online"
@@ -793,18 +817,19 @@ function App() {
     <div className="app" inert={comparisonModalOpen}>
       <Header
         theme={theme}
-        onOpenTranslate={() => { setShowPdfJobs(false); setShowHistory(false); setShowReliability(false); setShowDeadOps(false); setShowDemoGallery(false) }}
+        showSettings={view === "settings"}
+        onOpenSettings={() => openView("settings")}
+        onOpenTranslate={() => openView("translate")}
         onToggleTheme={() => setTheme(t => t === "dark" ? "light" : "dark")}
-        showPdfJobs={showPdfJobs}
-        onTogglePdfJobs={() => { setShowPdfJobs(p => !p); setShowHistory(false); setShowReliability(false); setShowDeadOps(false) }}
+        showPdfJobs={showPdfJobs || view === "job-detail"}
+        onTogglePdfJobs={() => openView("jobs")}
         showReliability={showReliability}
-        onToggleReliability={() => { setShowReliability(v => !v); setShowPdfJobs(false); setShowHistory(false); setShowDeadOps(false) }}
+        onToggleReliability={() => openView("operations")}
         showDeadOps={showDeadOps}
-        onToggleDeadOps={() => { setShowDeadOps(v => !v); setShowPdfJobs(false); setShowHistory(false); setShowReliability(false) }}
         showHistory={showHistory}
-        onToggleHistory={() => { setShowHistory(h => !h); setShowPdfJobs(false); setShowReliability(false); setShowDeadOps(false) }}
+        onToggleHistory={() => openView("history")}
         showDemoGallery={showDemoGallery}
-        onToggleDemoGallery={() => setShowDemoGallery(g => !g)}
+        onToggleDemoGallery={() => openView("samples")}
         showcaseMode={showcaseMode}
         onToggleShowcase={toggleShowcase}
         historyCount={history.length}
@@ -813,6 +838,8 @@ function App() {
         showStatusDetail={showStatusDetail}
         readinessLabel={readinessLabel}
         readinessState={readinessState}
+        readinessError={readinessApi.state.readinessError}
+        readinessVerifiedAt={readinessApi.state.verifiedAt}
         readiness={readiness}
         readinessMetricsLoading={readinessMetricsLoading}
         readinessMetricsError={readinessMetricsError}
@@ -822,21 +849,25 @@ function App() {
         readinessPressureLabel={readinessPressureLabel}
         readinessPressureLevel={readinessPressureLevel}
         miniSparklinePoints={miniSparklinePoints}
-        onOpenReliability={() => { setShowReliability(true); setShowPdfJobs(false); setShowHistory(false); setShowDeadOps(false); setShowStatusDetail(false) }}
+        onOpenReliability={() => { openView("operations"); setShowStatusDetail(false) }}
       />
 
-      <main className="app-main">
+      <main className="app-main" id="workspace-main" tabIndex={-1}>
+      {(showReliability || showDeadOps) && <nav className="operations-nav" aria-label="Operations views"><button type="button" className={`icon-btn${showReliability ? " is-active" : ""}`} aria-pressed={showReliability} onClick={() => openView("operations")}><Activity size={16} aria-hidden="true" /> Telemetry</button><button type="button" className={`icon-btn${showDeadOps ? " is-active" : ""}`} aria-pressed={showDeadOps} aria-label="Dead Ops" onClick={() => openView("recovery")}><Wrench size={16} aria-hidden="true" /> Recovery</button></nav>}
+      {view === "not-found" && <section className="history-empty" aria-label="Page not found"><h2>Page not found</h2><button type="button" className="upload-primary-btn" onClick={() => openView("translate")}>Open translation workspace</button></section>}
+      {view === "settings" && <Suspense fallback={<p className="panel-loading" role="status">Loading settings...</p>}><LazySettingsPanel theme={theme} onThemeChange={setTheme} onCredentialsChange={() => { setCredentialsVersion(version => version + 1); setShowStatusDetail(false) }} /></Suspense>}
+      {view === "job-detail" && jobId && <Suspense fallback={<p className="panel-loading" role="status">Loading job...</p>}><LazyJobDetailPanel key={jobId} jobId={jobId} onBack={() => openView("jobs")} onCopy={copyText} onDownload={handleDownload} onExportPDF={downloadPDF} /></Suspense>}
       {/* PDF Jobs panel */}
       {showPdfJobs && (
         <Suspense fallback={null}>
-          <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} onNewJob={() => { setShowPdfJobs(false); setWorkflow("pdf"); if (mode === "studio") setMode("fast") }} />
+          <PdfJobsPanel key={pdfJobsVersion} onToast={pushToast} onOpenJob={openJob} onNewJob={() => { setWorkflow("pdf"); if (mode === "studio") setMode("fast") }} />
         </Suspense>
       )}
 
-      <Suspense fallback={null}>
+      {showDemoGallery && <Suspense fallback={<p className="panel-loading" role="status">Loading samples...</p>}>
         <LazyDemoGallery
           visible={showDemoGallery}
-          onClose={() => setShowDemoGallery(false)}
+          onClose={() => openView("translate")}
           onSetWorkflow={w => setWorkflow(w)}
           onLoadDemo={preset => {
             setSourceLang(preset.source)
@@ -850,9 +881,9 @@ function App() {
               .catch(err => pushToast(`Failed to load demo: ${err.message}`, "error"))
           }}
         />
-      </Suspense>
+      </Suspense>}
 
-      <Suspense fallback={null}>
+      {showReliability && <Suspense fallback={<p className="panel-loading" role="status">Loading telemetry...</p>}>
         <LazyReliabilityTelemetry
           visible={showReliability}
           window={metricsWindow}
@@ -863,12 +894,14 @@ function App() {
           providerMetrics={providerMetrics}
           providerError={providerMetricsError}
           updatedAt={metricsUpdatedAt}
+          onRefresh={() => setMetricsRefresh(value => value + 1)}
+          onOpenSettings={() => openView("settings")}
         />
-      </Suspense>
+      </Suspense>}
 
       {showDeadOps && (
         <Suspense fallback={null}>
-          <DeadLetterOpsPanel onToast={pushToast} />
+          <DeadLetterOpsPanel key={credentialsVersion} onToast={pushToast} onOpenSettings={() => openView("settings")} />
         </Suspense>
       )}
 
@@ -877,7 +910,6 @@ function App() {
           history={history}
           onClearAll={() => clearHistory()}
           onRestore={h => {
-            setWorkflow("text")
             setSourceText(h.sourceText)
             setSourceLang(h.sourceLang)
             setTargetLang(h.targetLang)
@@ -891,12 +923,12 @@ function App() {
             setCompareOverlayUrl(null)
             setCompareLayoutUrl(null)
           }}
-          onClose={() => setShowHistory(false)}
+          onClose={() => setWorkflow("text")}
           langLabel={langLabel}
         />
       </Suspense>}
 
-      <div className="translation-workspace" hidden={showPdfJobs || showHistory || showReliability || showDeadOps}>
+      <div className="translation-workspace" hidden={view !== "translate"}>
       <WorkflowSwitcher
         source={sourceLang}
         target={targetLang}
@@ -954,7 +986,7 @@ function App() {
         />
 
         {workflow === "image" && !uploadSelection && <section className="sample-strip" aria-label="Sample images">
-          <div className="sample-strip-heading"><h3>Sample images</h3><button type="button" className="text-action" onClick={() => setShowDemoGallery(true)}>All samples</button></div>
+          <div className="sample-strip-heading"><h3>Sample images</h3><button type="button" className="text-action" onClick={() => openView("samples")}>All samples</button></div>
           <div className="sample-grid">{DEMO_PRESETS.slice(0, 4).map(preset => <button key={preset.id} type="button" className="sample-item" onClick={() => handleDemoPreset(preset)} disabled={ocrLoading}><img src={preset.src} alt="" loading="lazy" /><span>{preset.label}</span><Image size={15} aria-hidden="true" /></button>)}</div>
         </section>}
 
@@ -985,9 +1017,10 @@ function App() {
 
         <PipelineWarning
           warning={pipelineWarning}
-          onOpenReliability={() => { setShowReliability(true); setShowPdfJobs(false); setShowHistory(false); setShowDeadOps(false); setShowStatusDetail(false) }}
+          onOpenReliability={() => { openView("operations"); setShowStatusDetail(false) }}
           onDismiss={() => setPipelineWarning(null)}
         />
+        {pipelineWarning && retryImageFile && workflow === "image" && !ocrLoading && <button type="button" className="icon-btn retry-image-btn" onClick={() => void runImageFile(retryImageFile, sourceLang, targetLang)}>Retry image</button>}
 
         <ComparisonView
           ocrLoading={ocrLoading}
@@ -1027,6 +1060,7 @@ function App() {
           onResetZoom={resetComparisonModalZoom}
           onSetModalFlashToggle={setModalFlashToggle2}
           onSetModalSliderTarget={v => setModalSliderTarget2(v as "overlay" | "layout")}
+          onSetModalFlashTarget={setModalFlashTarget2}
           onSetModalSliderPercent={v => setModalSliderPercent2(v)}
           onSetComparisonQuickToggle={v => setComparisonQuickToggle(v)}
           onSetCompareSectionRef={el => { compareSectionRef.current = el }}
@@ -1042,6 +1076,7 @@ function App() {
         />
 
         {(workflow === "text" || workflow === "image" && (result || loading || ocrLoading)) && <>
+        {workflow === "text" && translationError && <div className="inline-error" role="alert"><p>{translationError}</p><div className="settings-actions"><button type="button" className="icon-btn" onClick={() => void handleTranslate()} disabled={loading}>Retry translation</button>{translationError === "Write access required." && <button type="button" className="icon-btn" onClick={() => openView("settings")}>Access settings</button>}</div></div>}
         <div className={`panels panels-workflow-${workflow}`}>
           {/* Source panel */}
           <div className={`panel panel-source${workflow !== "text" ? " panel-muted" : ""}`}>

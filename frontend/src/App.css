@@ -4455,6 +4455,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .comparison-intro p, .comparison-kicker, .comparison-shortcuts-hint { display: none; }
 .comparison-segment { border-radius: 4px; border-color: var(--border); background: var(--surface-low); }
 .compare-card { border-radius: 4px; box-shadow: none; }
+.compare-unavailable { min-height: 340px; display: grid; place-items: center; color: var(--text-muted); background: var(--surface-low); font-size: 13px; }
+.retry-image-btn { align-self: flex-start; }
 .compare-card figcaption { font-size: 12px; font-weight: 500; }
 .comparison-hero .compare-card img { height: 420px; background: var(--surface-low); }
 .compare-slider-frame { border-radius: 4px; box-shadow: none; background: var(--surface-low); }
@@ -4502,6 +4504,36 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .dead-ops-filters input, .dead-ops-filters select, .dead-ops-token-row input { min-height: 42px; border-radius: 4px; background: var(--surface); color: var(--text); }
 .panel-loading { padding: 32px; color: var(--text-muted); }
 .jobs-header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.settings-section { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr); gap: 32px; padding: 28px 0; border-bottom: 1px solid var(--border); align-items: start; }
+.settings-section h3 { margin: 0 0 8px; display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 500; }
+.settings-fields { display: grid; gap: 20px; max-width: 640px; }
+.settings-fields label { display: grid; gap: 8px; color: var(--text-muted); font-size: 13px; }
+.settings-fields input { min-width: 0; width: 100%; min-height: 44px; padding: 10px 12px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-panel .mode-segments { justify-self: start; }
+.settings-panel .mode-option { display: flex; align-items: center; gap: 8px; }
+.inline-success { color: var(--success); font-size: 13px; }
+.inline-error { color: var(--error); font-size: 13px; }
+.job-list-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; justify-content: space-between; margin-bottom: 20px; }
+.job-filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.filter-count { font-size: 10px; font-variant-numeric: tabular-nums; opacity: 0.8; }
+.job-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+.job-search input { min-height: 42px; width: 230px; max-width: 100%; border: 0; background: transparent; color: var(--text); font-size: 13px; }
+.job-detail-link { display: inline-flex; gap: 5px; align-items: center; max-width: 100%; font-size: 10px; }
+.job-detail-link span { overflow-wrap: anywhere; text-align: left; }
+.job-detail-meta, .job-detail-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; font-size: 13px; }
+.job-detail-meta code { overflow-wrap: anywhere; }
+.job-detail-output { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.job-detail-output h3 { font-size: 14px; font-weight: 500; margin: 0; }
+.job-detail-output .result-text { padding: 24px; }
+.job-detail-image img { max-width: 100%; max-height: 640px; object-fit: contain; display: block; margin: 20px auto; }
+.job-detail-warning { color: var(--warning); font-size: 13px; }
+.operations-nav { display: flex; gap: 8px; padding-bottom: 20px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+.skip-link { position: absolute; left: 16px; top: 8px; transform: translateY(-150%); background: var(--accent); color: var(--surface); padding: 10px 14px; border-radius: 4px; z-index: 2000; }
+.skip-link:focus { transform: none; }
+.access-state { padding: 16px 0; }
+.access-state p { margin: 0 0 10px; }
+.readiness-unavailable { color: var(--error); border-color: var(--error); background: var(--surface); }
 .metric-scope { float: right; font-size: 10px; font-weight: 400; color: var(--text-muted); }
 .dead-ops-token-row label { display: inline-flex; align-items: center; gap: 8px; }
 .pdf-job-progress-fill.is-indeterminate { transform: none !important; width: 30%; animation: job-progress-indeterminate 1.5s ease-in-out infinite; }
@@ -4530,6 +4562,9 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
   .readiness-chip { font-size: 10px; gap: 5px; padding: 0 7px; }
   .app-main { padding: 24px 16px; }
   .workspace-controls { gap: 20px; }
+  .settings-section { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .job-search { width: 100%; }
+  .job-search input { width: 100%; }
   .workspace-heading { align-items: flex-start; flex-direction: column; gap: 20px; }
   .workspace-heading h2 { font-size: 23px; }
   .workflow-tabs { width: 100%; }

@@ -1,5 +1,5 @@
 import { memo, useState } from "react"
-import { Languages, Files, Activity, Wrench, History, Images, Play, Sun, Moon, Menu, X, ChevronDown, ArrowLeft } from "lucide-react"
+import { Languages, Files, Activity, History, Images, Play, Sun, Moon, Menu, X, ChevronDown, ArrowLeft, Settings } from "lucide-react"
 import { type DependencyStatus } from "../api/health"
 import { type OCRMetricsResponse } from "../api/metrics"
 
@@ -11,7 +11,6 @@ interface HeaderProps {
   showReliability: boolean
   onToggleReliability: () => void
   showDeadOps: boolean
-  onToggleDeadOps: () => void
   showHistory: boolean
   onToggleHistory: () => void
   showDemoGallery: boolean
@@ -24,6 +23,8 @@ interface HeaderProps {
   showStatusDetail: boolean
   readinessLabel: string
   readinessState: string
+  readinessError: string | null
+  readinessVerifiedAt: number | null
   readiness: { dependencies: Record<string, DependencyStatus> } | null
   readinessMetricsLoading: boolean
   readinessMetricsError: string | null
@@ -35,6 +36,8 @@ interface HeaderProps {
   miniSparklinePoints: string | null
   onOpenReliability: () => void
   onOpenTranslate: () => void
+  showSettings: boolean
+  onOpenSettings: () => void
 }
 
 export const Header = memo(function Header({
@@ -45,7 +48,6 @@ export const Header = memo(function Header({
   showReliability,
   onToggleReliability,
   showDeadOps,
-  onToggleDeadOps,
   showHistory,
   onToggleHistory,
   showDemoGallery,
@@ -58,6 +60,8 @@ export const Header = memo(function Header({
   showStatusDetail,
   readinessLabel,
   readinessState,
+  readinessError,
+  readinessVerifiedAt,
   readiness,
   readinessMetricsLoading,
   readinessMetricsError,
@@ -69,11 +73,14 @@ export const Header = memo(function Header({
   miniSparklinePoints,
   onOpenReliability,
   onOpenTranslate,
+  showSettings,
+  onOpenSettings,
 }: HeaderProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   return (
     <header className="app-header">
+      <a className="skip-link" href="#workspace-main">Skip to content</a>
       <div className="header-row">
         <div className="brand">
           <span className="brand-symbol"><Languages size={23} aria-hidden="true" /></span>
@@ -94,7 +101,7 @@ export const Header = memo(function Header({
           className={`header-actions${mobileNavOpen ? " is-open" : ""}`}
           onClick={() => setMobileNavOpen(false)}
         >
-          <button className={`icon-btn nav-translate${!showPdfJobs && !showReliability && !showDeadOps && !showHistory ? " is-active" : ""}`} type="button" onClick={onOpenTranslate} aria-label="Open translation workspace">
+          <button className={`icon-btn nav-translate${!showPdfJobs && !showReliability && !showDeadOps && !showHistory && !showSettings && !showDemoGallery ? " is-active" : ""}`} type="button" onClick={onOpenTranslate} aria-label="Open translation workspace">
             <ArrowLeft size={16} aria-hidden="true" /> Translate
           </button>
           <button
@@ -107,22 +114,14 @@ export const Header = memo(function Header({
             <Files size={16} aria-hidden="true" /> PDF Jobs
           </button>
           <button
-            className={`icon-btn${showReliability ? " is-active" : ""}`}
+            className={`icon-btn${showReliability || showDeadOps ? " is-active" : ""}`}
             type="button"
             onClick={onToggleReliability}
-            aria-pressed={showReliability}
+            aria-pressed={showReliability || showDeadOps}
+            aria-label="Reliability"
             title="Reliability telemetry"
           >
-            <Activity size={16} aria-hidden="true" /> Reliability
-          </button>
-          <button
-            className={`icon-btn${showDeadOps ? " is-active" : ""}`}
-            type="button"
-            onClick={onToggleDeadOps}
-            aria-pressed={showDeadOps}
-            title="Dead-letter operations"
-          >
-            <Wrench size={16} aria-hidden="true" /> Dead Ops
+            <Activity size={16} aria-hidden="true" /> Operations
           </button>
           <button
             className={`icon-btn${showHistory ? " is-active" : ""}`}
@@ -154,6 +153,14 @@ export const Header = memo(function Header({
           <button
             className="theme-btn"
             type="button"
+            aria-label="Settings"
+            aria-pressed={showSettings}
+            onClick={onOpenSettings}
+            title="Settings"
+          ><Settings size={18} aria-hidden="true" /></button>
+          <button
+            className="theme-btn"
+            type="button"
             aria-label="Toggle color scheme"
             aria-pressed={theme === "dark"}
             onClick={onToggleTheme}
@@ -175,8 +182,10 @@ export const Header = memo(function Header({
         {showStatusDetail && (
           <div className="readiness-popover" role="status">
             <div className="readiness-popover-title">Dependency status</div>
+            {readinessError && <p className="inline-error" role="alert">{readinessError}</p>}
+            {readinessVerifiedAt && <p className="field-caption">Last verified {new Date(readinessVerifiedAt).toLocaleTimeString()}</p>}
             {readiness === null ? (
-              <p className="readiness-popover-checking">Fetching…</p>
+              <p className="readiness-popover-checking">{readinessError ? "Status unavailable" : "Fetching..."}</p>
             ) : (
               <>
                 <ul className="readiness-dep-list">

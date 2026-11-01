@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import { FileText, Copy, ChevronDown, ChevronUp, X, Plus, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { FileText, Copy, ChevronDown, ChevronUp, X, Plus, Trash2, ArrowUpRight, Search } from "lucide-react"
 import { fetchJob, subscribeJobEvents, type JobResponse } from './api/translate'
+import { ApiError } from "./utils/errors"
 import {
   clearStoredJobs,
   loadStoredJobs,
@@ -9,6 +10,7 @@ import {
 } from './pdfJobsStorage'
 
 type PdfStageKey = 'queued' | 'extract' | 'languages' | 'translate' | 'render' | 'complete'
+type JobListStatus = JobResponse["status"] | "missing"
 
 const PDF_STAGE_LABELS: Array<{ key: PdfStageKey; label: string }> = [
   { key: 'queued', label: 'Queued' },
@@ -21,11 +23,11 @@ const PDF_STAGE_LABELS: Array<{ key: PdfStageKey; label: string }> = [
 
 function getFriendlyFailureMessage(statusError?: string): string {
   const raw = (statusError ?? '').toLowerCase()
-  if (!raw) return 'Processing paused. Retry from PDF Jobs in a moment.'
-  if (raw.includes('timeout')) return 'Rendering timed out. Recovering strategy is available on retry.'
-  if (raw.includes('network') || raw.includes('fetch')) return 'Connection to translation service was interrupted. Please retry shortly.'
-  if (raw.includes('retry') || raw.includes('circuit')) return 'Translation engine is stabilizing. Retry this job in a moment.'
-  return 'Translation failed for this document. Retry from PDF Jobs to resume.'
+  if (!raw) return 'This job was interrupted.'
+  if (raw.includes('timeout')) return 'Document processing timed out.'
+  if (raw.includes('network') || raw.includes('fetch')) return 'Connection to the translation service was interrupted.'
+  if (raw.includes('retry') || raw.includes('circuit')) return 'The translation provider could not complete this job.'
+  return 'Translation failed for this document.'
 }
 
 function inferPdfStage(job: JobResponse | null): PdfStageKey {
@@ -68,12 +70,16 @@ interface JobRowProps {
   stored: StoredPdfJob
   onCopy: (msg: string, type: 'success' | 'error') => void
   onRemove: (jobId: string) => void
+  onStatusChange: (jobId: string, status: JobListStatus) => void
+  onOpenJob: (jobId: string) => void
+  hidden: boolean
 }
 
-function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
+function JobRow({ stored, onCopy, onRemove, onStatusChange, onOpenJob, hidden }: JobRowProps) {
   const [live, setLive] = useState<JobResponse | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [pollIssue, setPollIssue] = useState(false)
+  const [missing, setMissing] = useState(false)
   const stopRef = useRef(false)
 
   useEffect(() => {
@@ -90,7 +96,13 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
         if (job.status === 'pending' || job.status === 'processing') {
           timer = setTimeout(poll, 1800)
         }
-      } catch {
+      } catch (error) {
+        if (stopRef.current) return
+        if (error instanceof ApiError && error.status === 404) {
+          setMissing(true)
+          closeStream?.()
+          return
+        }
         setPollIssue(true)
         timer = setTimeout(poll, 5000)
       }
@@ -121,6 +133,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
   }, [stored.job_id])
 
   const status = live?.status ?? 'pending'
+  useEffect(() => { onStatusChange(stored.job_id, missing ? "missing" : status) }, [missing, onStatusChange, status, stored.job_id])
   const isTerminal = status === 'completed' || status === 'failed'
   const text = live?.translated_text ?? ''
   const statusLabel = status === 'processing' ? (live?.stage_message ?? STATUS_LABEL.processing) : STATUS_LABEL[status]
@@ -172,7 +185,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
   })
 
   return (
-    <li className="pdf-job-row">
+    <li className="pdf-job-row" hidden={hidden}>
       <div className="pdf-job-row-header">
         <div className="pdf-job-info">
           <span className="pdf-job-filename" title={stored.filename}>
@@ -181,6 +194,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
           <span className="pdf-job-meta">
             {stored.source} → {stored.target} · {ts}
           </span>
+          <button type="button" className="text-action job-detail-link" onClick={() => onOpenJob(stored.job_id)}><span>{stored.job_id}</span><ArrowUpRight size={14} aria-hidden="true" /></button>
           {(stored.mode === 'extract' || stored.mode === 'ocr_only') && (
             <span className="pdf-mode-badge pdf-mode-extract" title="Submitted in Extract mode">
               Extract
@@ -190,8 +204,8 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
 
         <div className="pdf-job-actions">
           <span className={`pdf-job-badge ${STATUS_CLASS[status]}`}>
-            {statusLabel}
-            {(status === 'pending' || status === 'processing') && (
+            {missing ? "Expired" : statusLabel}
+            {!missing && (status === 'pending' || status === 'processing') && (
               <span className="spinner spinner-sm pdf-spinner" aria-hidden="true" />
             )}
           </span>
@@ -215,7 +229,7 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
               <Copy size={16} aria-hidden="true" />
             </button>
           )}
-          {isTerminal && (
+          {(isTerminal || missing) && (
             <button
               className="icon-btn"
               title="Remove from list"
@@ -226,6 +240,9 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
           )}
         </div>
       </div>
+
+      {missing && <p className="pdf-job-error">This job is no longer available on the server.</p>}
+      {pollIssue && !missing && <p className="pdf-job-warning" role="status">Connection interrupted. Reconnecting...</p>}
 
       {(status === 'processing' || status === 'completed' || status === 'failed') && (
         <>
@@ -278,10 +295,24 @@ function JobRow({ stored, onCopy, onRemove }: JobRowProps) {
 interface PdfJobsPanelProps {
   onToast: (msg: string, type: 'success' | 'error') => void
   onNewJob: () => void
+  onOpenJob: (jobId: string) => void
 }
 
-export function PdfJobsPanel({ onToast, onNewJob }: PdfJobsPanelProps) {
+export function PdfJobsPanel({ onToast, onNewJob, onOpenJob }: PdfJobsPanelProps) {
   const [jobs, setJobs] = useState<StoredPdfJob[]>(loadStoredJobs)
+  const [query, setQuery] = useState("")
+  const [filter, setFilter] = useState<"all" | JobListStatus>("all")
+  const [statuses, setStatuses] = useState<Record<string, JobListStatus>>({})
+  const updateStatus = useCallback((jobId: string, status: JobListStatus) => {
+    setStatuses(previous => previous[jobId] === status ? previous : { ...previous, [jobId]: status })
+  }, [])
+  const matches = (job: StoredPdfJob) => (filter === "all" || (statuses[job.job_id] ?? "pending") === filter) && `${job.filename} ${job.job_id} ${job.source} ${job.target}`.toLowerCase().includes(query.trim().toLowerCase())
+  const visibleCount = jobs.filter(matches).length
+  const filters = [
+    { value: "all", label: "All" }, { value: "pending", label: "Queued" },
+    { value: "processing", label: "Processing" }, { value: "completed", label: "Completed" },
+    { value: "failed", label: "Failed" }, { value: "missing", label: "Expired" },
+  ] as const
 
   const handleRemove = (jobId: string) => {
     setJobs(prev => prev.filter(j => j.job_id !== jobId))
@@ -307,12 +338,17 @@ export function PdfJobsPanel({ onToast, onNewJob }: PdfJobsPanelProps) {
         </div>
       </div>
 
+      {jobs.length > 0 && <div className="job-list-toolbar">
+        <div className="job-filter-tabs" role="group" aria-label="Job status filter">{filters.map(option => <button key={option.value} type="button" className={`icon-btn${filter === option.value ? " is-active" : ""}`} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label}<span className="filter-count">{option.value === "all" ? jobs.length : jobs.filter(job => (statuses[job.job_id] ?? "pending") === option.value).length}</span></button>)}</div>
+        <label className="job-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Search PDF jobs" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search documents or job IDs" /></label>
+      </div>}
+      {jobs.length > 0 && visibleCount === 0 && <p className="history-empty">No jobs match the current filters.</p>}
       {jobs.length === 0 ? (
         <div className="history-empty"><FileText size={36} aria-hidden="true" /><span>No PDF jobs yet.</span><button type="button" className="text-action" onClick={onNewJob}>Upload a PDF</button></div>
       ) : (
         <ul className="pdf-job-list">
           {jobs.map(j => (
-            <JobRow key={j.job_id} stored={j} onCopy={onToast} onRemove={handleRemove} />
+            <JobRow key={j.job_id} stored={j} onCopy={onToast} onRemove={handleRemove} onStatusChange={updateStatus} onOpenJob={onOpenJob} hidden={!matches(j)} />
           ))}
         </ul>
       )}

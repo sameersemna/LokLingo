@@ -53,18 +53,6 @@ export interface UseImageProgressApi {
 export function useImageProgress({
   ocrLoading,
   overlayBlocksCount,
-  compareOriginalUrl,
-  compareOverlayUrl,
-  compareLayoutUrl,
-  resultImageUrl,
-  setModalFocus,
-  setModalSliderTarget,
-  setModalFlashTarget,
-  setModalSliderPercent,
-  setModalView,
-  setComparisonQuickToggle,
-  resetComparisonModalZoom,
-  openModal,
 }: UseImageProgressParams): UseImageProgressApi {
   const [imageProgressStage, setImageProgressStage] = useState<ProgressStage | null>(null)
   const [imageProgressCompleted, setImageProgressCompleted] = useState<ProgressStage[]>([])
@@ -77,8 +65,6 @@ export function useImageProgress({
   const [reliabilityHint, setReliabilityHint] = useState<string | null>(null)
 
   const imageProgressTimersRef = useRef<number[]>([])
-  const reliabilityHintTimersRef = useRef<number[]>([])
-  const translationTickerRef = useRef<number | null>(null)
   const backendImageProgressActiveRef = useRef(false)
 
   const clearImageProgressTimers = useCallback(() => {
@@ -86,15 +72,9 @@ export function useImageProgress({
     imageProgressTimersRef.current = []
   }, [])
 
-  const clearReliabilityHintTimers = useCallback(() => {
-    reliabilityHintTimersRef.current.forEach(timer => window.clearTimeout(timer))
-    reliabilityHintTimersRef.current = []
-  }, [])
-
   const startImageProgress = useCallback(() => {
     backendImageProgressActiveRef.current = false
     clearImageProgressTimers()
-    clearReliabilityHintTimers()
     setTranslationRegionIndex(0)
     setTranslationRegionTotal(0)
     setLiveChunkProgress(null)
@@ -105,54 +85,16 @@ export function useImageProgress({
     setImageProgressStage("detecting")
     setImageProgressCompleted([])
 
-    const toLayout = window.setTimeout(() => {
-      setImageProgressCompleted(["detecting"])
-      setImageProgressStage("layout")
-    }, MOTION.imageProgress.toLayoutMs)
-
-    const toLanguages = window.setTimeout(() => {
-      setImageProgressCompleted(["detecting", "layout"])
-      setImageProgressStage("languages")
-    }, MOTION.imageProgress.toLanguagesMs)
-
-    const toTranslation = window.setTimeout(() => {
-      setImageProgressCompleted(["detecting", "layout", "languages"])
-      setImageProgressStage("translating")
-    }, MOTION.imageProgress.toTranslationMs)
-
-    const toTypography = window.setTimeout(() => {
-      setImageProgressCompleted(["detecting", "layout", "languages", "translating"])
-      setImageProgressStage("typography")
-    }, MOTION.imageProgress.toTypographyMs)
-
-    const toRendering = window.setTimeout(() => {
-      setImageProgressCompleted(["detecting", "layout", "languages", "translating", "typography"])
-      setImageProgressStage("rendering")
-    }, MOTION.imageProgress.toRenderingMs)
-
-    const toRecoveryHint = window.setTimeout(() => {
-      setReliabilityHint("Translation engine recovering...")
-    }, 3400)
-    const toRetryHint = window.setTimeout(() => {
-      setReliabilityHint("Retrying unstable region...")
-    }, 6200)
-    const toFallbackHint = window.setTimeout(() => {
-      setReliabilityHint("Switching rendering strategy...")
-    }, 9000)
-
-    imageProgressTimersRef.current = [toLayout, toLanguages, toTranslation, toTypography, toRendering]
-    reliabilityHintTimersRef.current = [toRecoveryHint, toRetryHint, toFallbackHint]
-  }, [clearImageProgressTimers, clearReliabilityHintTimers])
+  }, [clearImageProgressTimers])
 
   const completeImageProgress = useCallback(() => {
     clearImageProgressTimers()
-    clearReliabilityHintTimers()
     setImageProgressStatus("done")
     setImageProgressFailedStage(null)
     setImageProgressCompleted(["detecting", "layout", "languages", "translating", "typography", "rendering"])
     setImageProgressStage(null)
     setLiveChunkProgress(1)
-    setLivePhaseLabel("Rendering typography")
+    setLivePhaseLabel("Complete")
     setReliabilityHint(null)
 
     const settle = window.setTimeout(() => {
@@ -166,64 +108,21 @@ export function useImageProgress({
       setLivePhaseLabel(null)
     }, MOTION.imageProgress.successSettleMs)
 
-    // Auto-open comparison modal after UI settles
-    const autoOpenDelay = window.setTimeout(() => {
-      const hasComparison = Boolean(compareOriginalUrl && compareOverlayUrl && compareLayoutUrl)
-      if (!hasComparison && !resultImageUrl) return
-
-      setModalFocus(hasComparison ? "layout" : "layout")
-      setModalSliderTarget("layout")
-      setModalFlashTarget("layout")
-      setModalSliderPercent(50)
-      setModalView(hasComparison ? "slider" : "gallery")
-      setComparisonQuickToggle(false)
-      resetComparisonModalZoom()
-      openModal()
-    }, MOTION.imageProgress.successSettleMs + 300)
-
-    imageProgressTimersRef.current = [settle, autoOpenDelay]
-  }, [
-    clearImageProgressTimers,
-    clearReliabilityHintTimers,
-    compareOriginalUrl,
-    compareOverlayUrl,
-    compareLayoutUrl,
-    resultImageUrl,
-    setModalFocus,
-    setModalSliderTarget,
-    setModalFlashTarget,
-    setModalSliderPercent,
-    setModalView,
-    setComparisonQuickToggle,
-    resetComparisonModalZoom,
-    openModal,
-  ])
+    imageProgressTimersRef.current = [settle]
+  }, [clearImageProgressTimers])
 
   const failImageProgress = useCallback(() => {
     clearImageProgressTimers()
-    clearReliabilityHintTimers()
     setImageProgressStatus("error")
     setImageProgressFailedStage(imageProgressStage)
-    setLivePhaseLabel("Pipeline stabilization in progress")
-
-    const settle = window.setTimeout(() => {
-      setImageProgressStatus("idle")
-      setImageProgressFailedStage(null)
-      setImageProgressCompleted([])
-      setImageProgressStage(null)
-      setTranslationRegionIndex(0)
-      setTranslationRegionTotal(0)
-      setLiveChunkProgress(null)
-      setLivePhaseLabel(null)
-    }, MOTION.imageProgress.errorSettleMs)
-    imageProgressTimersRef.current = [settle]
-  }, [clearImageProgressTimers, clearReliabilityHintTimers, imageProgressStage])
+    setLivePhaseLabel("Processing interrupted")
+    setReliabilityHint(null)
+  }, [clearImageProgressTimers, imageProgressStage])
 
   const handleImageJobProgress = useCallback((job: JobProgressUpdate) => {
     if (!backendImageProgressActiveRef.current) {
       backendImageProgressActiveRef.current = true
       clearImageProgressTimers()
-      clearReliabilityHintTimers()
     }
 
     const mappedStage = mapBackendImageStage(job.stage)
@@ -256,7 +155,7 @@ export function useImageProgress({
     } else if (job.status === "processing") {
       setReliabilityHint(null)
     }
-  }, [clearImageProgressTimers, clearReliabilityHintTimers])
+  }, [clearImageProgressTimers])
 
   useEffect(() => {
     return () => {
@@ -265,43 +164,10 @@ export function useImageProgress({
   }, [clearImageProgressTimers])
 
   useEffect(() => {
-    return () => {
-      clearReliabilityHintTimers()
-    }
-  }, [clearReliabilityHintTimers])
-
-  useEffect(() => {
-    if (translationTickerRef.current !== null) {
-      window.clearInterval(translationTickerRef.current)
-      translationTickerRef.current = null
-    }
-
-    if (!ocrLoading || imageProgressStatus !== "running" || imageProgressStage !== "translating") {
-      return
-    }
-
-    const total = overlayBlocksCount
-    if (total <= 0) return
-
+    if (!ocrLoading) return
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTranslationRegionTotal(total)
-    setLivePhaseLabel("Preserving layout geometry")
-    translationTickerRef.current = window.setInterval(() => {
-      setTranslationRegionIndex(prev => {
-        if (prev >= total) return total
-        const next = prev + 1
-        setLiveChunkProgress(next / total)
-        return next
-      })
-    }, 190)
-
-    return () => {
-      if (translationTickerRef.current !== null) {
-        window.clearInterval(translationTickerRef.current)
-        translationTickerRef.current = null
-      }
-    }
-  }, [imageProgressStage, imageProgressStatus, ocrLoading, overlayBlocksCount])
+    setTranslationRegionTotal(overlayBlocksCount)
+  }, [ocrLoading, overlayBlocksCount])
 
   useEffect(() => {
     const handleLiveProgress = (event: Event) => {

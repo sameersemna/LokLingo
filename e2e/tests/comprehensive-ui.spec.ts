@@ -6,6 +6,112 @@ const BACKEND = process.env.LOKLINGO_BASE_URL || 'http://localhost:28080';
 test.describe('Comprehensive UI smoke + self-heal checks', () => {
   test.use({ baseURL: BASE });
 
+  test('production Settings saves masked session credentials and verifies access', async ({ page }) => {
+    await page.route('**/api/v1/jobs/dead?limit=1', route => route.fulfill(route.request().headers()['x-internal-token'] === 'operator-fixture' ? { json: { count: 0, jobs: [] } } : { status: 401, json: { error: 'Unauthorized' } }));
+    await page.goto('/settings');
+    const write = page.getByLabel('Write API token', { exact: true });
+    const internal = page.getByLabel('Internal operator token', { exact: true });
+    await expect(write).toHaveAttribute('type', 'password');
+    await expect(internal).toHaveAttribute('type', 'password');
+    await write.fill('write-fixture');
+    await internal.fill('operator-fixture');
+    await page.getByRole('button', { name: 'Save session credentials', exact: true }).click();
+    await expect(page.getByRole('status')).toHaveText('Credentials saved for this browser session.');
+    expect(await page.evaluate(() => localStorage.getItem('loklingo-internal-token'))).toBeNull();
+    await page.reload();
+    await expect(write).toHaveValue('write-fixture');
+    await expect(internal).toHaveValue('operator-fixture');
+    await page.getByRole('button', { name: 'Check operator access', exact: true }).click();
+    await expect(page.getByRole('status')).toHaveText('Operator access verified.');
+    await page.getByRole('button', { name: 'Clear credentials', exact: true }).click();
+    await expect(write).toHaveValue('');
+    await expect(internal).toHaveValue('');
+    expect(await page.evaluate(() => sessionStorage.getItem('loklingo-write-token'))).toBeNull();
+  });
+
+  test('production Jobs filters track hidden jobs and open shareable details', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('loklingo-pdf-jobs', JSON.stringify([
+      { job_id: 'completed-fixture', filename: 'report.pdf', source: 'en', target: 'de', submittedAt: 3 },
+      { job_id: 'failed-fixture', filename: 'failed.pdf', source: 'en', target: 'de', submittedAt: 2 },
+      { job_id: 'expired-fixture', filename: 'expired.pdf', source: 'en', target: 'de', submittedAt: 1 },
+      { job_id: 'live-fixture', filename: 'live.pdf', source: 'en', target: 'de', submittedAt: 4 },
+    ])));
+    let liveReads = 0;
+    await page.route(/\/api\/v1\/jobs\/[^/]+\/events$/, route => route.fulfill({ contentType: 'text/event-stream', body: '' }));
+    await page.route(/\/api\/v1\/jobs\/(completed|failed|expired|live)-fixture$/, route => {
+      const id = route.request().url().split('/').pop()!;
+      if (id === 'expired-fixture') return route.fulfill({ status: 404, json: { error: 'Not found' } });
+      const status = id === 'failed-fixture' ? 'failed' : id === 'live-fixture' && ++liveReads === 1 ? 'processing' : 'completed';
+      return route.fulfill({ json: { job_id: id, status, translated_text: status === 'completed' ? 'Completed document translation.' : '', source: 'en', target: 'de', error: status === 'failed' ? 'Provider timeout' : undefined } });
+    });
+    await page.goto('/jobs');
+    await page.getByRole('button', { name: /^Failed/ }).click();
+    await expect(page.locator('.pdf-job-row:visible')).toHaveCount(1);
+    const completedFilter = page.getByRole('button', { name: /^Completed/ });
+    await expect(completedFilter).toContainText('2');
+    await completedFilter.click();
+    await expect(page.locator('.pdf-job-row:visible')).toHaveCount(2);
+    await page.getByRole('searchbox', { name: 'Search PDF jobs' }).fill('report');
+    await expect(page.locator('.pdf-job-row:visible')).toHaveCount(1);
+    await page.getByRole('button', { name: 'completed-fixture', exact: true }).click();
+    await expect(page).toHaveURL(/\/jobs\/completed-fixture$/);
+    await expect(page.locator('.result-text')).toHaveText('Completed document translation.');
+    await page.reload();
+    await expect(page.locator('.result-text')).toHaveText('Completed document translation.');
+    await page.goto('/jobs/expired-fixture');
+    await expect(page.getByRole('alert')).toHaveText('Job not found or expired.');
+  });
+
+  test('production service failures expose readiness and operator access states', async ({ page }) => {
+    await page.route('**/ready', route => route.fulfill({ status: 500, json: { error: 'Readiness unavailable' } }));
+    await page.route(/\/api\/v1\/metrics\//, route => route.fulfill({ status: 401, json: { error: 'Unauthorized' } }));
+    await page.goto('/operations');
+    await expect(page.getByRole('button', { name: 'System unavailable' })).toBeVisible();
+    await expect(page.getByText('Operator access required.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Access settings', exact: true }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+  });
+
+  for (const failedPass of ['overlay', 'layout']) {
+    test(`production image preserves output when ${failedPass} fails`, async ({ page, request }) => {
+      await page.route('**/ocr/image', route => route.fulfill({ json: { text: 'Original fixture text', confidence: 0.95, blocks: [] } }));
+      await page.route('**/api/v1/jobs/image', async route => {
+        const original = route.request();
+        const form = await new Request(original.url(), { method: 'POST', headers: original.headers(), body: original.postDataBuffer() }).formData();
+        if (form.get('mode') === failedPass) return route.fulfill({ status: 500, json: { error: 'Rendering failed' } });
+        return route.fulfill({ status: 202, json: { job_id: 'partial-fixture' } });
+      });
+      await page.route('**/api/v1/jobs/partial-fixture', route => route.fulfill({ json: { job_id: 'partial-fixture', status: 'completed', translated_text: 'Preserved translated text.', source: 'en', target: 'de', image_url: '/samples/before_bold_style.png' } }));
+      await page.route('**/api/v1/jobs/partial-fixture/events', route => route.fulfill({ contentType: 'text/event-stream', body: '' }));
+      await page.goto('/translate/image');
+      const image = await request.get(`${BASE}/samples/before_bold_style.png`);
+      await page.locator('input[type="file"]').setInputFiles({ name: 'partial.png', mimeType: 'image/png', buffer: await image.body() });
+      await expect(page.locator('.result-text')).toHaveText('Preserved translated text.');
+      await expect(page.getByText(failedPass === 'layout' ? 'Studio output unavailable' : 'Fast output unavailable', { exact: true })).toBeVisible();
+      await expect(page.getByTitle(failedPass === 'layout' ? 'Download studio result' : 'Download fast result')).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Retry image', exact: true })).toBeVisible();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    });
+  }
+
+  test('production routes support deep links history and draft preservation', async ({ page }) => {
+    await page.goto('/translate/text?source=en');
+    await expect(page.getByRole('heading', { name: 'Text translation', exact: true })).toBeVisible();
+    await page.getByRole('textbox', { name: 'Source text' }).fill('Draft survives route navigation.');
+    await page.getByRole('button', { name: 'PDF Jobs', exact: true }).click();
+    await expect(page).toHaveURL(/\/jobs\?source=en$/);
+    await page.goBack();
+    await expect(page.getByRole('textbox', { name: 'Source text' })).toHaveValue('Draft survives route navigation.');
+    await page.goForward();
+    await expect(page.getByRole('heading', { name: 'PDF translation jobs' })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'PDF translation jobs' })).toBeVisible();
+    await page.goto('/missing-workspace');
+    await expect(page.getByRole('heading', { name: 'Page not found' })).toBeVisible();
+    await page.getByRole('button', { name: 'Open translation workspace', exact: true }).last().click();
+    await expect(page).toHaveURL(/\/translate\/image$/);
+  });
+
   test('Stitch workspaces keep translation and operational views separate', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Image translation', exact: true })).toBeVisible();
@@ -91,6 +197,18 @@ test.describe('Comprehensive UI smoke + self-heal checks', () => {
     expect(frame).not.toBeNull();
     expect(overlay!.width).toBeCloseTo(frame!.width - 2, 0);
     await expect(page.locator('.comparison-wrap .compare-slider-overlay')).toHaveCSS('clip-path', 'inset(0px 75% 0px 0px)');
+    await page.getByRole('button', { name: 'Fullscreen', exact: true }).click();
+    const modalTarget = page.getByRole('group', { name: 'Modal slider target' }).getByRole('button').first();
+    await modalTarget.click();
+    await expect(modalTarget).toHaveAttribute('aria-pressed', 'true');
+    const modalFrame = await page.locator('.comparison-modal .compare-slider-frame').boundingBox();
+    const modalOverlay = await page.locator('.comparison-modal .compare-slider-overlay').boundingBox();
+    const modalBorders = await page.locator('.comparison-modal .compare-slider-frame').evaluate(element => {
+      const style = getComputedStyle(element);
+      return parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+    });
+    expect(modalOverlay!.width).toBeCloseTo(modalFrame!.width - modalBorders, 0);
+    await page.getByRole('button', { name: 'Close comparison viewer' }).click();
     await page.screenshot({ path: test.info().outputPath('stitch-image-inspection.png'), fullPage: true });
   });
 

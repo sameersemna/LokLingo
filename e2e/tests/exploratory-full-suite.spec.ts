@@ -267,6 +267,7 @@ test.describe('Full exploratory E2E suite', () => {
 
   test('13. dead ops panel opens and shows recovery queue', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Reliability', exact: true }).click();
 
     const deadOpsBtn = page.getByRole('button', { name: /dead ops/i }).first();
     await deadOpsBtn.click();

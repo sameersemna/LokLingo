@@ -16,7 +16,8 @@
     "jspdf": "^4.2.1",
     "lucide-react": "^1.66.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "react-router": "^8.5.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

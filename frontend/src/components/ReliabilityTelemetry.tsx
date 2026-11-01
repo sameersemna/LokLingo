@@ -4,9 +4,12 @@ import {
   type MetricsWindow,
 } from "../api/metrics"
 import { RELIABILITY_WINDOWS } from "../constants"
+import { RefreshCw, ShieldCheck } from "lucide-react"
 import { type CheckpointThresholds, formatPercent, levelLabel, checkpointOperatorHint, safePercent } from "../checkpointReliability"
 
 interface ReliabilityTelemetryProps {
+  onRefresh: () => void
+  onOpenSettings: () => void
   visible: boolean
   window: MetricsWindow
   onWindowChange: (w: MetricsWindow) => void
@@ -28,6 +31,8 @@ export function ReliabilityTelemetry({
   providerMetrics,
   providerError,
   updatedAt,
+  onRefresh,
+  onOpenSettings,
 }: ReliabilityTelemetryProps) {
   if (!visible) return null
 
@@ -39,18 +44,18 @@ export function ReliabilityTelemetry({
           <h2>Reliability telemetry</h2>
           <p>{updatedAt ? `Updated ${new Date(updatedAt).toLocaleTimeString()}` : "Awaiting service metrics"}</p>
         </div>
-        <label className="reliability-window-control">
+        <div className="settings-actions"><button type="button" className="icon-btn" onClick={onRefresh} disabled={loading}><RefreshCw size={15} aria-hidden="true" /> Refresh</button><label className="reliability-window-control">
           Window
           <select value={metricsWindow} onChange={e => onWindowChange(e.target.value as MetricsWindow)}>
             {RELIABILITY_WINDOWS.map(w => (
               <option key={w} value={w}>{w}</option>
             ))}
           </select>
-        </label>
+        </label></div>
       </div>
 
       {loading && <p className="reliability-state">Loading reliability metrics...</p>}
-      {error && <p className="reliability-state reliability-state-error">{error}</p>}
+      {error && <div className="access-state"><p className="reliability-state reliability-state-error" role="alert">{error}</p>{error === "Operator access required." && <button type="button" className="icon-btn" onClick={onOpenSettings}><ShieldCheck size={16} aria-hidden="true" /> Access settings</button>}{metrics && <p className="field-caption">Showing the last successful snapshot.</p>}</div>}
 
       {metrics && (
         <>

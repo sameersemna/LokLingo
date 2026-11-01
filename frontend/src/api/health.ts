@@ -1,4 +1,4 @@
-
+import { apiFetch } from "../utils/http"
 export interface DependencyStatus {
   status: "ok" | "error"
   error?: string
@@ -11,9 +11,5 @@ export interface ReadinessResponse {
 }
 
 export async function getReadiness(): Promise<ReadinessResponse> {
-  const res = await fetch("/ready", { signal: AbortSignal.timeout(7000) })
-  if (!res.ok && res.status !== 503) {
-    throw new Error(`Readiness check returned HTTP ${res.status}`)
-  }
-  return res.json()
+  return apiFetch<ReadinessResponse>("/ready", { timeoutMs: 7000, acceptedStatuses: [503] })
 }

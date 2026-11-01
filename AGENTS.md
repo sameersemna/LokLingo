@@ -33,6 +33,8 @@ You are an expert maintainer of **LokLingo** — a high-performance, self-hosted
 - Maintain clear separation between API handlers, services, and workers.
 - Add comprehensive health/readiness checks for every service.
 - **Frontend**: Use `apiFetch()` from `utils/http.ts` for all HTTP requests. Use `getErrorMessage()` from `utils/errors.ts` for error handling. Import constants from `constants.ts` — never redefine locally.
+- **Navigation**: Use `useWorkspaceNavigation()` for route selection; keep translation drafts mounted across workspace navigation.
+- **Credentials**: Never bake operator/write tokens into frontend assets or persist them in localStorage. Use Settings-managed sessionStorage credentials, and only attach write credentials to same-origin API writes.
 - **Backend**: Use `internal/httputil` for shared HTTP helpers. No duplicate utility functions. Constructor injection only — no two-phase initialization.
 
 ## When Making Changes

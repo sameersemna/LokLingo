@@ -2,9 +2,12 @@
 import { useCallback, useEffect, useReducer, useRef } from "react"
 import { getReadiness, getOCRMetrics, type ReadinessResponse, type OCRMetricsResponse } from "../api"
 import { pressureLevel } from "../constants"
+import { getErrorMessage } from "../utils/errors"
 
 interface State {
   readiness: ReadinessResponse | null
+  readinessError: string | null
+  verifiedAt: number | null
   popoverOpen: boolean
   popoverLoading: boolean
   popoverError: string | null
@@ -16,7 +19,8 @@ interface State {
 }
 
 type Action =
-  | { type: "set-readiness"; readiness: ReadinessResponse | null }
+  | { type: "set-readiness"; readiness: ReadinessResponse; verifiedAt: number }
+  | { type: "set-readiness-error"; error: string }
   | { type: "set-popover-open"; open: boolean }
   | { type: "set-popover-loading"; loading: boolean }
   | { type: "set-popover-error"; error: string | null }
@@ -25,6 +29,8 @@ type Action =
 
 const INITIAL: State = {
   readiness: null,
+  readinessError: null,
+  verifiedAt: null,
   popoverOpen: false,
   popoverLoading: false,
   popoverError: null,
@@ -41,7 +47,9 @@ const POPOVER_REFRESH_MS = 60_000
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "set-readiness":
-      return { ...state, readiness: action.readiness }
+      return { ...state, readiness: action.readiness, readinessError: null, verifiedAt: action.verifiedAt }
+    case "set-readiness-error":
+      return { ...state, readinessError: action.error }
     case "set-popover-open":
       return { ...state, popoverOpen: action.open }
     case "set-popover-loading":
@@ -95,10 +103,10 @@ export function useReadiness(): ReadinessApi {
     const check = () =>
       getReadiness()
         .then(r => {
-          if (!cancelled) dispatch({ type: "set-readiness", readiness: r })
+          if (!cancelled) dispatch({ type: "set-readiness", readiness: r, verifiedAt: Date.now() })
         })
-        .catch(() => {
-          /* swallow: readiness chip will show last known state */
+        .catch(error => {
+          if (!cancelled) dispatch({ type: "set-readiness-error", error: getErrorMessage(error, "Readiness check failed.") })
         })
     check()
     const interval = window.setInterval(check, POLL_INTERVAL_MS)

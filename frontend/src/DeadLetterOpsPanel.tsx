@@ -2,15 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { listDeadJobs, replayDeadJob, type DeadLetterJobItem } from "./api/deadletter"
 import { RefreshCw, RotateCcw, ShieldCheck } from "lucide-react"
 import { getErrorMessage } from "./utils/errors"
+import { resolveInternalToken } from "./utils/http"
+import { STORAGE_KEYS } from "./utils/storage"
 
 type ToastFn = (msg: string, type: "success" | "error") => void
 
 interface DeadLetterOpsPanelProps {
   onToast: ToastFn
+  onOpenSettings: () => void
 }
 
-const TOKEN_KEY = "loklingo-internal-token"
-const AUTO_REFRESH_KEY = "loklingo-dead-ops-auto-refresh"
+const AUTO_REFRESH_KEY = STORAGE_KEYS.DEAD_OPS_AUTO_REFRESH
 
 function shortTimestamp(raw?: string): string {
   if (!raw) return "-"
@@ -33,8 +35,8 @@ function safeParseTime(raw?: string): number {
   return Number.isNaN(parsed) ? 0 : parsed
 }
 
-export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
-  const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "")
+export function DeadLetterOpsPanel({ onToast, onOpenSettings }: DeadLetterOpsPanelProps) {
+  const token = resolveInternalToken() ?? ""
   const [limit, setLimit] = useState(25)
   const [items, setItems] = useState<DeadLetterJobItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -49,10 +51,6 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
   const [autoRefresh, setAutoRefresh] = useState<boolean>(() => localStorage.getItem(AUTO_REFRESH_KEY) !== "0")
 
   const hasToken = useMemo(() => token.trim().length > 0, [token])
-
-  useEffect(() => {
-    localStorage.setItem(TOKEN_KEY, token)
-  }, [token])
 
   useEffect(() => {
     localStorage.setItem(AUTO_REFRESH_KEY, autoRefresh ? "1" : "0")
@@ -242,19 +240,11 @@ export function DeadLetterOpsPanel({ onToast }: DeadLetterOpsPanelProps) {
       </div>
 
       <div className="dead-ops-token-row">
-        <label htmlFor="dead-ops-token"><ShieldCheck size={16} aria-hidden="true" /> X-Internal-Token</label>
-        <input
-          id="dead-ops-token"
-          type="password"
-          placeholder="Optional in dev, required in secured env"
-          value={token}
-          onChange={e => setToken(e.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-        />
+        <span><ShieldCheck size={16} aria-hidden="true" /> Operator access</span>
         <span className={`dead-token-state ${hasToken ? "dead-token-set" : "dead-token-empty"}`}>
           {hasToken ? "Token set" : "No token"}
         </span>
+        <button type="button" className="icon-btn" onClick={onOpenSettings}>Access settings</button>
       </div>
 
       <div className="dead-ops-filters">

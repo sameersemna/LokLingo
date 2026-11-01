@@ -44,6 +44,7 @@ interface ComparisonViewProps {
   onResetZoom: () => void
   onSetModalFlashToggle: () => void
   onSetModalSliderTarget: (target: string) => void
+  onSetModalFlashTarget: (target: "overlay" | "layout") => void
   onSetModalSliderPercent: (percent: number) => void
   onSetComparisonQuickToggle: (v: boolean) => void
   onSetCompareSectionRef: (el: HTMLElement | null) => void
@@ -106,6 +107,7 @@ export const ComparisonView = memo(function ComparisonView({
   onResetZoom,
   onSetModalFlashToggle,
   onSetModalSliderTarget,
+  onSetModalFlashTarget,
   onSetModalSliderPercent,
   onSetComparisonQuickToggle,
   onSetCompareSectionRef,
@@ -117,7 +119,8 @@ export const ComparisonView = memo(function ComparisonView({
   sliderDraggingRef,
 }: ComparisonViewProps) {
   const inProgress = ocrLoading && compareOriginalUrl
-  const resultsReady = !ocrLoading && compareOriginalUrl && compareOverlayUrl && compareLayoutUrl
+  const resultsReady = !ocrLoading && compareOriginalUrl && (compareOverlayUrl || compareLayoutUrl)
+  const effectiveSliderTarget = sliderTarget === "layout" && !compareLayoutUrl ? "overlay" : sliderTarget === "overlay" && !compareOverlayUrl ? "layout" : sliderTarget
 
   const modalCardRef = useRef<HTMLDivElement>(null)
   const previouslyFocusedRef = useRef<HTMLElement | null>(null)
@@ -191,7 +194,7 @@ export const ComparisonView = memo(function ComparisonView({
               <button
                 type="button"
                 className="icon-btn"
-                onClick={() => onOpenSliderModal("layout")}
+                onClick={() => onOpenSliderModal(effectiveSliderTarget)}
               >
                 <Maximize2 size={16} aria-hidden="true" /> Fullscreen
               </button>
@@ -200,15 +203,17 @@ export const ComparisonView = memo(function ComparisonView({
               <div className="comparison-segment" role="group" aria-label="Slider target">
                 <button
                   type="button"
-                  className={`icon-btn${sliderTarget === "overlay" ? " is-active" : ""}`}
+                  className={`icon-btn${effectiveSliderTarget === "overlay" ? " is-active" : ""}`}
                   onClick={() => onSetSliderTarget("overlay")}
+                  disabled={!compareOverlayUrl}
                 >
                   Fast
                 </button>
                 <button
                   type="button"
-                  className={`icon-btn${sliderTarget === "layout" ? " is-active" : ""}`}
+                  className={`icon-btn${effectiveSliderTarget === "layout" ? " is-active" : ""}`}
                   onClick={() => onSetSliderTarget("layout")}
+                  disabled={!compareLayoutUrl}
                 >
                   Studio
                 </button>
@@ -235,18 +240,19 @@ export const ComparisonView = memo(function ComparisonView({
                     type="button"
                     className="icon-btn compare-dl-btn"
                     title="Download fast result"
+                    disabled={!compareOverlayUrl}
                     onClick={() => compareOverlayUrl && onDownload(compareOverlayUrl, "overlay-translation")}
                   >
                     <Download size={15} aria-hidden="true" /> Download
                   </button>
                 </div>
-                <img
+                {compareOverlayUrl ? <img
                   src={compareOverlayUrl ?? ""}
                   alt="Fast translation result"
                   loading="lazy"
                   className="compare-clickable"
                   onClick={() => onOpenModal("overlay")}
-                />
+                /> : <div className="compare-unavailable">Fast output unavailable</div>}
               </figure>
               <figure className="compare-card">
                 <div className="compare-card-header">
@@ -255,18 +261,19 @@ export const ComparisonView = memo(function ComparisonView({
                     type="button"
                     className="icon-btn compare-dl-btn"
                     title="Download studio result"
+                    disabled={!compareLayoutUrl}
                     onClick={() => compareLayoutUrl && onDownload(compareLayoutUrl, "layout-translation")}
                   >
                     <Download size={15} aria-hidden="true" /> Download
                   </button>
                 </div>
-                <img
+                {compareLayoutUrl ? <img
                   src={compareLayoutUrl ?? ""}
                   alt="Studio translation result"
                   loading="lazy"
                   className="compare-clickable"
                   onClick={() => onOpenModal("layout")}
-                />
+                /> : <div className="compare-unavailable">Studio output unavailable</div>}
               </figure>
             </div>
           ) : (
@@ -307,7 +314,7 @@ export const ComparisonView = memo(function ComparisonView({
                   aria-hidden="true"
                 >
                   <img
-                    src={compareView === "flash" ? (compareOriginalUrl ?? "") : (sliderTarget === "overlay" ? (compareOverlayUrl ?? "") : (compareLayoutUrl ?? ""))}
+                    src={compareView === "flash" ? (compareOriginalUrl ?? "") : (effectiveSliderTarget === "overlay" ? (compareOverlayUrl ?? "") : (compareLayoutUrl ?? ""))}
                     alt=""
                     loading="lazy"
                   />
@@ -317,7 +324,7 @@ export const ComparisonView = memo(function ComparisonView({
               {compareView === "slider" && (
                 <>
                   <label className="compare-slider-label">
-                    Original vs {sliderTarget === "overlay" ? "Fast" : "Studio"}
+                    Original vs {effectiveSliderTarget === "overlay" ? "Fast" : "Studio"}
                     <input
                       type="range"
                       min={0}
@@ -331,6 +338,7 @@ export const ComparisonView = memo(function ComparisonView({
                       type="button"
                       className="icon-btn"
                       onClick={() => compareOverlayUrl && onDownload(compareOverlayUrl, "overlay-translation")}
+                      disabled={!compareOverlayUrl}
                     >
                       <Download size={15} aria-hidden="true" /> Download Fast
                     </button>
@@ -338,6 +346,7 @@ export const ComparisonView = memo(function ComparisonView({
                       type="button"
                       className="icon-btn"
                       onClick={() => compareLayoutUrl && onDownload(compareLayoutUrl, "layout-translation")}
+                      disabled={!compareLayoutUrl}
                     >
                       <Download size={15} aria-hidden="true" /> Download Studio
                     </button>
@@ -544,7 +553,7 @@ export const ComparisonView = memo(function ComparisonView({
                     />
                     <div
                       className="compare-slider-overlay"
-                      style={{ width: `${comparisonModalSliderPercent}%` }}
+                      style={{ width: "100%", clipPath: `inset(0 ${100 - comparisonModalSliderPercent}% 0 0)` }}
                       aria-hidden="true"
                     >
                       <img
@@ -572,6 +581,7 @@ export const ComparisonView = memo(function ComparisonView({
                     type="button"
                     className={`icon-btn${comparisonModalSliderTarget === "overlay" ? " is-active" : ""}`}
                     onClick={() => onSetModalSliderTarget("overlay")}
+                    aria-pressed={comparisonModalSliderTarget === "overlay"}
                   >
                     Compare Overlay
                   </button>
@@ -579,6 +589,7 @@ export const ComparisonView = memo(function ComparisonView({
                     type="button"
                     className={`icon-btn${comparisonModalSliderTarget === "layout" ? " is-active" : ""}`}
                     onClick={() => onSetModalSliderTarget("layout")}
+                    aria-pressed={comparisonModalSliderTarget === "layout"}
                   >
                     Compare Layout
                   </button>
@@ -616,14 +627,16 @@ export const ComparisonView = memo(function ComparisonView({
                   <button
                     type="button"
                     className={`icon-btn${comparisonModalFlashTarget === "overlay" ? " is-active" : ""}`}
-                    onClick={() => onSetModalSliderTarget("overlay")}
+                    onClick={() => onSetModalFlashTarget("overlay")}
+                    aria-pressed={comparisonModalFlashTarget === "overlay"}
                   >
                     Flash Overlay
                   </button>
                   <button
                     type="button"
                     className={`icon-btn${comparisonModalFlashTarget === "layout" ? " is-active" : ""}`}
-                    onClick={() => onSetModalSliderTarget("layout")}
+                    onClick={() => onSetModalFlashTarget("layout")}
+                    aria-pressed={comparisonModalFlashTarget === "layout"}
                   >
                     Flash Layout
                   </button>
