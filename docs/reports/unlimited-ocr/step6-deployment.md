@@ -7,6 +7,8 @@
 - `docker-compose.prod.yml` hardening override.
 - `uocr_models` volume.
 - Backend and OCR service environment variables in `.env.example`.
+- `OCR_UNLIMITED_OFFLINE=true` uses the cached model without Hugging Face DNS/network
+  access; set it to `false` only for the first download.
 - README and API documentation updates.
 
 ## Validated

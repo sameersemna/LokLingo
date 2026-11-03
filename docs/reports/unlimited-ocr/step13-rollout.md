@@ -11,6 +11,15 @@ OCR_UNLIMITED_ENABLED=false
 OCR_UNLIMITED_LANGS=
 ```
 
+## Rehearsed evidence
+
+- 100-page synthetic PDF: 100/100 pages, no empty pages, ~300 s.
+- 200-page synthetic PDF after repetition retry: 200/200 pages, correct first/last
+  pages, retries on pages 26/58/200, ~580 s.
+- Job-level `ocr_engine=unlimited` routing works while `OCR_PROVIDER=paddle`.
+- Sidecar-stopped fallback and config-only rollback both completed through PaddleOCR.
+- Frontend build/test/lint pass; dev/prod/UOCR compose configs render.
+
 ## Rollout sequence
 
 1. Complete `docs/reports/unlimited-ocr/step2-serving.md` and record CP1 metrics.
@@ -38,9 +47,10 @@ required; the new fields are additive.
 
 ## Not yet done
 
-- Real canary metrics.
-- Backend-level OCR-service outage fallback (OCR-service internal fallback to Paddle is
-  verified with the sidecar stopped).
-- Long-document 100/200-page validation.
-- v2 evaluation.
-- Corpus quality gate and language allowlist.
+- Real-user canary metrics (only synthetic/rehearsal traffic so far).
+- Backend-level OCR-service outage fallback; all real providers share the same OCR
+  service, so this is a graceful-failure path rather than a second OCR engine.
+- Real-document quality gate and language allowlist; synthetic Latin smoke tests are
+  clean but not representative.
+- v2 production integration; v2 Transformers probe works but requires a separate parser
+  and quality work.

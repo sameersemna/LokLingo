@@ -7,10 +7,12 @@ import { getSessionToken, saveSessionCredentials, STORAGE_KEYS } from "../utils/
 interface SettingsPanelProps {
   theme: string
   onThemeChange: (theme: "light" | "dark") => void
+  ocrEngine: string
+  onOcrEngineChange: (engine: string) => void
   onCredentialsChange: () => void
 }
 
-export function SettingsPanel({ theme, onThemeChange, onCredentialsChange }: SettingsPanelProps) {
+export function SettingsPanel({ theme, onThemeChange, ocrEngine, onOcrEngineChange, onCredentialsChange }: SettingsPanelProps) {
   const [writeToken, setWriteToken] = useState(() => getSessionToken(STORAGE_KEYS.WRITE_TOKEN))
   const [internalToken, setInternalToken] = useState(() => getSessionToken(STORAGE_KEYS.INTERNAL_TOKEN))
   const [message, setMessage] = useState<string | null>(null)
@@ -50,6 +52,19 @@ export function SettingsPanel({ theme, onThemeChange, onCredentialsChange }: Set
       <div className="mode-segments" role="group" aria-label="Color scheme">
         <button type="button" className={`mode-option${theme === "light" ? " is-active" : ""}`} aria-pressed={theme === "light"} onClick={() => onThemeChange("light")}><Sun size={16} aria-hidden="true" /> Light</button>
         <button type="button" className={`mode-option${theme === "dark" ? " is-active" : ""}`} aria-pressed={theme === "dark"} onClick={() => onThemeChange("dark")}><Moon size={16} aria-hidden="true" /> Dark</button>
+      </div>
+    </section>
+    <section className="settings-section" aria-labelledby="ocr-engine-heading">
+      <div><h3 id="ocr-engine-heading">OCR engine</h3><span className="field-caption">Applied to new image and PDF jobs</span></div>
+      <div className="settings-fields">
+        <label>Engine
+          <select value={ocrEngine} onChange={event => onOcrEngineChange(event.target.value)}>
+            <option value="paddle">PaddleOCR (default)</option>
+            <option value="unlimited">Unlimited OCR (GPU sidecar)</option>
+            <option value="auto">Auto (allowlisted languages)</option>
+          </select>
+        </label>
+        {ocrEngine !== "paddle" && <p className="field-caption">Unlimited OCR requires the optional `ocr-vlm` profile. Jobs fall back to PaddleOCR when it is unavailable.</p>}
       </div>
     </section>
     <form className="settings-section settings-credentials" onSubmit={event => { event.preventDefault(); save() }}>

@@ -8,12 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOAD_MODEL_ON_STARTUP=true
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
     torch==2.12.1 torchvision==0.27.1 \
     --index-url https://download.pytorch.org/whl/cu130
+
+RUN pip install --no-cache-dir --upgrade setuptools wheel jaraco.context
 
 RUN pip install --no-cache-dir \
     transformers==4.57.1 \

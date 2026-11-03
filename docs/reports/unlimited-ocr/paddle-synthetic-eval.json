@@ -1,0 +1,94 @@
+{
+  "engine": "paddle",
+  "samples": 4,
+  "pages": 4,
+  "mean_cer": 0.0,
+  "mean_wer": 0.0,
+  "mean_latency_ms": 1658.21,
+  "results": [
+    {
+      "id": "de",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 44,
+      "confidence": 0.9998,
+      "latency_ms": 2519.06,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 2519.06,
+          "blocks": 1
+        }
+      ]
+    },
+    {
+      "id": "en",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 46,
+      "confidence": 0.9997,
+      "latency_ms": 1460.19,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 1460.19,
+          "blocks": 1
+        }
+      ]
+    },
+    {
+      "id": "es",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 44,
+      "confidence": 0.9965,
+      "latency_ms": 1326.13,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 1326.13,
+          "blocks": 1
+        }
+      ]
+    },
+    {
+      "id": "fr",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 46,
+      "confidence": 0.9988,
+      "latency_ms": 1327.47,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 1327.47,
+          "blocks": 1
+        }
+      ]
+    }
+  ]
+}

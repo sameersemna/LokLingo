@@ -72,6 +72,15 @@ Title text
         self.assertTrue(any(block["region_class"] == "title" for block in blocks))
 
 
+class TestRepeatedLines(unittest.TestCase):
+    def test_detects_repetition(self):
+        text = "Document page 200\nDocument page 200\nDocument page 200\nDocument page 200"
+        self.assertGreater(unlimited_ocr.repeated_line_ratio(text), 0.4)
+
+    def test_no_repetition(self):
+        self.assertEqual(unlimited_ocr.repeated_line_ratio("one\ntwo\nthree"), 0.0)
+
+
 class TestPageWindows(unittest.TestCase):
     def test_no_overlap(self):
         self.assertEqual(unlimited_ocr.plan_page_windows(12, 5, 0), [(0, 5), (5, 10), (10, 12)])

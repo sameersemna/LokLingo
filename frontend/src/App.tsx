@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Image, Languages, X, ScanLine, Activity, Wrench } from "lucide-react"
 import { translate, translateImage, uploadPDF, type TranslateResponse } from "./api/translate"
 import { extractTextFromImage, type TextBlock } from "./api/ocr"
@@ -20,7 +20,7 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts"
 import { useImageProgress } from "./hooks/useImageProgress"
 import { useOverlayVisualization } from "./hooks/useOverlayVisualization"
 import { ApiError, getErrorMessage } from "./utils/errors"
-import { removeStorageItem, STORAGE_KEYS } from "./utils/storage"
+import { getStorageItem, removeStorageItem, setStorageItem, STORAGE_KEYS } from "./utils/storage"
 import {
   isRenderableOCRBlock,
   formatFileSize,
@@ -116,6 +116,7 @@ function App() {
   const [sourceText, setSourceText] = useState("")
   const [extractedSourceText, setExtractedSourceText] = useState("")
   const [mode, setMode] = useState<ProductMode>("fast")
+  const [ocrEngine, setOcrEngine] = useState<string>(() => getStorageItem<string>(STORAGE_KEYS.OCR_ENGINE, "paddle"))
   const [uploadSelection, setUploadSelection] = useState<UploadSelection | null>(null)
   const [uploadDragActive, setUploadDragActive] = useState(false)
   const [result, setResult] = useState("")
@@ -440,6 +441,8 @@ function App() {
     setModalFocus,
   })
 
+  const ocrEngineOptions = useMemo(() => (ocrEngine === "paddle" ? undefined : { ocrEngine }), [ocrEngine])
+
   const runImageFile = useCallback(async (file: File, src: string, tgt: string) => {
     setOcrLoading(true)
     setRetryImageFile(file)
@@ -483,7 +486,7 @@ function App() {
       const requestMode = PRODUCT_MODE_BACKEND_MAP[mode]
 
       if (requestMode === "ocr_only") {
-        const ocrRes = await translateImage(file, src, tgt, requestMode, handleImageJobProgress, controller.signal)
+        const ocrRes = await translateImage(file, src, tgt, requestMode, handleImageJobProgress, controller.signal, ocrEngineOptions)
         translatedOverlayText = ocrRes.translated_text ?? ""
         if (ocrBlocks.length > 0 && translatedOverlayText.trim()) {
           revealTranslatedVisualization(ocrBlocks, translatedOverlayText)
@@ -505,7 +508,7 @@ function App() {
 
       const renderPass = async (renderMode: "overlay" | "layout"): Promise<TranslateResponse | null> => {
         try {
-          return await translateImage(file, src, tgt, renderMode, handleImageJobProgress, controller.signal)
+          return await translateImage(file, src, tgt, renderMode, handleImageJobProgress, controller.signal, ocrEngineOptions)
         } catch (failure) {
           if (controller.signal.aborted || failure instanceof ApiError && [401, 403, 429].includes(failure.status)) throw failure
           return null
@@ -563,6 +566,7 @@ function App() {
     completeImageProgress,
     failImageProgress,
     mode,
+    ocrEngineOptions,
     pushToast,
     resetOCRVisualization,
     revealOCRVisualization,
@@ -619,6 +623,11 @@ function App() {
     loading,
   })
 
+  useEffect(() => {
+    setStorageItem(STORAGE_KEYS.OCR_ENGINE, ocrEngine)
+  }, [ocrEngine])
+
+
   const handleOCRFile = async (file: File) => {
     setPipelineWarning(null)
     if (demoModeActive) {
@@ -638,7 +647,7 @@ function App() {
       })
       setPdfLoading(true)
       try {
-        const { job_id } = await uploadPDF(file, sourceLang, targetLang, PRODUCT_MODE_BACKEND_MAP[mode])
+        const { job_id } = await uploadPDF(file, sourceLang, targetLang, PRODUCT_MODE_BACKEND_MAP[mode], ocrEngineOptions)
         saveStoredJob({
           job_id,
           filename: file.name,
@@ -855,7 +864,7 @@ function App() {
       <main className="app-main" id="workspace-main" tabIndex={-1}>
       {(showReliability || showDeadOps) && <nav className="operations-nav" aria-label="Operations views"><button type="button" className={`icon-btn${showReliability ? " is-active" : ""}`} aria-pressed={showReliability} onClick={() => openView("operations")}><Activity size={16} aria-hidden="true" /> Telemetry</button><button type="button" className={`icon-btn${showDeadOps ? " is-active" : ""}`} aria-pressed={showDeadOps} aria-label="Dead Ops" onClick={() => openView("recovery")}><Wrench size={16} aria-hidden="true" /> Recovery</button></nav>}
       {view === "not-found" && <section className="history-empty" aria-label="Page not found"><h2>Page not found</h2><button type="button" className="upload-primary-btn" onClick={() => openView("translate")}>Open translation workspace</button></section>}
-      {view === "settings" && <Suspense fallback={<p className="panel-loading" role="status">Loading settings...</p>}><LazySettingsPanel theme={theme} onThemeChange={setTheme} onCredentialsChange={() => { setCredentialsVersion(version => version + 1); setShowStatusDetail(false) }} /></Suspense>}
+      {view === "settings" && <Suspense fallback={<p className="panel-loading" role="status">Loading settings...</p>}><LazySettingsPanel theme={theme} onThemeChange={setTheme} ocrEngine={ocrEngine} onOcrEngineChange={setOcrEngine} onCredentialsChange={() => { setCredentialsVersion(version => version + 1); setShowStatusDetail(false) }} /></Suspense>}
       {view === "job-detail" && jobId && <Suspense fallback={<p className="panel-loading" role="status">Loading job...</p>}><LazyJobDetailPanel key={jobId} jobId={jobId} onBack={() => openView("jobs")} onCopy={copyText} onDownload={handleDownload} onExportPDF={downloadPDF} /></Suspense>}
       {/* PDF Jobs panel */}
       {showPdfJobs && (

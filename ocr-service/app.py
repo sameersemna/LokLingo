@@ -2250,7 +2250,22 @@ def _request_unlimited_window(
         strict=False,
     )
     if len(pages) == len(page_images):
-        return pages
+        # Retry individual pages whose output collapsed into repeated lines.
+        images_by_page = dict(zip(page_numbers, page_images))
+        adjusted: list[tuple[int, str]] = []
+        for page_number, text in pages:
+            if len(page_images) > 1 and unlimited_ocr.repeated_line_ratio(text) > 0.4:
+                single = unlimited_ocr.request_unlimited_pdf(
+                    [images_by_page[page_number]],
+                    [page_number],
+                    max_tokens=OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE,
+                    strict=False,
+                )
+                if single and unlimited_ocr.repeated_line_ratio(single[0][1]) < unlimited_ocr.repeated_line_ratio(text):
+                    logger.warning("unlimited_page_repetition_retry page=%d", page_number)
+                    text = single[0][1]
+            adjusted.append((page_number, text))
+        return adjusted
     if len(page_images) == 1:
         if pages:
             return pages[:1]

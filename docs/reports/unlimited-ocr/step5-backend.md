@@ -36,6 +36,8 @@ Result:
   confidence).
 - No fallback occurred.
 - End-to-end latency: ~26–27 seconds for the synthetic 10-page PDF.
+- Provider completion logs the actual engine (`provider=unlimited` on the successful
+  path; `provider=paddle` when the OCR service falls back).
 
 This was tested with `OCR_PROVIDER=paddle` to prove that a per-job `ocr_engine` request
 reorders the provider chain correctly.
@@ -49,10 +51,21 @@ With the sidecar stopped and `OCR_UNLIMITED_ENABLED=true`:
   `fell back from unlimited OCR to PaddleOCR`.
 - One-page extraction completed in ~2.6 s.
 
+## Rollback rehearsal
+
+With the sidecar stopped and `OCR_UNLIMITED_ENABLED=false`:
+
+- A job requesting `ocr_engine=unlimited` still completed through PaddleOCR.
+- Backend provider selection logged `unlimited` first, then completion logged the
+  actual engine `paddle` with `ocr_confidence=0.9999`.
+- This proves the config-only rollback path (`OCR_UNLIMITED_ENABLED=false` /
+  `OCR_PROVIDER=paddle`) keeps jobs working.
+
 ## Pending
 
-- Backend-provider fallback (as opposed to OCR-service internal fallback) under a
-  simulated OCR-service outage.
+- Backend-provider fallback when the OCR service itself is unreachable (all real
+  providers share that service; this is a graceful-failure path, not an alternate OCR
+  engine).
 - Real canary metrics.
 - Corpus quality evaluation and language allowlist.
 - Frontend control to select the engine (API and job badge are implemented; the upload UI

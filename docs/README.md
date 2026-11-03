@@ -9,16 +9,18 @@ remain in [`../guide/`](../guide/).
 | Document | Purpose | Status |
 | --- | --- | --- |
 | [`research/unlimited-ocr.md`](research/unlimited-ocr.md) | Technical research synthesis of Baidu Unlimited OCR / Unlimited OCR 2: architecture, capabilities, benchmarks, limitations, licensing, APIs, and hardware requirements. | Research complete (2026-11-03) |
-| [`plans/unlimited-ocr-integration.md`](plans/unlimited-ocr-integration.md) | Step-by-step plan to add Unlimited OCR to LokLingo as an optional document-intelligence provider, including prerequisites, architecture, data flow, testing, risks, rollout, and follow-up agentic coding tasks. | Implemented in part; model/quality checkpoints pending |
+| [`plans/unlimited-ocr-integration.md`](plans/unlimited-ocr-integration.md) | Step-by-step plan to add Unlimited OCR to LokLingo as an optional document-intelligence provider, including prerequisites, architecture, data flow, testing, risks, rollout, and follow-up agentic coding tasks. | Implemented; real-corpus quality and canary pending |
 | [`reports/unlimited-ocr/`](reports/unlimited-ocr/) | Implementation status, environment baseline, serving/security notes, and rollout checklist. | In progress |
 
 ## Implementation status
 
 The OCR adapter, backend provider routing, job fields, compose profile, sidecar, evaluation
-harness, frontend API surface, and tests are implemented. The real Unlimited OCR model loaded
-on the GB10 host and passed a 10-page end-to-end OCR smoke test (CP1). Quality evaluation on
-the project corpus, canary rollout, and the v2 evaluation remain pending. See
-`reports/unlimited-ocr/step2-serving.md`.
+harness, frontend engine selector, and tests are implemented. The real Unlimited OCR model
+passed 10-, 100-, and 200-page synthetic smoke tests, including adaptive window splitting and
+repetition retry. Synthetic Latin-language quality is clean, but real-document quality,
+language allowlisting, real-user canary, and v2 production integration remain pending. See
+`reports/unlimited-ocr/phase5-quality.md`, `long-doc-validation.md`, and
+`step12-v2.md`.
 
 ## Decision in one paragraph
 

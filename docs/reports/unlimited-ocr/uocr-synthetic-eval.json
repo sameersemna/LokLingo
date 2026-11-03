@@ -1,0 +1,154 @@
+{
+  "engine": "unlimited",
+  "samples": 4,
+  "pages": 4,
+  "mean_cer": 0.0,
+  "mean_wer": 0.0,
+  "mean_latency_ms": 683.18,
+  "results": [
+    {
+      "id": "de",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 44,
+      "confidence": 0.0,
+      "latency_ms": 778.09,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 778.09,
+          "blocks": 1,
+          "warnings": [],
+          "quality": {
+            "page_marker_ok": true,
+            "page_count_match": true,
+            "truncated": false,
+            "empty_page_count": 0,
+            "bbox_invalid_count": 0,
+            "markup_leak": false,
+            "repetition_ratio": 0.0,
+            "repeated_line_ratio": 0.0,
+            "engine": "unlimited",
+            "engine_version": "baidu/Unlimited-OCR",
+            "warnings": []
+          },
+          "language": "auto"
+        }
+      ]
+    },
+    {
+      "id": "en",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 46,
+      "confidence": 0.0,
+      "latency_ms": 626.85,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 626.85,
+          "blocks": 1,
+          "warnings": [],
+          "quality": {
+            "page_marker_ok": true,
+            "page_count_match": true,
+            "truncated": false,
+            "empty_page_count": 0,
+            "bbox_invalid_count": 0,
+            "markup_leak": false,
+            "repetition_ratio": 0.0,
+            "repeated_line_ratio": 0.0,
+            "engine": "unlimited",
+            "engine_version": "baidu/Unlimited-OCR",
+            "warnings": []
+          },
+          "language": "auto"
+        }
+      ]
+    },
+    {
+      "id": "es",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 44,
+      "confidence": 0.0,
+      "latency_ms": 664.57,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 664.57,
+          "blocks": 1,
+          "warnings": [],
+          "quality": {
+            "page_marker_ok": true,
+            "page_count_match": true,
+            "truncated": false,
+            "empty_page_count": 0,
+            "bbox_invalid_count": 0,
+            "markup_leak": false,
+            "repetition_ratio": 0.0,
+            "repeated_line_ratio": 0.0,
+            "engine": "unlimited",
+            "engine_version": "baidu/Unlimited-OCR",
+            "warnings": []
+          },
+          "language": "auto"
+        }
+      ]
+    },
+    {
+      "id": "fr",
+      "language": "auto",
+      "document_type": "unknown",
+      "features": [],
+      "pages": 1,
+      "cer": 0.0,
+      "wer": 0.0,
+      "chars": 46,
+      "confidence": 0.0,
+      "latency_ms": 663.2,
+      "table_teds": null,
+      "formula_cdm": null,
+      "reading_order_edit": null,
+      "page_metrics": [
+        {
+          "latency_ms": 663.2,
+          "blocks": 1,
+          "warnings": [],
+          "quality": {
+            "page_marker_ok": true,
+            "page_count_match": true,
+            "truncated": false,
+            "empty_page_count": 0,
+            "bbox_invalid_count": 0,
+            "markup_leak": false,
+            "repetition_ratio": 0.0,
+            "repeated_line_ratio": 0.0,
+            "engine": "unlimited",
+            "engine_version": "baidu/Unlimited-OCR",
+            "warnings": []
+          },
+          "language": "auto"
+        }
+      ]
+    }
+  ]
+}

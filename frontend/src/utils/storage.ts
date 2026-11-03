@@ -8,6 +8,7 @@ export const STORAGE_KEYS = {
   INTERNAL_TOKEN: "loklingo-internal-token",
   WRITE_TOKEN: "loklingo-write-token",
   DEAD_OPS_AUTO_REFRESH: "loklingo-dead-ops-auto-refresh",
+  OCR_ENGINE: "loklingo-ocr-engine",
 } as const
 
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]

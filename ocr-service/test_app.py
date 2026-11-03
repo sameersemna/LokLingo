@@ -518,6 +518,29 @@ class TestUnlimitedPDFMerge(unittest.TestCase):
         self.assertEqual(pages[0][1], "Page 1")
         self.assertEqual(pages[-1][1], "Page 10")
 
+    def test_repetition_retry_uses_single_page(self):
+        images = [_fake_pil_image() for _ in range(3)]
+        page_numbers = [1, 2, 3]
+
+        def fake_request(page_images, numbers, **kwargs):
+            if len(page_images) == 1:
+                return [(numbers[0], f"<|det|>text [0,0,999,999]<|/det|>Page {numbers[0]}")]
+            return [
+                (number, f"<|det|>text [0,0,999,999]<|/det|>Page {number}")
+                if number != 2
+                else (number, "Page 2\nPage 2\nPage 2\nPage 2")
+                for number in numbers
+            ]
+
+        with mock.patch.object(ocr_app.unlimited_ocr, "request_unlimited_pdf", side_effect=fake_request):
+            pages = ocr_app._request_unlimited_window(images, page_numbers)
+
+        self.assertEqual([text for _, text in pages], [
+            "<|det|>text [0,0,999,999]<|/det|>Page 1",
+            "<|det|>text [0,0,999,999]<|/det|>Page 2",
+            "<|det|>text [0,0,999,999]<|/det|>Page 3",
+        ])
+
     def test_two_page_window_merges_pages(self):
         images = [_fake_pil_image(), _fake_pil_image()]
 

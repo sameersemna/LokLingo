@@ -326,15 +326,17 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 		res.Provider = provider.Name()
 		if res.Engine == "" {
 			res.Engine = provider.Name()
+		} else {
+			res.Provider = res.Engine
 		}
 		res.Retries += retries
-		observability.IncOCRProviderUsed(provider.Name())
+		observability.IncOCRProviderUsed(res.Provider)
 		observability.RecordOCRProviderLatency(latency)
 		observability.RecordOCRProviderConfidence(res.Confidence)
 		if res.Retries > 0 {
 			observability.IncOCRProviderRetries(int64(res.Retries))
 		}
-		slog.Info("ocr_completed", "provider", provider.Name(), "latency_ms", latency, "confidence", res.Confidence, "retries", res.Retries, "fallback_count", fallbacks)
+		slog.Info("ocr_completed", "provider", res.Provider, "latency_ms", latency, "confidence", res.Confidence, "retries", res.Retries, "fallback_count", fallbacks)
 		return res, nil
 	}
 	return nil, fmt.Errorf("ocr: all providers exhausted: %w", lastErr)
@@ -405,15 +407,17 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 		res.Provider = provider.Name()
 		if res.Engine == "" {
 			res.Engine = provider.Name()
+		} else {
+			res.Provider = res.Engine
 		}
 		res.Retries += retries
-		observability.IncOCRProviderUsed(provider.Name())
+		observability.IncOCRProviderUsed(res.Provider)
 		observability.RecordOCRProviderLatency(latency)
 		observability.RecordOCRProviderConfidence(res.Confidence)
 		if res.Retries > 0 {
 			observability.IncOCRProviderRetries(int64(res.Retries))
 		}
-		slog.Info("ocr_completed", "provider", provider.Name(), "latency_ms", latency, "confidence", res.Confidence, "retries", res.Retries, "fallback_count", fallbacks)
+		slog.Info("ocr_completed", "provider", res.Provider, "latency_ms", latency, "confidence", res.Confidence, "retries", res.Retries, "fallback_count", fallbacks)
 		return res, nil
 	}
 	return nil, fmt.Errorf("ocr: all providers exhausted: %w", lastErr)

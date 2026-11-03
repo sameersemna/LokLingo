@@ -1,7 +1,8 @@
 # Unlimited OCR — Integration Plan for LokLingo
 
-**Status:** Implementation in progress. See `docs/reports/unlimited-ocr/` for the current
-verified state; the real model serving and quality gates are still pending.
+**Status:** Implemented in part. See `docs/reports/unlimited-ocr/` for verified results;
+model serving/CP1 and synthetic long-document smoke tests passed. Real-corpus quality,
+language allowlisting, and canary rollout remain pending.
 **Date:** 2026-11-03.
 **Research basis:** [`../research/unlimited-ocr.md`](../research/unlimited-ocr.md).
 **Target:** Add Baidu Unlimited OCR as an optional document-parsing provider without

@@ -21,7 +21,7 @@
   `/v1/models` respond.
 - Compose dev/profile config renders.
 - Compose production config renders with CI-style secrets.
-- OCR service tests: 107 passed.
+- OCR service tests: 110 passed + 4 subtests.
 
 ## CP1 real-model validation
 
@@ -32,19 +32,23 @@
 - Two-page inference: 0.8–2.7 s after warm-up.
 - Ten-page PDF end-to-end through `/api/v1/ocr/pdf` with `engine=unlimited`: HTTP 200,
   10/10 pages, 25.8 s (~2.6 s/page).
+- 100-page synthetic PDF: 100/100 pages, no empty pages, ~300 s.
+- 200-page synthetic PDF after repetition retry and 5-page windows: 200/200 pages,
+  correct first/last pages, retries on pages 26/58/200, ~580 s.
 - The model's `<PAGE>` count is unreliable for larger sparse windows (10-page request
-  returned 8 markers), so the adapter now adaptively splits windows down to one page.
-  The 10-page run exercised that path and still returned all pages.
+  returned 8 markers), so the adapter adaptively splits windows down to one page and
+  retries pages whose output collapses into repeated lines.
 - Sidecar container memory observed at ~2.5 GiB host RAM; image size ~5.66 GB.
 - `matplotlib` was required by the model code and added to the sidecar image.
 - vLLM and SGLang paths are not implemented; the sidecar currently uses Transformers.
+- Offline loading (`HF_HUB_OFFLINE=1`) works from the seeded model cache.
 
 ## Remaining validation
 
-- Real 100/200-page document quality and reproducibility.
-- Corpus CER/WER/table evaluation and language allowlist.
-- Failure-injection fallback to Paddle.
+- Real-document 100/200-page quality and reproducibility.
+- Real-corpus CER/WER/table evaluation and language allowlist.
 - vLLM/SGLang comparison.
+- Real-user canary.
 
 ## Next command when the operator is ready
 

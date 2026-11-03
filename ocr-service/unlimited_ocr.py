@@ -32,7 +32,7 @@ OCR_UNLIMITED_MODEL = os.getenv("OCR_UNLIMITED_MODEL", "baidu/Unlimited-OCR").st
 OCR_UNLIMITED_BACKEND = os.getenv("OCR_UNLIMITED_BACKEND", "transformers").strip() or "transformers"
 OCR_UNLIMITED_TIMEOUT = int(os.getenv("OCR_UNLIMITED_TIMEOUT", "600").strip() or "600")
 OCR_UNLIMITED_MAX_PAGES_PER_REQUEST = int(
-    os.getenv("OCR_UNLIMITED_MAX_PAGES_PER_REQUEST", "10").strip() or "10"
+    os.getenv("OCR_UNLIMITED_MAX_PAGES_PER_REQUEST", "5").strip() or "5"
 )
 OCR_UNLIMITED_PAGE_OVERLAP = int(os.getenv("OCR_UNLIMITED_PAGE_OVERLAP", "1").strip() or "1")
 OCR_UNLIMITED_FALLBACK_TO_PADDLE = os.getenv(
@@ -194,6 +194,13 @@ def _classify_label(label: str) -> tuple[str, int]:
     return mapping.get(normalized, ("body", 0))
 
 
+def repeated_line_ratio(text: str) -> float:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if len(lines) < 3:
+        return 0.0
+    return float(len(lines) - len(set(lines))) / float(len(lines))
+
+
 def _repitition_ratio(text: str, n: int = 35) -> float:
     tokens = text.split()
     if len(tokens) < n:
@@ -329,6 +336,7 @@ def parse_unlimited_markdown(
         "bbox_invalid_count": 0,
         "markup_leak": markup_leak,
         "repetition_ratio": repetition,
+        "repeated_line_ratio": repeated_line_ratio(plain_text),
         "engine": "unlimited",
         "engine_version": engine_version,
     }

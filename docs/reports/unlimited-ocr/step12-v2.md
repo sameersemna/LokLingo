@@ -1,11 +1,20 @@
 # Step 12 — Unlimited OCR 2 Evaluation
 
-Status: deferred / not started.
+Status: probe complete; deferred for production.
 
-Unlimited OCR 2 is intentionally out of the production path for this iteration. The v1
-sidecar and adapter must first pass CP1 (real model serving on GB10/SM121) and CP3 (quality
-gate). v2 uses a custom SGLang wheel and sparse/DASH kernels; the documented SM121
-incompatibility makes it a separate spike, not a follow-on edit.
+Unlimited OCR 2 is intentionally out of the production path for this iteration. A
+Transformers probe succeeded on the GB10 after adding a C compiler for its Triton/DASH
+kernels (the initial run failed with `Failed to find C compiler`).
+
+Probe details:
+
+- Model: `baidu/Unlimited-OCR-2` at `0480966938291445591f69f08a13b041c073a96a`.
+- Single-page inference: 3.8 s, 60 output tokens.
+- Output format is **not compatible** with the v1 parser: it emits
+  `<BLOCK>text[bbox]<FORK>...` rather than `<|det|>...<|/det|>`.
+- The synthetic page produced repeated output, so a separate parser, repetition retry,
+  and quality gate are required.
+- SGLang was not attempted because of the documented SM121 `sgl_kernel` limitation.
 
 ## Prerequisites before starting
 
@@ -15,8 +24,8 @@ incompatibility makes it a separate spike, not a follow-on edit.
 - Confirmation that the v2 Transformers path works on SM121; SGLang only if `sgl_kernel`
   supports SM121 or is rebuilt from source.
 
-## Decision rule
+## Decision
 
-Adopt v2 only if it materially improves page-count/quality on 100+ page documents without
-increasing failure, OOM, or operational complexity beyond the team's support capacity.
-Otherwise keep v1 page-windowing.
+Keep v2 deferred. The Transformers path runs, but it needs a dedicated adapter/parser,
+quality retry, and long-document benchmark before it can be considered. Do not reuse the
+v1 parser or production route.
