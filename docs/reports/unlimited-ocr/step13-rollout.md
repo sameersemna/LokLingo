@@ -19,6 +19,13 @@ OCR_UNLIMITED_LANGS=
 - Job-level `ocr_engine=unlimited` routing works while `OCR_PROVIDER=paddle`.
 - Sidecar-stopped fallback and config-only rollback both completed through PaddleOCR.
 - Frontend build/test/lint pass; dev/prod/UOCR compose configs render.
+- Canary runner executed against the backend: 2/2 jobs completed with
+  `ocr_engine=unlimited` (1 page 2.0 s; 10 pages 24.0 s), no warnings; report at
+  [`canary-run.json`](canary-run.json).
+- Real 100-page GLSL specification: 100/100 pages, 26.8 min, no warnings/degenerate
+  flags; see [`real-document-validation.md`](real-document-validation.md).
+- Real 200-page attempt exposed runaway table generation and exceeded the 30-minute client
+  timeout; caps/retry were added, but the 200-page real run has not been repeated.
 
 ## Rollout sequence
 
@@ -47,9 +54,10 @@ required; the new fields are additive.
 
 ## Not yet done
 
-- Real-user canary metrics (only synthetic/rehearsal traffic so far).
-- Backend-level OCR-service outage fallback; all real providers share the same OCR
-  service, so this is a graceful-failure path rather than a second OCR engine.
+- Real-user traffic canary (the batch runner and rollback path are verified).
+- A separate backend OCR engine for OCR-service outages; the current providers are
+  adapters to one service, so this is an architectural limitation rather than a pending
+  integration step.
 - Real-document quality gate and language allowlist; synthetic Latin smoke tests are
   clean but not representative.
 - v2 production integration; v2 Transformers probe works but requires a separate parser

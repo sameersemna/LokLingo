@@ -469,6 +469,40 @@ class TestOcrPdfFile(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: Unlimited OCR image path
+# ---------------------------------------------------------------------------
+
+class TestUnlimitedImage(unittest.TestCase):
+    def test_unlimited_image_response_initializes_correction_state(self):
+        buffer = io.BytesIO()
+        _fake_pil_image().save(buffer, format="PNG")
+        blocks = [
+            {
+                "text": "Hello",
+                "bbox": [0.0, 0.0, 10.0, 10.0],
+                "confidence": 0.0,
+                "reading_order": 1,
+                "region_class": "body",
+                "hierarchy_level": 0,
+                "column_id": 0,
+            }
+        ]
+        with mock.patch.object(ocr_app.unlimited_ocr, "OCR_UNLIMITED_ENABLED", True), \
+             mock.patch.object(ocr_app.unlimited_ocr, "request_unlimited_image", return_value=(blocks, "Hello", {"engine": "unlimited"})):
+            response = ocr_app.ocr_image(
+                ocr_app.OCRImageRequest(
+                    image_b64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+                    mime_type="image/png",
+                    lang="en",
+                    engine="unlimited",
+                )
+            )
+        self.assertEqual(response.text, "Hello")
+        self.assertEqual(response.engine, "unlimited")
+        self.assertIsNotNone(response.correction)
+
+
+# ---------------------------------------------------------------------------
 # Tests: Unlimited OCR PDF page-window merge
 # ---------------------------------------------------------------------------
 

@@ -42,6 +42,12 @@
 - `matplotlib` was required by the model code and added to the sidecar image.
 - vLLM and SGLang paths are not implemented; the sidecar currently uses Transformers.
 - Offline loading (`HF_HUB_OFFLINE=1`) works from the seeded model cache.
+- Real 100-page GLSL 4.60.7 specification: 100/100 pages, 217,905 chars, 1,608.6 s
+  (~26.8 min), no warnings/degenerate flags.
+- A real 200-page attempt exposed runaway table generation and exceeded the 30-minute
+  client timeout. Per-page output caps (4,096) and table/repetition degeneration retry
+  were added; the 200-page real run was not repeated.
+- Backend Unlimited provider timeout raised to 3,600 s for long real documents.
 
 ## Remaining validation
 

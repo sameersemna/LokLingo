@@ -58,7 +58,7 @@ func Load() *Config {
 		OCRServiceURL:                      getEnv("OCR_SERVICE_URL", ""),
 		OCRProvider:                        getEnv("OCR_PROVIDER", "paddle"),
 		OCRProviderTimeoutSeconds:          getEnvInt("OCR_PROVIDER_TIMEOUT_SECONDS", 120),
-		OCRUnlimitedProviderTimeoutSeconds: getEnvInt("OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS", 900),
+		OCRUnlimitedProviderTimeoutSeconds: getEnvInt("OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS", 3600),
 		OCRMaxFallbacks:                    getEnvInt("OCR_MAX_FALLBACKS", 2),
 		OCRSharedStorageDir:                getEnv("OCR_SHARED_STORAGE_DIR", ""),
 		RedisURL:                           resolveRedisURL(appEnv),
@@ -125,7 +125,7 @@ func (c *Config) Validate() error {
 		invalid = append(invalid, "OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS must be >= 0")
 	}
 	if c.OCRUnlimitedProviderTimeoutSeconds == 0 {
-		c.OCRUnlimitedProviderTimeoutSeconds = 900
+		c.OCRUnlimitedProviderTimeoutSeconds = 3600
 	}
 	if c.OCRMaxFallbacks < 0 {
 		invalid = append(invalid, "OCR_MAX_FALLBACKS must be >= 0")

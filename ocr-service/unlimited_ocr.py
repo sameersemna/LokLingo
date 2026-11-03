@@ -45,7 +45,7 @@ OCR_UNLIMITED_LANGS = {
 }
 OCR_UNLIMITED_DPI = int(os.getenv("OCR_UNLIMITED_DPI", "200").strip() or "200")
 OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE = int(
-    os.getenv("OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE", "20000").strip() or "20000"
+    os.getenv("OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE", "4096").strip() or "4096"
 )
 
 
@@ -121,6 +121,10 @@ def resolve_engine(requested: str, lang: str) -> str:
 REF_PATTERN = re.compile(r"<\|ref\|>(.*?)<\|/ref\|>\s*<\|det\|>(.*?)<\|/det\|>", re.DOTALL)
 DIRECT_DET_PATTERN = re.compile(r"<\|det\|>\s*([^\s<]+)\s*([^\n<]*)<\|/det\|>", re.DOTALL)
 PAGE_SPLIT_PATTERN = re.compile(r"<PAGE>", re.IGNORECASE)
+V2_BLOCK_PATTERN = re.compile(
+    r"<BLOCK>\s*([A-Za-z_]+)(?:<LEVEL(\d+)>)?\s*\[([^\]]+)\]\s*<FORK>(.*?)(?=<BLOCK>|$)",
+    re.DOTALL,
+)
 
 
 def _extract_boxes(raw_box: str) -> list[list[float]]:
@@ -201,6 +205,18 @@ def repeated_line_ratio(text: str) -> float:
     return float(len(lines) - len(set(lines))) / float(len(lines))
 
 
+def is_degenerate_page(text: str) -> bool:
+    """Detect runaway tables, repeated lines, or excessive output."""
+    value = text or ""
+    if len(value) > 40000:
+        return True
+    if value.count("<tr") > 200:
+        return True
+    if repeated_line_ratio(value) > 0.4:
+        return True
+    return _repitition_ratio(value) > 0.05
+
+
 def _repitition_ratio(text: str, n: int = 35) -> float:
     tokens = text.split()
     if len(tokens) < n:
@@ -211,6 +227,70 @@ def _repitition_ratio(text: str, n: int = 35) -> float:
     return float(total - distinct) / float(total) if total else 0.0
 
 
+def parse_unlimited_v2_markdown(
+    raw: str,
+    image_width: int,
+    image_height: int,
+    engine_version: str = OCR_UNLIMITED_MODEL,
+) -> tuple[list[dict[str, Any]], str, list[str], dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for match in V2_BLOCK_PATTERN.finditer(raw or ""):
+        label = match.group(1).strip() or "text"
+        level = int(match.group(2) or "0")
+        box_text = match.group(3).strip()
+        content = match.group(4).strip()
+        region_class, hierarchy = _classify_label(label)
+        if level:
+            hierarchy = level
+        boxes = [_scale_bbox(box, image_width, image_height) for box in _extract_boxes(box_text)]
+        boxes = [box for box in boxes if box is not None] or [[0.0, 0.0, float(image_width), float(image_height)]]
+        group_id = len(blocks)
+        for box in boxes:
+            blocks.append(
+                {
+                    "text": content,
+                    "bbox": box,
+                    "confidence": 0.0,
+                    "reading_order": len(blocks) + 1,
+                    "region_class": region_class,
+                    "hierarchy_level": hierarchy,
+                    "column_id": 0,
+                    "text_group": group_id,
+                }
+            )
+    plain_blocks: list[str] = []
+    seen_groups: set[int] = set()
+    for block in blocks:
+        group = block.get("text_group")
+        if isinstance(group, int):
+            if group in seen_groups:
+                continue
+            seen_groups.add(group)
+        if block.get("text", "").strip():
+            plain_blocks.append(block["text"].strip())
+    plain_text = "\n".join(plain_blocks).strip()
+    markup_leak = "<BLOCK>" in plain_text or "<FORK>" in plain_text
+    if markup_leak:
+        warnings.append("OCR output contained unparsed v2 block markers")
+    quality = {
+        "page_marker_ok": True,
+        "page_count_match": True,
+        "truncated": False,
+        "empty_page_count": 0,
+        "bbox_invalid_count": 0,
+        "markup_leak": markup_leak,
+        "repetition_ratio": _repitition_ratio(plain_text),
+        "repeated_line_ratio": repeated_line_ratio(plain_text),
+        "table_rows": plain_text.count("<tr"),
+        "char_count": len(plain_text),
+        "degenerate": is_degenerate_page(plain_text),
+        "engine": "unlimited-v2",
+        "engine_version": engine_version,
+    }
+    return blocks, plain_text, warnings, quality
+
+
 def parse_unlimited_markdown(
     raw: str,
     image_width: int,
@@ -218,6 +298,9 @@ def parse_unlimited_markdown(
     engine_version: str = OCR_UNLIMITED_MODEL,
 ) -> tuple[list[dict[str, Any]], str, list[str], dict[str, Any]]:
     """Return blocks, plain text, warnings, and quality metadata for one image."""
+    if "<BLOCK>" in (raw or "") and "<FORK>" in (raw or ""):
+        return parse_unlimited_v2_markdown(raw, image_width, image_height, engine_version)
+
     blocks: list[dict[str, Any]] = []
     warnings: list[str] = []
     raw_text = raw or ""
@@ -337,6 +420,9 @@ def parse_unlimited_markdown(
         "markup_leak": markup_leak,
         "repetition_ratio": repetition,
         "repeated_line_ratio": repeated_line_ratio(plain_text),
+        "table_rows": plain_text.count("<tr"),
+        "char_count": len(plain_text),
+        "degenerate": is_degenerate_page(plain_text),
         "engine": "unlimited",
         "engine_version": engine_version,
     }
@@ -422,9 +508,14 @@ def request_unlimited_pdf(
 
 
 def request_unlimited_image(image: Image.Image) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    prompt = (
+        "<PAGE><image>Multi page parsing."
+        if OCR_UNLIMITED_MODEL.rstrip("/").endswith("-2")
+        else "<image>document parsing."
+    )
     payload = {
         "pages": [{"page_number": 1, "image_b64": _encode_image(image)}],
-        "prompt": "<image>document parsing.",
+        "prompt": prompt,
         "crop_mode": True,
         "base_size": 1024,
         "image_size": 640,

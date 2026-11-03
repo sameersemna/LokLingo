@@ -52,3 +52,7 @@ Then send a page with the same JSON shape the OCR adapter uses:
   replace this wrapper with the vLLM path after validating SM121 support.
 - `LOAD_MODEL_ON_STARTUP=false` starts the HTTP server without loading weights; useful for
   container/config tests, but `/infer` will still attempt a load.
+- The image includes `build-essential` because Unlimited OCR 2 compiles Triton/DASH
+  kernels at runtime. For v2, set `MODEL_ID=baidu/Unlimited-OCR-2`; the adapter detects the
+  v2 `<BLOCK>/<FORK>` output and uses the v2 image prompt. Do not run v1 and v2 in the same
+  sidecar process.

@@ -61,11 +61,14 @@ With the sidecar stopped and `OCR_UNLIMITED_ENABLED=false`:
 - This proves the config-only rollback path (`OCR_UNLIMITED_ENABLED=false` /
   `OCR_PROVIDER=paddle`) keeps jobs working.
 
-## Pending
+## Architecture note: backend-level alternate-engine fallback
 
-- Backend-provider fallback when the OCR service itself is unreachable (all real
-  providers share that service; this is a graceful-failure path, not an alternate OCR
-  engine).
+The backend's `paddle`, `tesseract`, and `unlimited` providers are adapters to the same OCR
+service. If that service is unreachable, there is no independent backend OCR engine to fall
+back to; cycling through those provider names only retries the same endpoint. This is an
+explicit architectural limitation, not an untested code path. A true alternate engine would
+require a separate OCR service/API and a new provider, and is out of scope for this
+integration.
 - Real canary metrics.
 - Corpus quality evaluation and language allowlist.
 - Frontend control to select the engine (API and job badge are implemented; the upload UI

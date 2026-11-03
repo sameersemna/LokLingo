@@ -10,10 +10,13 @@ Probe details:
 
 - Model: `baidu/Unlimited-OCR-2` at `0480966938291445591f69f08a13b041c073a96a`.
 - Single-page inference: 3.8 s, 60 output tokens.
-- Output format is **not compatible** with the v1 parser: it emits
-  `<BLOCK>text[bbox]<FORK>...` rather than `<|det|>...<|/det|>`.
-- The synthetic page produced repeated output, so a separate parser, repetition retry,
-  and quality gate are required.
+- The wrong prompt (`<image>document parsing.`) produced repeated
+  `<BLOCK>text[bbox]<FORK>` output. The correct v2 prompt,
+  `<PAGE><image>Multi page parsing.`, produces parseable
+  `<PAGE><BLOCK>title<LEVEL1>[bbox]<FORK>text` output.
+- The adapter now auto-detects `<BLOCK>/<FORK>` output and parses it; live single-page and
+  two-page v2 requests succeeded.
+- A v2-specific prompt is selected for images when `OCR_UNLIMITED_MODEL` ends in `-2`.
 - SGLang was not attempted because of the documented SM121 `sgl_kernel` limitation.
 
 ## Prerequisites before starting
@@ -26,6 +29,7 @@ Probe details:
 
 ## Decision
 
-Keep v2 deferred. The Transformers path runs, but it needs a dedicated adapter/parser,
-quality retry, and long-document benchmark before it can be considered. Do not reuse the
-v1 parser or production route.
+Keep v2 **opt-in and non-default** for now. The Transformers path and adapter parsing work,
+but v2 long-document quality, table handling, and production rollout are not validated.
+Use a separate sidecar instance pointed at `baidu/Unlimited-OCR-2`; v1 and v2 cannot share
+the same sidecar model process.

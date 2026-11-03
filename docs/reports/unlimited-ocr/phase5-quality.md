@@ -21,6 +21,19 @@ Reports:
 - [`uocr-synthetic-eval.md`](uocr-synthetic-eval.md)
 - [`paddle-synthetic-eval.md`](paddle-synthetic-eval.md)
 
+## Real-document and language smoke
+
+- Real GLSL 4.60.7 specification, first 100 pages: 100/100 pages, 217,905 chars,
+  no warnings/degenerate flags, ~26.8 min. A 200-page attempt exposed runaway table
+  generation and timed out; caps/retry were added but the 200-page real run is pending.
+- Arabic sample: UOCR output was garbled/reversed; PaddleOCR lacks an Arabic model in
+  this image. Arabic stays out of the allowlist.
+- Mixed CJK sample: UOCR captured Chinese, Japanese, and Korean; PaddleOCR omitted the
+  Korean line. CJK is promising but not yet allowlisted.
+
+See [`real-document-validation.md`](real-document-validation.md) and
+[`language-coverage-smoke.md`](language-coverage-smoke.md).
+
 ## Long-document smoke
 
 - 100-page synthetic PDF: 100/100 pages, no empty pages, ~300 s.

@@ -69,6 +69,10 @@ class InferResponse(BaseModel):
     revision: str | None = None
 
 
+def _v1_context_length(page_count: int, max_tokens: int) -> int:
+    return min(32768, 512 + (256 * page_count) + max(max_tokens, 512))
+
+
 class _Engine:
     def __init__(self) -> None:
         self.model: Any = None
@@ -127,6 +131,16 @@ class _Engine:
             except Exception as exc:
                 raise ValueError(f"page {page.page_number}: invalid image") from exc
 
+        is_v2 = MODEL_ID.rstrip("/").endswith("-2")
+        if is_v2:
+            max_length = 131072
+            generation_kwargs = {"max_new_tokens": request.max_tokens}
+        else:
+            # v1 has no max_new_tokens; cap the total context so a degenerate page cannot
+            # generate until the 32K ceiling.
+            max_length = _v1_context_length(len(images), request.max_tokens)
+            generation_kwargs = {}
+
         with self.lock:
             with tempfile.TemporaryDirectory(prefix="loklingo-uocr-") as tmp:
                 paths: list[str] = []
@@ -144,11 +158,12 @@ class _Engine:
                         base_size=request.base_size,
                         image_size=request.image_size,
                         crop_mode=request.crop_mode,
-                        max_length=32768,
+                        max_length=max_length,
                         no_repeat_ngram_size=request.ngram_size,
                         ngram_window=request.ngram_window,
                         temperature=request.temperature,
                         eval_mode=True,
+                        **generation_kwargs,
                     )
                     text = str(text or "")
                     token_count = len(
@@ -163,10 +178,11 @@ class _Engine:
                         image_files=paths,
                         output_path=tmp,
                         image_size=1024,
-                        max_length=32768,
+                        max_length=max_length,
                         no_repeat_ngram_size=request.ngram_size,
                         ngram_window=request.ngram_window,
                         temperature=request.temperature,
+                        **generation_kwargs,
                     )
                     text = str(text or "")
                     token_count = int(token_count)

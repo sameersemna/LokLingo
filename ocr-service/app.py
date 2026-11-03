@@ -2002,6 +2002,10 @@ def ocr_image(req: OCRImageRequest) -> OCRImageResponse:
     except Exception:
         raise HTTPException(status_code=422, detail="Cannot decode image — unsupported format")
 
+    blocks: list[TextBlock] = []
+    raw_text: str | None = None
+    correction_stats = CorrectionStats()
+
     try:
         resolved_engine = unlimited_ocr.resolve_engine(req.engine, req.lang)
     except ValueError as exc:
@@ -2254,15 +2258,15 @@ def _request_unlimited_window(
         images_by_page = dict(zip(page_numbers, page_images))
         adjusted: list[tuple[int, str]] = []
         for page_number, text in pages:
-            if len(page_images) > 1 and unlimited_ocr.repeated_line_ratio(text) > 0.4:
+            if len(page_images) > 1 and unlimited_ocr.is_degenerate_page(text):
                 single = unlimited_ocr.request_unlimited_pdf(
                     [images_by_page[page_number]],
                     [page_number],
                     max_tokens=OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE,
                     strict=False,
                 )
-                if single and unlimited_ocr.repeated_line_ratio(single[0][1]) < unlimited_ocr.repeated_line_ratio(text):
-                    logger.warning("unlimited_page_repetition_retry page=%d", page_number)
+                if single and unlimited_ocr.is_degenerate_page(single[0][1]) is False:
+                    logger.warning("unlimited_page_degeneration_retry page=%d", page_number)
                     text = single[0][1]
             adjusted.append((page_number, text))
         return adjusted
@@ -2372,6 +2376,8 @@ def _ocr_pdf_with_unlimited(
                     )
                     if quality.get("repetition_ratio", 0.0) > 0.05:
                         page_warnings.append(f"page {absolute_page}: possible repeated output detected")
+                    if quality.get("degenerate"):
+                        page_warnings.append(f"page {absolute_page}: degenerate output detected")
                     if quality.get("markup_leak"):
                         page_warnings.append(f"page {absolute_page}: unparsed grounding markers")
 

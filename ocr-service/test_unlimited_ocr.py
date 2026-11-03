@@ -80,6 +80,11 @@ class TestRepeatedLines(unittest.TestCase):
     def test_no_repetition(self):
         self.assertEqual(unlimited_ocr.repeated_line_ratio("one\ntwo\nthree"), 0.0)
 
+    def test_detects_runaway_table(self):
+        text = "<table>" + ("<tr><td>x</td></tr>" * 250) + "</table>"
+        self.assertTrue(unlimited_ocr.is_degenerate_page(text))
+        self.assertFalse(unlimited_ocr.is_degenerate_page("one\ntwo\nthree"))
+
 
 class TestPageWindows(unittest.TestCase):
     def test_no_overlap(self):
@@ -93,6 +98,30 @@ class TestPageWindows(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(unlimited_ocr.plan_page_windows(0, 10, 1), [])
+
+
+class TestV2Parser(unittest.TestCase):
+    def test_v2_block_and_fork_output(self):
+        raw = (
+            "<PAGE><BLOCK>title<LEVEL1>[42, 306, 745, 684]<FORK>Hello Unlimited OCR\n"
+            "Invoice total: 1,234.56 EUR"
+        )
+        blocks, text, warnings, quality = unlimited_ocr.parse_unlimited_markdown(raw, 1000, 2000)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["region_class"], "title")
+        self.assertEqual(blocks[0]["hierarchy_level"], 1)
+        self.assertEqual(text, "Hello Unlimited OCR\nInvoice total: 1,234.56 EUR")
+        self.assertEqual(quality["engine"], "unlimited-v2")
+        self.assertFalse(quality["markup_leak"])
+
+    def test_v2_multiple_blocks(self):
+        raw = (
+            "<BLOCK>title<LEVEL1>[0,0,999,100]<FORK>Title\n"
+            "<BLOCK>text[0,100,999,200]<FORK>Body"
+        )
+        blocks, text, warnings, quality = unlimited_ocr.parse_unlimited_markdown(raw, 1000, 2000)
+        self.assertEqual([block["region_class"] for block in blocks], ["title", "body"])
+        self.assertEqual(text, "Title\nBody")
 
 
 class TestPostSidecar(unittest.TestCase):

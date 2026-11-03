@@ -22,6 +22,13 @@ class FakeEngine:
         return "<PAGE>\n<|det|>text [0,0,999,999]<|/det|>Hello", 7
 
 
+class TestContextLength(unittest.TestCase):
+    def test_v1_context_is_capped_by_output_budget(self):
+        self.assertEqual(server._v1_context_length(1, 4096), 4864)
+        self.assertEqual(server._v1_context_length(5, 20480), 22272)
+        self.assertEqual(server._v1_context_length(200, 20000), 32768)
+
+
 class TestServerContract(unittest.TestCase):
     def setUp(self):
         self.fake = FakeEngine()
