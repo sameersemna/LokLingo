@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pydantic
+pillow
+torch==2.12.1
+torchvision==0.27.1
+transformers==4.57.1
+pymupdf
+matplotlib
+einops
+addict
+easydict
+psutil
+tqdm
+numpy
+safetensors

@@ -8,72 +8,74 @@ import (
 )
 
 type Config struct {
-	AppEnv                       string
-	Port                         string
-	LiteLLMBaseURL               string
-	LiteLLMAPIKey                string
-	LiteLLMModel                 string
-	OllamaBaseURL                string
-	OllamaModel                  string
-	OpenAICompatBaseURL          string
-	OpenAICompatAPIKey           string
-	OpenAICompatModel            string
-	OCRServiceURL                string
-	OCRProvider                  string
-	OCRProviderTimeoutSeconds    int
-	OCRMaxFallbacks              int
-	OCRSharedStorageDir          string
-	RedisURL                     string
-	PostgresDSN                  string // optional; enables Postgres analytics sink when set
-	MaxPDFUploadBytes            int64
-	MaxPDFPages                  int
-	TranslateConcurrency         int    // max concurrent LLM page-translation requests per job; default 3
-	MaxLLMConcurrency            int    // max total concurrent LLM calls across all jobs (global); default 10
-	TranslateChunkMinWords       int    // preferred minimum words per translation chunk; default 80
-	TranslateChunkMaxWords       int    // hard cap words per translation chunk; default 150
-	LiteLLMRequestTimeoutSeconds int    // HTTP client timeout for LLM calls in seconds; default 300 (5 min)
-	InternalToken                string // optional; enforces X-Internal-Token on internal routes
-	WriteAPIToken                string // optional in development; required in production for write routes
-	GlobalRateLimitPerMinute     int    // max requests per minute per IP for non-health routes
-	WriteRateLimitPerMinute      int    // max write requests per minute per IP
-	UploadRateLimitPerMinute     int    // max upload-heavy write requests per minute per IP
-	SyncImageMaxInflight         int    // max concurrent in-flight sync image requests
+	AppEnv                             string
+	Port                               string
+	LiteLLMBaseURL                     string
+	LiteLLMAPIKey                      string
+	LiteLLMModel                       string
+	OllamaBaseURL                      string
+	OllamaModel                        string
+	OpenAICompatBaseURL                string
+	OpenAICompatAPIKey                 string
+	OpenAICompatModel                  string
+	OCRServiceURL                      string
+	OCRProvider                        string
+	OCRProviderTimeoutSeconds          int
+	OCRUnlimitedProviderTimeoutSeconds int
+	OCRMaxFallbacks                    int
+	OCRSharedStorageDir                string
+	RedisURL                           string
+	PostgresDSN                        string // optional; enables Postgres analytics sink when set
+	MaxPDFUploadBytes                  int64
+	MaxPDFPages                        int
+	TranslateConcurrency               int    // max concurrent LLM page-translation requests per job; default 3
+	MaxLLMConcurrency                  int    // max total concurrent LLM calls across all jobs (global); default 10
+	TranslateChunkMinWords             int    // preferred minimum words per translation chunk; default 80
+	TranslateChunkMaxWords             int    // hard cap words per translation chunk; default 150
+	LiteLLMRequestTimeoutSeconds       int    // HTTP client timeout for LLM calls in seconds; default 300 (5 min)
+	InternalToken                      string // optional; enforces X-Internal-Token on internal routes
+	WriteAPIToken                      string // optional in development; required in production for write routes
+	GlobalRateLimitPerMinute           int    // max requests per minute per IP for non-health routes
+	WriteRateLimitPerMinute            int    // max write requests per minute per IP
+	UploadRateLimitPerMinute           int    // max upload-heavy write requests per minute per IP
+	SyncImageMaxInflight               int    // max concurrent in-flight sync image requests
 }
 
 func Load() *Config {
 	appEnv := getEnv("APP_ENV", "development")
 
 	return &Config{
-		AppEnv:                       appEnv,
-		Port:                         getEnv("PORT", "8080"),
-		LiteLLMBaseURL:               getEnv("LITELLM_BASE_URL", ""),
-		LiteLLMAPIKey:                getEnv("LITELLM_API_KEY", ""),
-		LiteLLMModel:                 getEnv("LITELLM_MODEL", ""),
-		OllamaBaseURL:                getEnv("OLLAMA_BASE_URL", ""),
-		OllamaModel:                  getEnv("OLLAMA_MODEL", ""),
-		OpenAICompatBaseURL:          getEnv("OPENAI_COMPAT_BASE_URL", ""),
-		OpenAICompatAPIKey:           getEnv("OPENAI_COMPAT_API_KEY", ""),
-		OpenAICompatModel:            getEnv("OPENAI_COMPAT_MODEL", ""),
-		OCRServiceURL:                getEnv("OCR_SERVICE_URL", ""),
-		OCRProvider:                  getEnv("OCR_PROVIDER", "paddle"),
-		OCRProviderTimeoutSeconds:    getEnvInt("OCR_PROVIDER_TIMEOUT_SECONDS", 120),
-		OCRMaxFallbacks:              getEnvInt("OCR_MAX_FALLBACKS", 2),
-		OCRSharedStorageDir:          getEnv("OCR_SHARED_STORAGE_DIR", ""),
-		RedisURL:                     resolveRedisURL(appEnv),
-		PostgresDSN:                  getEnv("POSTGRES_DSN", ""),
-		MaxPDFUploadBytes:            getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
-		MaxPDFPages:                  getEnvInt("MAX_PDF_PAGES", 300),
-		TranslateConcurrency:         getEnvInt("TRANSLATE_CONCURRENCY", 3),
-		MaxLLMConcurrency:            getEnvInt("MAX_LLM_CONCURRENCY", 10),
-		TranslateChunkMinWords:       getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 80),
-		TranslateChunkMaxWords:       getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 150),
-		LiteLLMRequestTimeoutSeconds: getEnvInt("LITELLM_REQUEST_TIMEOUT_SECONDS", 300),
-		InternalToken:                getEnv("INTERNAL_TOKEN", ""),
-		WriteAPIToken:                getEnv("WRITE_API_TOKEN", ""),
-		GlobalRateLimitPerMinute:     getEnvInt("GLOBAL_RATE_LIMIT_PER_MINUTE", 120),
-		WriteRateLimitPerMinute:      getEnvInt("WRITE_RATE_LIMIT_PER_MINUTE", 40),
-		UploadRateLimitPerMinute:     getEnvInt("UPLOAD_RATE_LIMIT_PER_MINUTE", 12),
-		SyncImageMaxInflight:         getEnvInt("SYNC_IMAGE_MAX_INFLIGHT", 8),
+		AppEnv:                             appEnv,
+		Port:                               getEnv("PORT", "8080"),
+		LiteLLMBaseURL:                     getEnv("LITELLM_BASE_URL", ""),
+		LiteLLMAPIKey:                      getEnv("LITELLM_API_KEY", ""),
+		LiteLLMModel:                       getEnv("LITELLM_MODEL", ""),
+		OllamaBaseURL:                      getEnv("OLLAMA_BASE_URL", ""),
+		OllamaModel:                        getEnv("OLLAMA_MODEL", ""),
+		OpenAICompatBaseURL:                getEnv("OPENAI_COMPAT_BASE_URL", ""),
+		OpenAICompatAPIKey:                 getEnv("OPENAI_COMPAT_API_KEY", ""),
+		OpenAICompatModel:                  getEnv("OPENAI_COMPAT_MODEL", ""),
+		OCRServiceURL:                      getEnv("OCR_SERVICE_URL", ""),
+		OCRProvider:                        getEnv("OCR_PROVIDER", "paddle"),
+		OCRProviderTimeoutSeconds:          getEnvInt("OCR_PROVIDER_TIMEOUT_SECONDS", 120),
+		OCRUnlimitedProviderTimeoutSeconds: getEnvInt("OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS", 900),
+		OCRMaxFallbacks:                    getEnvInt("OCR_MAX_FALLBACKS", 2),
+		OCRSharedStorageDir:                getEnv("OCR_SHARED_STORAGE_DIR", ""),
+		RedisURL:                           resolveRedisURL(appEnv),
+		PostgresDSN:                        getEnv("POSTGRES_DSN", ""),
+		MaxPDFUploadBytes:                  getEnvInt64("MAX_PDF_UPLOAD_BYTES", 25*1024*1024),
+		MaxPDFPages:                        getEnvInt("MAX_PDF_PAGES", 300),
+		TranslateConcurrency:               getEnvInt("TRANSLATE_CONCURRENCY", 3),
+		MaxLLMConcurrency:                  getEnvInt("MAX_LLM_CONCURRENCY", 10),
+		TranslateChunkMinWords:             getEnvInt("TRANSLATE_CHUNK_MIN_WORDS", 80),
+		TranslateChunkMaxWords:             getEnvInt("TRANSLATE_CHUNK_MAX_WORDS", 150),
+		LiteLLMRequestTimeoutSeconds:       getEnvInt("LITELLM_REQUEST_TIMEOUT_SECONDS", 300),
+		InternalToken:                      getEnv("INTERNAL_TOKEN", ""),
+		WriteAPIToken:                      getEnv("WRITE_API_TOKEN", ""),
+		GlobalRateLimitPerMinute:           getEnvInt("GLOBAL_RATE_LIMIT_PER_MINUTE", 120),
+		WriteRateLimitPerMinute:            getEnvInt("WRITE_RATE_LIMIT_PER_MINUTE", 40),
+		UploadRateLimitPerMinute:           getEnvInt("UPLOAD_RATE_LIMIT_PER_MINUTE", 12),
+		SyncImageMaxInflight:               getEnvInt("SYNC_IMAGE_MAX_INFLIGHT", 8),
 	}
 }
 
@@ -108,16 +110,22 @@ func (c *Config) Validate() error {
 		missing = append(missing, "OCR_SERVICE_URL")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.OCRProvider)) {
-	case "", "paddle", "tesseract", "ollama":
+	case "", "paddle", "tesseract", "ollama", "unlimited":
 		// allowed
 	default:
-		invalid = append(invalid, "OCR_PROVIDER must be one of: paddle, tesseract, ollama")
+		invalid = append(invalid, "OCR_PROVIDER must be one of: paddle, tesseract, ollama, unlimited")
 	}
 	if c.OCRProviderTimeoutSeconds < 0 {
 		invalid = append(invalid, "OCR_PROVIDER_TIMEOUT_SECONDS must be >= 0")
 	}
 	if c.OCRProviderTimeoutSeconds == 0 {
 		c.OCRProviderTimeoutSeconds = 120
+	}
+	if c.OCRUnlimitedProviderTimeoutSeconds < 0 {
+		invalid = append(invalid, "OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS must be >= 0")
+	}
+	if c.OCRUnlimitedProviderTimeoutSeconds == 0 {
+		c.OCRUnlimitedProviderTimeoutSeconds = 900
 	}
 	if c.OCRMaxFallbacks < 0 {
 		invalid = append(invalid, "OCR_MAX_FALLBACKS must be >= 0")

@@ -137,6 +137,38 @@ func TestLoadReadsPDFGuardrailEnvValues(t *testing.T) {
 	}
 }
 
+func TestLoadReadsUnlimitedProviderTimeout(t *testing.T) {
+	t.Setenv("OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS", "901")
+
+	cfg := Load()
+	if cfg.OCRUnlimitedProviderTimeoutSeconds != 901 {
+		t.Fatalf("expected OCRUnlimitedProviderTimeoutSeconds=901, got %d", cfg.OCRUnlimitedProviderTimeoutSeconds)
+	}
+}
+
+func TestConfigValidateAllowsUnlimitedProvider(t *testing.T) {
+	cfg := &Config{
+		OCRProvider:                        "unlimited",
+		OCRServiceURL:                      "http://loklingo-ocr:8000",
+		RedisURL:                           "redis://redis:6379",
+		LiteLLMBaseURL:                     "http://litellm:4000",
+		LiteLLMModel:                       "mock",
+		TranslateConcurrency:               3,
+		MaxLLMConcurrency:                  10,
+		TranslateChunkMinWords:             80,
+		TranslateChunkMaxWords:             150,
+		LiteLLMRequestTimeoutSeconds:       300,
+		GlobalRateLimitPerMinute:           120,
+		WriteRateLimitPerMinute:            40,
+		UploadRateLimitPerMinute:           12,
+		SyncImageMaxInflight:               8,
+		OCRUnlimitedProviderTimeoutSeconds: 900,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected unlimited provider config to validate, got %v", err)
+	}
+}
+
 func TestLoadReadsChunkingEnvValues(t *testing.T) {
 	t.Setenv("TRANSLATE_CONCURRENCY", "4")
 	t.Setenv("TRANSLATE_CHUNK_MIN_WORDS", "600")

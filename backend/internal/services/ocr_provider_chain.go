@@ -15,6 +15,7 @@ const (
 	OCRProviderPaddle    = "paddle"
 	OCRProviderTesseract = "tesseract"
 	OCRProviderOllama    = "ollama"
+	OCRProviderUnlimited = "unlimited"
 )
 
 // OCRRequest describes request options shared by OCR providers.
@@ -23,16 +24,22 @@ type OCRRequest struct {
 	DPI      int
 	MimeType string
 	FilePath string
+	Engine   string
 }
 
 // OCRResult is the normalized output produced by OCR providers.
 type OCRResult struct {
-	Text       string
-	Pages      []string
-	Blocks     []OCRTextBlock
-	Confidence float64
-	Retries    int
-	Provider   string
+	Text          string
+	Pages         []string
+	Blocks        []OCRTextBlock
+	Confidence    float64
+	Retries       int
+	Provider      string
+	Engine        string
+	EngineVersion string
+	FallbackFrom  string
+	Warnings      []string
+	Quality       map[string]any
 }
 
 // OCRProvider defines a pluggable OCR provider contract.
@@ -45,12 +52,14 @@ type OCRProvider interface {
 type chainedOCRClient struct {
 	providers        []OCRProvider
 	providerTimeout  time.Duration
+	providerTimeouts map[string]time.Duration
 	maxFallbackCount int
 }
 
 // OCRClientChainOptions configures provider-level timeout and fallback budget.
 type OCRClientChainOptions struct {
 	ProviderTimeout  time.Duration
+	ProviderTimeouts map[string]time.Duration
 	MaxFallbackCount int
 }
 
@@ -69,6 +78,7 @@ func NewPluggableOCRClient(ocrBaseURL, sharedStorageDir, provider string, option
 		OCRProviderPaddle:    NewPaddleOCRProvider(ocrBaseURL, sharedStorageDir),
 		OCRProviderTesseract: NewTesseractProvider(ocrBaseURL, sharedStorageDir),
 		OCRProviderOllama:    NewOllamaVisionProvider(),
+		OCRProviderUnlimited: NewUnlimitedOCRProvider(ocrBaseURL, sharedStorageDir),
 	}
 	order := providerOrder(primary)
 	providers := make([]OCRProvider, 0, len(order))
@@ -80,6 +90,7 @@ func NewPluggableOCRClient(ocrBaseURL, sharedStorageDir, provider string, option
 
 	chainOpts := OCRClientChainOptions{
 		ProviderTimeout:  120 * time.Second,
+		ProviderTimeouts: map[string]time.Duration{},
 		MaxFallbackCount: len(providers) - 1,
 	}
 	if len(options) > 0 {
@@ -90,11 +101,15 @@ func NewPluggableOCRClient(ocrBaseURL, sharedStorageDir, provider string, option
 		if o.MaxFallbackCount >= 0 {
 			chainOpts.MaxFallbackCount = o.MaxFallbackCount
 		}
+		if o.ProviderTimeouts != nil {
+			chainOpts.ProviderTimeouts = o.ProviderTimeouts
+		}
 	}
 
 	return &chainedOCRClient{
 		providers:        providers,
 		providerTimeout:  chainOpts.ProviderTimeout,
+		providerTimeouts: chainOpts.ProviderTimeouts,
 		maxFallbackCount: chainOpts.MaxFallbackCount,
 	}
 }
@@ -107,6 +122,8 @@ func normalizeOCRProvider(v string) string {
 		return OCRProviderTesseract
 	case OCRProviderOllama:
 		return OCRProviderOllama
+	case OCRProviderUnlimited:
+		return OCRProviderUnlimited
 	default:
 		return ""
 	}
@@ -115,12 +132,47 @@ func normalizeOCRProvider(v string) string {
 func providerOrder(primary string) []string {
 	switch primary {
 	case OCRProviderTesseract:
-		return []string{OCRProviderTesseract, OCRProviderPaddle, OCRProviderOllama}
+		return []string{OCRProviderTesseract, OCRProviderPaddle, OCRProviderOllama, OCRProviderUnlimited}
 	case OCRProviderOllama:
-		return []string{OCRProviderOllama, OCRProviderPaddle, OCRProviderTesseract}
+		return []string{OCRProviderOllama, OCRProviderPaddle, OCRProviderTesseract, OCRProviderUnlimited}
+	case OCRProviderUnlimited:
+		return []string{OCRProviderUnlimited, OCRProviderPaddle, OCRProviderTesseract, OCRProviderOllama}
 	default:
-		return []string{OCRProviderPaddle, OCRProviderTesseract, OCRProviderOllama}
+		return []string{OCRProviderPaddle, OCRProviderTesseract, OCRProviderOllama, OCRProviderUnlimited}
 	}
+}
+
+func (c *chainedOCRClient) timeoutFor(provider string) time.Duration {
+	if timeout, ok := c.providerTimeouts[provider]; ok && timeout > 0 {
+		return timeout
+	}
+	return c.providerTimeout
+}
+
+func (c *chainedOCRClient) providersForRequest(engine string) []OCRProvider {
+	requested := strings.ToLower(strings.TrimSpace(engine))
+	if requested != OCRProviderPaddle && requested != OCRProviderUnlimited {
+		return c.providers
+	}
+	ordered := make([]OCRProvider, 0, len(c.providers))
+	for _, provider := range c.providers {
+		if provider.Name() == requested {
+			ordered = append(ordered, provider)
+		}
+	}
+	for _, provider := range c.providers {
+		if provider.Name() != requested {
+			ordered = append(ordered, provider)
+		}
+	}
+	return ordered
+}
+
+func engineForProvider(provider string) string {
+	if provider == OCRProviderTesseract {
+		return OCRProviderPaddle
+	}
+	return provider
 }
 
 func (c *chainedOCRClient) ExtractText(filePath, lang string) (string, error) {
@@ -172,6 +224,43 @@ func (c *chainedOCRClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextB
 	return res.Blocks, nil
 }
 
+func (c *chainedOCRClient) ExtractPagesWithConfidenceAndOptions(filePath, lang string, options OCRRequestOptions) ([]string, float64, error) {
+	pdf, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ocr: read file %q: %w", filePath, err)
+	}
+	res, err := c.extractPDFWithFallback(context.Background(), pdf, OCRRequest{
+		Lang: lang, DPI: 200, FilePath: filePath, Engine: options.Engine,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(res.Pages) > 0 {
+		return res.Pages, res.Confidence, nil
+	}
+	if strings.TrimSpace(res.Text) == "" {
+		return nil, 0, fmt.Errorf("ocr: service returned empty response")
+	}
+	return []string{res.Text}, res.Confidence, nil
+}
+
+func (c *chainedOCRClient) ExtractImageBlocksWithOptions(filePath, lang string, options OCRRequestOptions) ([]OCRTextBlock, error) {
+	image, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("ocr: read image %q: %w", filePath, err)
+	}
+	res, err := c.extractImageWithFallback(context.Background(), image, OCRRequest{
+		Lang: lang, FilePath: filePath, Engine: options.Engine,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(res.Blocks) == 0 {
+		return nil, fmt.Errorf("ocr: image response returned no blocks")
+	}
+	return res.Blocks, nil
+}
+
 func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byte, opts OCRRequest) (*OCRResult, error) {
 	if len(c.providers) == 0 {
 		return nil, fmt.Errorf("ocr: no providers configured")
@@ -180,32 +269,39 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 		opts.Lang = "auto"
 	}
 
+	providers := c.providersForRequest(opts.Engine)
 	var lastErr error
 	retries := 0
 	fallbacks := 0
-	for idx, provider := range c.providers {
+	for idx, provider := range providers {
 		if c.maxFallbackCount >= 0 && fallbacks > c.maxFallbackCount {
 			return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, lastErr)
 		}
 		slog.Info("ocr_provider_selected", "provider", provider.Name(), "position", idx)
 		providerCtx := ctx
 		cancel := func() {}
-		if c.providerTimeout > 0 {
-			providerCtx, cancel = context.WithTimeout(ctx, c.providerTimeout)
+		if timeout := c.timeoutFor(provider.Name()); timeout > 0 {
+			providerCtx, cancel = context.WithTimeout(ctx, timeout)
+		}
+		providerOpts := opts
+		if opts.Engine == "auto" && idx == 0 {
+			providerOpts.Engine = "auto"
+		} else {
+			providerOpts.Engine = engineForProvider(provider.Name())
 		}
 		start := time.Now()
-		res, err := provider.ExtractPDFText(providerCtx, pdf, opts)
+		res, err := provider.ExtractPDFText(providerCtx, pdf, providerOpts)
 		cancel()
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
+			if idx < len(providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
-				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
-			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(providers)-1 {
 				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
@@ -215,12 +311,12 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 		if err := validateProviderResult(res, true); err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
+			if idx < len(providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
-				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
-			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(providers)-1 {
 				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
@@ -228,6 +324,9 @@ func (c *chainedOCRClient) extractPDFWithFallback(ctx context.Context, pdf []byt
 			continue
 		}
 		res.Provider = provider.Name()
+		if res.Engine == "" {
+			res.Engine = provider.Name()
+		}
 		res.Retries += retries
 		observability.IncOCRProviderUsed(provider.Name())
 		observability.RecordOCRProviderLatency(latency)
@@ -249,32 +348,39 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 		opts.Lang = "auto"
 	}
 
+	providers := c.providersForRequest(opts.Engine)
 	var lastErr error
 	retries := 0
 	fallbacks := 0
-	for idx, provider := range c.providers {
+	for idx, provider := range providers {
 		if c.maxFallbackCount >= 0 && fallbacks > c.maxFallbackCount {
 			return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, lastErr)
 		}
 		slog.Info("ocr_provider_selected", "provider", provider.Name(), "position", idx)
 		providerCtx := ctx
 		cancel := func() {}
-		if c.providerTimeout > 0 {
-			providerCtx, cancel = context.WithTimeout(ctx, c.providerTimeout)
+		if timeout := c.timeoutFor(provider.Name()); timeout > 0 {
+			providerCtx, cancel = context.WithTimeout(ctx, timeout)
+		}
+		providerOpts := opts
+		if opts.Engine == "auto" && idx == 0 {
+			providerOpts.Engine = "auto"
+		} else {
+			providerOpts.Engine = engineForProvider(provider.Name())
 		}
 		start := time.Now()
-		res, err := provider.ExtractImageText(providerCtx, image, opts)
+		res, err := provider.ExtractImageText(providerCtx, image, providerOpts)
 		cancel()
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
+			if idx < len(providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
-				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
-			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(providers)-1 {
 				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
@@ -284,12 +390,12 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 		if err := validateProviderResult(res, false); err != nil {
 			lastErr = err
 			slog.Warn("ocr_provider_failed", "provider", provider.Name(), "latency_ms", latency, "err", err)
-			if idx < len(c.providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
+			if idx < len(providers)-1 && (c.maxFallbackCount < 0 || fallbacks < c.maxFallbackCount) {
 				fallbacks++
 				retries++
 				observability.IncOCRProviderFallback()
-				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", c.providers[idx+1].Name(), "fallback_count", fallbacks)
-			} else if idx < len(c.providers)-1 {
+				slog.Warn("ocr_provider_fallback", "from_provider", provider.Name(), "to_provider", providers[idx+1].Name(), "fallback_count", fallbacks)
+			} else if idx < len(providers)-1 {
 				observability.IncOCRProviderFallbackBudgetExhausted()
 				slog.Warn("ocr_provider_fallback_budget_exhausted", "provider", provider.Name(), "fallback_count", fallbacks, "max_fallback_count", c.maxFallbackCount)
 				return nil, fmt.Errorf("ocr: fallback budget exhausted after %d fallback(s): %w", c.maxFallbackCount, err)
@@ -297,6 +403,9 @@ func (c *chainedOCRClient) extractImageWithFallback(ctx context.Context, image [
 			continue
 		}
 		res.Provider = provider.Name()
+		if res.Engine == "" {
+			res.Engine = provider.Name()
+		}
 		res.Retries += retries
 		observability.IncOCRProviderUsed(provider.Name())
 		observability.RecordOCRProviderLatency(latency)
@@ -364,6 +473,25 @@ func (p *TesseractProvider) ExtractImageText(ctx context.Context, image []byte, 
 	return runLegacyImageProvider(ctx, p.client, image, opts)
 }
 
+// UnlimitedOCRProvider calls the same OCR service with engine=unlimited.
+type UnlimitedOCRProvider struct {
+	client OCRClient
+}
+
+func NewUnlimitedOCRProvider(baseURL, sharedStorageDir string) OCRProvider {
+	return &UnlimitedOCRProvider{client: NewOCRClient(baseURL, sharedStorageDir)}
+}
+
+func (p *UnlimitedOCRProvider) Name() string { return OCRProviderUnlimited }
+
+func (p *UnlimitedOCRProvider) ExtractPDFText(ctx context.Context, pdf []byte, opts OCRRequest) (*OCRResult, error) {
+	return runLegacyPDFProvider(ctx, p.client, pdf, opts)
+}
+
+func (p *UnlimitedOCRProvider) ExtractImageText(ctx context.Context, image []byte, opts OCRRequest) (*OCRResult, error) {
+	return runLegacyImageProvider(ctx, p.client, image, opts)
+}
+
 // OllamaVisionProvider is a placeholder for upcoming multimodal OCR support.
 type OllamaVisionProvider struct{}
 
@@ -399,19 +527,25 @@ func runLegacyPDFProvider(ctx context.Context, client OCRClient, pdf []byte, opt
 	_ = f.Close()
 
 	type res struct {
-		pages      []string
-		confidence float64
-		err        error
+		result *OCRResult
+		err    error
 	}
 	ch := make(chan res, 1)
 	go func() {
+		if withResult, ok := client.(interface {
+			ExtractPDFResultWithOptions(string, string, OCRRequestOptions) (*OCRResult, error)
+		}); ok {
+			result, err := withResult.ExtractPDFResultWithOptions(f.Name(), opts.Lang, OCRRequestOptions{Engine: opts.Engine})
+			ch <- res{result: result, err: err}
+			return
+		}
 		if withConfidence, ok := client.(pageConfidenceExtractor); ok {
 			pages, confidence, err := withConfidence.ExtractPagesWithConfidence(f.Name(), opts.Lang)
-			ch <- res{pages: pages, confidence: confidence, err: err}
+			ch <- res{result: &OCRResult{Pages: pages, Text: strings.Join(pages, "\n\n"), Confidence: confidence}, err: err}
 			return
 		}
 		pages, err := client.ExtractPages(f.Name(), opts.Lang)
-		ch <- res{pages: pages, confidence: 0, err: err}
+		ch <- res{result: &OCRResult{Pages: pages, Text: strings.Join(pages, "\n\n")}, err: err}
 	}()
 
 	select {
@@ -421,7 +555,13 @@ func runLegacyPDFProvider(ctx context.Context, client OCRClient, pdf []byte, opt
 		if out.err != nil {
 			return nil, out.err
 		}
-		return &OCRResult{Pages: out.pages, Text: strings.Join(out.pages, "\n\n"), Confidence: out.confidence}, nil
+		if out.result == nil {
+			return nil, fmt.Errorf("ocr: provider returned nil result")
+		}
+		if out.result.Text == "" && len(out.result.Pages) > 0 {
+			out.result.Text = strings.Join(out.result.Pages, "\n\n")
+		}
+		return out.result, nil
 	}
 }
 
@@ -446,6 +586,13 @@ func runLegacyImageProvider(ctx context.Context, client OCRClient, image []byte,
 	}
 	ch := make(chan res, 1)
 	go func() {
+		if withOptions, ok := client.(interface {
+			ExtractImageBlocksWithOptions(string, string, OCRRequestOptions) ([]OCRTextBlock, error)
+		}); ok {
+			blocks, err := withOptions.ExtractImageBlocksWithOptions(f.Name(), opts.Lang, OCRRequestOptions{Engine: opts.Engine})
+			ch <- res{blocks: blocks, err: err}
+			return
+		}
 		blocks, err := client.ExtractImageBlocks(f.Name(), opts.Lang)
 		ch <- res{blocks: blocks, err: err}
 	}()
@@ -457,7 +604,7 @@ func runLegacyImageProvider(ctx context.Context, client OCRClient, image []byte,
 		if out.err != nil {
 			return nil, out.err
 		}
-		return &OCRResult{Blocks: out.blocks, Confidence: averageBlockConfidence(out.blocks)}, nil
+		return &OCRResult{Blocks: out.blocks, Confidence: averageBlockConfidence(out.blocks), Engine: opts.Engine}, nil
 	}
 }
 

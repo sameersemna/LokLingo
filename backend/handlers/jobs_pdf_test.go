@@ -214,6 +214,80 @@ func newMultipartPDFRequestWithMode(t *testing.T, pdfData []byte, target, source
 	return req
 }
 
+func newMultipartPDFRequestWithEngine(t *testing.T, pdfData []byte, target, source, engine string, force bool) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreateFormFile("file", "test.pdf")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := fw.Write(pdfData); err != nil {
+		t.Fatalf("write pdf data: %v", err)
+	}
+	if target != "" {
+		if err := w.WriteField("target", target); err != nil {
+			t.Fatalf("write target: %v", err)
+		}
+	}
+	if source != "" {
+		if err := w.WriteField("source", source); err != nil {
+			t.Fatalf("write source: %v", err)
+		}
+	}
+	if engine != "" {
+		if err := w.WriteField("ocr_engine", engine); err != nil {
+			t.Fatalf("write ocr_engine: %v", err)
+		}
+	}
+	if force {
+		if err := w.WriteField("force_ocr", "true"); err != nil {
+			t.Fatalf("write force_ocr: %v", err)
+		}
+	}
+	w.Close()
+	req := httptest.NewRequest(http.MethodPost, "/jobs/pdf", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
+func TestCreatePDFJob_OCREngineAndForceOCR(t *testing.T) {
+	cs := &captureStore{}
+	h := NewJobsHandler(cs, 25*1024*1024)
+	app := fiber.New()
+	app.Post("/jobs/pdf", h.CreatePDFJob)
+
+	req := newMultipartPDFRequestWithEngine(t, []byte("%PDF-1.4"), "de", "en", "unlimited", true)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", resp.StatusCode)
+	}
+	if cs.job == nil {
+		t.Fatal("expected job to be enqueued")
+	}
+	if cs.job.OCREngine != "unlimited" {
+		t.Fatalf("expected unlimited engine, got %q", cs.job.OCREngine)
+	}
+	if !cs.job.ForceOCR {
+		t.Fatal("expected force_ocr=true")
+	}
+}
+
+func TestCreatePDFJob_InvalidOCREngine(t *testing.T) {
+	app, _ := newPDFJobsApp()
+	req := newMultipartPDFRequestWithEngine(t, []byte("%PDF-1.4"), "de", "en", "bogus", false)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
 func newMultipartRequestWithFileName(t *testing.T, fileData []byte, fileName, target, source string) *http.Request {
 	t.Helper()
 	var buf bytes.Buffer

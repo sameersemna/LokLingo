@@ -83,6 +83,8 @@ type Job struct {
 	ProcessingMethod string `json:"processing_method,omitempty"` // "pdf_text" or "ocr"
 	TotalPages       int    `json:"total_pages,omitempty"`       // total translatable pages discovered by the worker
 	ProcessedPages   int    `json:"processed_pages,omitempty"`   // pages translated so far
+	OCREngine        string `json:"ocr_engine,omitempty"`        // "paddle" (default), "unlimited", or "auto"
+	ForceOCR         bool   `json:"force_ocr,omitempty"`         // skip native PDF text extraction and OCR the file
 
 	// Image rendering options (translate_image jobs only).
 	JPEGQuality   int  `json:"jpeg_quality,omitempty"`   // output JPEG quality [1,100]; 0 → default (90)

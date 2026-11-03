@@ -783,8 +783,8 @@ func shouldEnableOCRCorrection(mode Mode) bool {
 	return mode == ModeLayout || mode == ModeOCROnly
 }
 
-func extractOCRPagesAndConfidence(client internalservices.OCRClient, filePath, lang string, mode Mode) ([]string, float64, error) {
-	options := internalservices.OCRRequestOptions{Mode: string(mode)}
+func extractOCRPagesAndConfidence(client internalservices.OCRClient, filePath, lang, engine string, mode Mode) ([]string, float64, error) {
+	options := internalservices.OCRRequestOptions{Mode: string(mode), Engine: engine}
 	enabled := shouldEnableOCRCorrection(mode)
 	options.CorrectionEnabled = &enabled
 
@@ -996,7 +996,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			}
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
-			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang, effectiveJobMode)
+			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang, job.OCREngine, effectiveJobMode)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
@@ -1042,7 +1042,13 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 
 		w.setJobStage(ctx, job, StageDetectingText, "Detecting text in document...", 0.05)
 		extractStart := time.Now()
-		pdfPages, err := w.pdfService.ExtractPages(job.FilePath)
+		var pdfPages []string
+		var err error
+		if job.ForceOCR {
+			err = fmt.Errorf("force_ocr requested")
+		} else {
+			pdfPages, err = w.pdfService.ExtractPages(job.FilePath)
+		}
 		extractMS = time.Since(extractStart).Milliseconds()
 		pages = normalizePages(pdfPages)
 		if err != nil || len(pages) == 0 {
@@ -1064,7 +1070,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 			ocrTriggered = true
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 			ocrStart := time.Now()
-			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang, effectiveJobMode)
+			ocrPages, ocrConfidence, ocrErr := extractOCRPagesAndConfidence(w.ocrClient, job.FilePath, job.Lang, job.OCREngine, effectiveJobMode)
 			ocrMS = time.Since(ocrStart).Milliseconds()
 			observability.EmitLifecycleEventFromContext(ctx, "ocr_completed", observability.LifecycleEvent{Provider: "ocr", DurationMS: ocrMS, QueueDepth: queueDepth})
 			if ocrErr != nil {
@@ -1157,7 +1163,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
 		observability.EmitLifecycleEventFromContext(ctx, "ocr_started", observability.LifecycleEvent{Provider: "ocr", QueueDepth: queueDepth})
 
 		ocrStart := time.Now()
-		ocrOptions := internalservices.OCRRequestOptions{Mode: string(effectiveJobMode)}
+		ocrOptions := internalservices.OCRRequestOptions{Mode: string(effectiveJobMode), Engine: job.OCREngine}
 		enabled := shouldEnableOCRCorrection(effectiveJobMode)
 		ocrOptions.CorrectionEnabled = &enabled
 		var blocks []internalservices.OCRTextBlock

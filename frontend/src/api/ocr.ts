@@ -13,6 +13,10 @@ export interface OCRImageResponse {
   blocks: TextBlock[]
   debug_image_path?: string | null
   exported_json_path?: string | null
+  engine?: string
+  engine_version?: string
+  fallback_from?: string
+  warnings?: string[]
 }
 
 export interface PageResult {
@@ -21,6 +25,8 @@ export interface PageResult {
   confidence: number
   blocks: TextBlock[]
   debug_image_path?: string | null
+  engine?: string
+  quality?: Record<string, unknown>
 }
 
 export interface OCRPdfResponse {
@@ -28,17 +34,27 @@ export interface OCRPdfResponse {
   confidence: number
   pages: PageResult[]
   exported_json_path?: string | null
+  engine?: string
+  engine_version?: string
+  fallback_from?: string
+  warnings?: string[]
 }
 
 export async function extractTextFromImage(
   file: File,
   lang = "auto",
+  engine?: string,
 ): Promise<OCRImageResponse> {
   const b64 = await fileToBase64(file)
   return apiFetch<OCRImageResponse>("/ocr/image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image_b64: b64, mime_type: file.type || "image/png", lang }),
+    body: JSON.stringify({
+      image_b64: b64,
+      mime_type: file.type || "image/png",
+      lang,
+      ...(engine ? { engine } : {}),
+    }),
     timeoutMs: 30_000,
   })
 }
@@ -47,13 +63,14 @@ export async function extractTextFromPdf(
   file: File,
   lang = "auto",
   dpi = 200,
+  engine?: string,
 ): Promise<OCRPdfResponse> {
   const b64 = await fileToBase64(file)
   return apiFetch<OCRPdfResponse>("/ocr/pdf", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pdf_b64: b64, lang, dpi }),
-    timeoutMs: 60_000,
+    body: JSON.stringify({ pdf_b64: b64, lang, dpi, ...(engine ? { engine } : {}) }),
+    timeoutMs: 300_000,
   })
 }
 

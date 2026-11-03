@@ -181,9 +181,10 @@ Important variables:
 * `BACKEND_HOST_PORT`: host port mapped to backend container port `8080`
 * `FRONTEND_HOST_PORT`: host port mapped to frontend container port `80`
 * `OCR_HOST_PORT`: host port mapped to OCR container port `8000`
-* `OCR_PROVIDER`: primary OCR engine for backend fallback chain (`paddle`, `tesseract`, `ollama`), defaults to `paddle`
+* `OCR_PROVIDER`: primary OCR engine for backend fallback chain (`paddle`, `tesseract`, `ollama`, `unlimited`), defaults to `paddle`
 * `OCR_PROVIDER_TIMEOUT_SECONDS`: timeout in seconds for each provider attempt before fallback, defaults to `120`
 * `OCR_MAX_FALLBACKS`: max number of provider failovers allowed per OCR request, defaults to `2`
+* `OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS`: timeout for the optional Unlimited OCR provider, defaults to `900`
 * `OCR_SHARED_STORAGE_DIR`: shared directory mounted into backend and OCR containers for zero-copy OCR requests, defaults to `/tmp/loklingo`
 * `OCR_OLLAMA_BASE_URL`: OCR service Ollama endpoint for correction (`http://loklingo-ollama:11434` in compose)
 * `OCR_CORRECTION_ENABLED`: enables LLM post-correction for low-confidence OCR segments (default `false`)
@@ -473,3 +474,19 @@ Governance changes that alter operational expectations should also update [guide
 * The backend fails fast on missing `LITELLM_BASE_URL`, `LITELLM_MODEL`, `OCR_SERVICE_URL`, or `REDIS_URL`
 * The development environment uses safe host-port defaults to avoid collisions with other local projects
 * Redis may log a host `vm.overcommit_memory` warning locally; that does not block startup
+
+### Optional: Unlimited OCR GPU sidecar
+
+Unlimited OCR is off by default and runs only when the `ocr-vlm` profile is enabled. It requires
+an NVIDIA GPU with container pass-through and enough unified/VRAM for a ~7 GB BF16 model.
+
+```bash
+docker compose --profile ocr-vlm up -d --build loklingo-ocr-vlm
+# Then enable routing:
+# OCR_UNLIMITED_ENABLED=true
+# OCR_PROVIDER=unlimited   (or pass ocr_engine=unlimited on a job)
+```
+
+Keep PaddleOCR as the fallback. See `docs/research/unlimited-ocr.md`,
+`docs/plans/unlimited-ocr-integration.md`, and the `ocr-vlm/README.md` for model/revision details.
+Rollback with `OCR_UNLIMITED_ENABLED=false` and `OCR_PROVIDER=paddle`.

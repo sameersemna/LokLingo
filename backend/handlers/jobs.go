@@ -251,6 +251,12 @@ func buildJobResponse(job *jobs.Job) fiber.Map {
 	if job.OCRConfidence > 0 {
 		resp["ocr_confidence"] = job.OCRConfidence
 	}
+	if job.OCREngine != "" {
+		resp["ocr_engine"] = job.OCREngine
+	}
+	if job.ForceOCR {
+		resp["force_ocr"] = true
+	}
 	if job.Status == jobs.StatusCompleted {
 		resp["translated_text"] = job.TranslatedText
 		if job.ProcessingMethod != "" {
@@ -295,6 +301,25 @@ func eventTypeForJob(job *jobs.Job) string {
 	}
 }
 
+func normalizeOCREngine(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", "paddle", "unlimited", "auto":
+		return value, nil
+	default:
+		return "", fmt.Errorf("ocr_engine must be one of: paddle, unlimited, auto")
+	}
+}
+
+func parseFormBool(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // CreatePDFJob handles POST /api/v1/jobs/pdf.
 // Accepts multipart/form-data with a PDF file upload, saves it under
 // jobs.PDFUploadDir, enqueues a translate_pdf job, and returns 202 Accepted
@@ -319,6 +344,11 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 	if err != nil {
 		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
+	ocrEngine, err := normalizeOCREngine(c.FormValue("ocr_engine"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
+	}
+	forceOCR := parseFormBool(c.FormValue("force_ocr"))
 
 	if err := os.MkdirAll(jobs.PDFUploadDir, 0o700); err != nil {
 		slog.Error("failed to create upload dir", "err", err)
@@ -361,6 +391,8 @@ func (h *JobsHandler) CreatePDFJob(c *fiber.Ctx) error {
 		Lang:          lang,
 		Source:        source,
 		Target:        target,
+		OCREngine:     ocrEngine,
+		ForceOCR:      forceOCR,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -426,6 +458,10 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 	if err != nil {
 		return errResponse(c, fiber.StatusBadRequest, err.Error())
 	}
+	ocrEngine, err := normalizeOCREngine(c.FormValue("ocr_engine"))
+	if err != nil {
+		return errResponse(c, fiber.StatusBadRequest, err.Error())
+	}
 
 	jpegQuality := 0
 	if qStr := c.FormValue("jpeg_quality"); qStr != "" {
@@ -478,6 +514,7 @@ func (h *JobsHandler) CreateImageJob(c *fiber.Ctx) error {
 		Lang:          lang,
 		Source:        source,
 		Target:        target,
+		OCREngine:     ocrEngine,
 		JPEGQuality:   jpegQuality,
 		BgAlpha:       bgAlpha,
 		TextPadding:   textPadding,

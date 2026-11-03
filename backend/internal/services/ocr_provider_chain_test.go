@@ -56,6 +56,24 @@ func TestProviderOrderSelection(t *testing.T) {
 	if got := providerOrder(OCRProviderOllama); got[0] != OCRProviderOllama {
 		t.Fatalf("expected ollama first, got %v", got)
 	}
+	if got := providerOrder(OCRProviderUnlimited); got[0] != OCRProviderUnlimited {
+		t.Fatalf("expected unlimited first, got %v", got)
+	}
+}
+
+func TestProvidersForRequestReordersExplicitEngine(t *testing.T) {
+	chain := &chainedOCRClient{providers: []OCRProvider{
+		&fakeOCRProvider{name: OCRProviderPaddle},
+		&fakeOCRProvider{name: OCRProviderUnlimited},
+		&fakeOCRProvider{name: OCRProviderTesseract},
+	}}
+	ordered := chain.providersForRequest(OCRProviderUnlimited)
+	if ordered[0].Name() != OCRProviderUnlimited {
+		t.Fatalf("expected unlimited first, got %s", ordered[0].Name())
+	}
+	if ordered[1].Name() != OCRProviderPaddle {
+		t.Fatalf("expected paddle next, got %s", ordered[1].Name())
+	}
 }
 
 func TestChainedOCRClient_FallbackOnProviderFailure(t *testing.T) {

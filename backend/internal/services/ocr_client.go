@@ -53,6 +53,7 @@ type OCRRequestOptions struct {
 	CorrectionModel    string
 	VisualDiffMode     bool
 	CorrectionTimeoutS int
+	Engine             string
 }
 
 // NormalizeOCRServiceURL removes a trailing /ocr path segment so callers can
@@ -89,10 +90,15 @@ func NewOCRClient(ocrBaseURL, sharedStorageDir string) OCRClient {
 
 // ocrPDFResponse mirrors the relevant subset of OCRPdfResponse.
 type ocrPDFResponse struct {
-	Text       string          `json:"text"`
-	Pages      []ocrPageResult `json:"pages"`
-	Confidence float64         `json:"confidence,omitempty"`
-	Correction *ocrCorrection  `json:"correction,omitempty"`
+	Text          string          `json:"text"`
+	Pages         []ocrPageResult `json:"pages"`
+	Confidence    float64         `json:"confidence,omitempty"`
+	Correction    *ocrCorrection  `json:"correction,omitempty"`
+	Engine        string          `json:"engine,omitempty"`
+	EngineVersion string          `json:"engine_version,omitempty"`
+	FallbackFrom  string          `json:"fallback_from,omitempty"`
+	Warnings      []string        `json:"warnings,omitempty"`
+	Quality       map[string]any  `json:"quality,omitempty"`
 }
 
 type ocrCorrection struct {
@@ -119,12 +125,19 @@ type ocrPageResult struct {
 	Text       string         `json:"text"`
 	Blocks     []OCRTextBlock `json:"blocks"`
 	Confidence float64        `json:"confidence,omitempty"`
+	Engine     string         `json:"engine,omitempty"`
+	Quality    map[string]any `json:"quality,omitempty"`
 }
 
 type ocrImageResponse struct {
-	Text       string         `json:"text"`
-	Blocks     []OCRTextBlock `json:"blocks"`
-	Correction *ocrCorrection `json:"correction,omitempty"`
+	Text          string         `json:"text"`
+	Blocks        []OCRTextBlock `json:"blocks"`
+	Correction    *ocrCorrection `json:"correction,omitempty"`
+	Engine        string         `json:"engine,omitempty"`
+	EngineVersion string         `json:"engine_version,omitempty"`
+	FallbackFrom  string         `json:"fallback_from,omitempty"`
+	Warnings      []string       `json:"warnings,omitempty"`
+	Quality       map[string]any `json:"quality,omitempty"`
 }
 
 const ocrPDFPath = "/api/v1/ocr/pdf"
@@ -306,6 +319,55 @@ func (c *ocrClient) ExtractPagesWithConfidenceAndOptions(filePath, lang string, 
 	return []string{resp.Text}, resp.Confidence, nil
 }
 
+// ExtractPDFResultWithOptions returns the normalized OCR result including engine metadata.
+func (c *ocrClient) ExtractPDFResultWithOptions(filePath, lang string, options OCRRequestOptions) (*OCRResult, error) {
+	resp, err := c.fetchOCRResponse(filePath, lang, options)
+	if err != nil {
+		return nil, err
+	}
+	pages := make([]string, 0, len(resp.Pages))
+	confidenceTotal := 0.0
+	confidenceCount := 0
+	for _, page := range resp.Pages {
+		pages = append(pages, page.Text)
+		if page.Confidence > 0 {
+			confidenceTotal += page.Confidence
+			confidenceCount++
+			continue
+		}
+		for _, block := range page.Blocks {
+			if block.Confidence > 0 {
+				confidenceTotal += block.Confidence
+				confidenceCount++
+			}
+		}
+	}
+	confidence := 0.0
+	if confidenceCount > 0 {
+		confidence = confidenceTotal / float64(confidenceCount)
+	} else if resp.Confidence > 0 {
+		confidence = resp.Confidence
+	}
+	text := resp.Text
+	if strings.TrimSpace(text) == "" {
+		text = strings.Join(pages, "\n\n")
+	}
+	engine := resp.Engine
+	if engine == "" {
+		engine = options.Engine
+	}
+	return &OCRResult{
+		Text:          text,
+		Pages:         pages,
+		Confidence:    confidence,
+		Engine:        engine,
+		EngineVersion: resp.EngineVersion,
+		FallbackFrom:  resp.FallbackFrom,
+		Warnings:      resp.Warnings,
+		Quality:       resp.Quality,
+	}, nil
+}
+
 func (c *ocrClient) ExtractImageBlocks(filePath, lang string) ([]OCRTextBlock, error) {
 	return c.ExtractImageBlocksWithOptions(filePath, lang, OCRRequestOptions{})
 }
@@ -326,6 +388,7 @@ func (c *ocrClient) ExtractImageBlocksWithOptions(filePath, lang string, options
 		"image_b64":        base64.StdEncoding.EncodeToString(raw),
 		"mime_type":        mimeType,
 		"lang":             lang,
+		"engine":           options.Engine,
 		"mode":             options.Mode,
 		"visual_diff_mode": options.VisualDiffMode,
 	})
@@ -499,6 +562,7 @@ func (c *ocrClient) extractOCRSharedPath(filePath, lang string, options OCRReque
 		"file_path":        filePath,
 		"lang":             lang,
 		"dpi":              200,
+		"engine":           options.Engine,
 		"mode":             options.Mode,
 		"visual_diff_mode": options.VisualDiffMode,
 	})
@@ -566,6 +630,12 @@ func (c *ocrClient) extractOCRMultipart(filePath, lang string, options OCRReques
 		if err := mw.WriteField("dpi", "200"); err != nil {
 			_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart dpi field: %w", err))
 			return
+		}
+		if strings.TrimSpace(options.Engine) != "" {
+			if err := mw.WriteField("engine", strings.TrimSpace(options.Engine)); err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("ocr: write multipart engine field: %w", err))
+				return
+			}
 		}
 		if strings.TrimSpace(options.Mode) != "" {
 			if err := mw.WriteField("mode", strings.TrimSpace(options.Mode)); err != nil {
@@ -660,6 +730,9 @@ func (c *ocrClient) extractOCRJSONStream(filePath, lang string, options OCRReque
 		}
 
 		tail := `","lang":` + strconv.Quote(lang) + `,"dpi":200`
+		if strings.TrimSpace(options.Engine) != "" {
+			tail += `,"engine":` + strconv.Quote(strings.TrimSpace(options.Engine))
+		}
 		if strings.TrimSpace(options.Mode) != "" {
 			tail += `,"mode":` + strconv.Quote(strings.TrimSpace(options.Mode))
 		}

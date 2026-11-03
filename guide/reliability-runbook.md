@@ -1853,3 +1853,40 @@ Tip: keep links to dashboard, logs, deploy SHA, and incident thread in every upd
 5. Closing incidents on first recovery signal
     * Require consecutive stable windows and closure checklist completion, not a single improved sample.
 
+
+### Unlimited OCR sidecar operations
+
+The Unlimited OCR provider is optional and runs as `loklingo-ocr-vlm` under the `ocr-vlm`
+compose profile. PaddleOCR remains the default and fallback.
+
+Start, inspect, and stop:
+
+```bash
+docker compose --profile ocr-vlm up -d loklingo-ocr-vlm
+docker compose logs -f loklingo-ocr-vlm
+docker compose --profile ocr-vlm exec loklingo-ocr-vlm \
+  python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10000/health')"
+docker compose --profile ocr-vlm stop loklingo-ocr-vlm
+```
+
+The sidecar has no host port in the compose network. Use `docker compose exec` or a
+temporary local port override for diagnostics.
+
+Model cache refresh:
+
+```bash
+docker compose --profile ocr-vlm down
+docker volume rm loklingo_uocr_models
+docker compose --profile ocr-vlm up -d --build loklingo-ocr-vlm
+```
+
+Immediate rollback:
+
+```bash
+OCR_UNLIMITED_ENABLED=false
+OCR_PROVIDER=paddle
+```
+
+Then restart `loklingo-backend` and `loklingo-ocr`; jobs continue through PaddleOCR.
+If the sidecar is restarting or OOMing, inspect GPU memory with `nvidia-smi`, verify the
+model revision, and reduce `OCR_UNLIMITED_MAX_PAGES_PER_REQUEST` before retrying.

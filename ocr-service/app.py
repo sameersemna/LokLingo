@@ -26,6 +26,19 @@ from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
+import unlimited_ocr
+
+OCR_UNLIMITED_ENABLED = unlimited_ocr.OCR_UNLIMITED_ENABLED
+OCR_UNLIMITED_BASE_URL = unlimited_ocr.OCR_UNLIMITED_BASE_URL
+OCR_UNLIMITED_MODEL = unlimited_ocr.OCR_UNLIMITED_MODEL
+OCR_UNLIMITED_BACKEND = unlimited_ocr.OCR_UNLIMITED_BACKEND
+OCR_UNLIMITED_LANGS = unlimited_ocr.OCR_UNLIMITED_LANGS
+OCR_UNLIMITED_FALLBACK_TO_PADDLE = unlimited_ocr.OCR_UNLIMITED_FALLBACK_TO_PADDLE
+OCR_UNLIMITED_DPI = unlimited_ocr.OCR_UNLIMITED_DPI
+OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE = unlimited_ocr.OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE
+OCR_UNLIMITED_MAX_PAGES_PER_REQUEST = unlimited_ocr.OCR_UNLIMITED_MAX_PAGES_PER_REQUEST
+OCR_UNLIMITED_PAGE_OVERLAP = unlimited_ocr.OCR_UNLIMITED_PAGE_OVERLAP
+# Request timeout stays app-local, mirroring the OCR service configuration.
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -118,6 +131,7 @@ OCR_SURYA_CONFIDENCE_THRESHOLD = _get_env_float("OCR_SURYA_CONFIDENCE_THRESHOLD"
 OCR_ENSEMBLE_ENABLED = os.getenv("OCR_ENSEMBLE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 OCR_ENSEMBLE_IOU_THRESHOLD = _get_env_float("OCR_ENSEMBLE_IOU_THRESHOLD", 0.3)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://loklingo-ollama:11434").strip() or "http://loklingo-ollama:11434"
+OCR_UNLIMITED_REQUEST_TIMEOUT = _get_env_int("OCR_UNLIMITED_REQUEST_TIMEOUT", 600)
 OCR_SHARED_STORAGE_DIR = os.path.realpath(os.getenv("OCR_SHARED_STORAGE_DIR", "")) if os.getenv("OCR_SHARED_STORAGE_DIR", "") else ""
 
 try:
@@ -297,6 +311,7 @@ class OCRImageRequest(BaseModel):
     mime_type: str = Field(default="image/png")
     lang: LangField = "auto"  # type: ignore[assignment]
     min_confidence: float = Field(default=OCR_MIN_CONFIDENCE, ge=0.0, le=1.0)
+    engine: str = Field(default="paddle", description="OCR engine: paddle|unlimited|auto")
     export_json_path: str | None = Field(default=None, description="Optional path for exporting the OCR JSON payload")
     debug_output_dir: str | None = Field(default=None, description="Optional directory for debug overlay images")
     mode: str = Field(default="overlay", description="Processing mode hint: overlay/layout/ocr_only")
@@ -314,6 +329,10 @@ class OCRImageResponse(BaseModel):
     raw_text: str | None = Field(default=None, description="Raw OCR text before AI correction")
     correction_diff: str | None = Field(default=None, description="Unified diff (raw -> corrected) for visual diff mode")
     correction: dict[str, Any] | None = Field(default=None, description="AI OCR correction metadata")
+    engine: str | None = Field(default=None, description="OCR engine used for this response")
+    engine_version: str | None = Field(default=None, description="Engine/model version used for this response")
+    fallback_from: str | None = Field(default=None, description="Engine that failed before the used fallback")
+    warnings: list[str] | None = Field(default=None, description="Non-fatal OCR warnings")
 
 
 class OCRPdfRequest(BaseModel):
@@ -321,6 +340,7 @@ class OCRPdfRequest(BaseModel):
     file_path: str | None = Field(default=None, description="Absolute path to a shared PDF file")
     lang: LangField = "auto"  # type: ignore[assignment]
     dpi: int = Field(default=200, ge=72, le=400, description="Rendering DPI for each page — clamped to MAX_PDF_DPI at runtime")
+    engine: str = Field(default="paddle", description="OCR engine: paddle|unlimited|auto")
     min_confidence: float = Field(default=OCR_MIN_CONFIDENCE, ge=0.0, le=1.0)
     export_json_path: str | None = Field(default=None, description="Optional path for exporting the OCR JSON payload")
     debug_output_dir: str | None = Field(default=None, description="Optional directory for debug overlay images")
@@ -339,6 +359,8 @@ class PageResult(BaseModel):
     raw_text: str | None = Field(default=None, description="Raw OCR text before AI correction")
     correction_diff: str | None = Field(default=None, description="Unified diff for this page")
     correction: dict[str, Any] | None = Field(default=None, description="AI OCR correction metadata for this page")
+    engine: str | None = Field(default=None, description="OCR engine used for this page")
+    quality: dict[str, Any] | None = Field(default=None, description="OCR quality metadata")
 
 
 class OCRPdfResponse(BaseModel):
@@ -349,6 +371,10 @@ class OCRPdfResponse(BaseModel):
     raw_text: str | None = Field(default=None, description="Raw OCR text before AI correction")
     correction_diff: str | None = Field(default=None, description="Unified diff (raw -> corrected) across all pages")
     correction: dict[str, Any] | None = Field(default=None, description="Aggregate AI OCR correction metadata")
+    engine: str | None = Field(default=None, description="OCR engine used for this response")
+    engine_version: str | None = Field(default=None, description="Engine/model version used for this response")
+    fallback_from: str | None = Field(default=None, description="Engine that failed before the used fallback")
+    warnings: list[str] | None = Field(default=None, description="Non-fatal OCR warnings")
 
 
 @dataclass
@@ -1739,9 +1765,33 @@ def _ocr_pdf_file(
     correction_model: str | None = None,
     visual_diff_mode: bool = False,
     max_pages: int | None = None,
+    engine: str = "paddle",
 ) -> OCRPdfResponse:
     if max_pages is None:
         max_pages = MAX_PDF_PAGES
+
+    try:
+        from unlimited_ocr import resolve_engine
+
+        resolved_engine = resolve_engine(engine, lang)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if resolved_engine == "unlimited":
+        return _ocr_pdf_with_unlimited(
+            file_path=file_path,
+            lang=lang,
+            dpi=dpi,
+            min_confidence=min_confidence,
+            debug_output_dir=debug_output_dir,
+            export_json_path=export_json_path,
+            mode=mode,
+            correction_enabled=correction_enabled,
+            correction_model=correction_model,
+            visual_diff_mode=visual_diff_mode,
+            max_pages=max_pages,
+        )
+
     try:
         info = pdfinfo_from_path(file_path)
         page_count = int(info["Pages"])
@@ -1922,6 +1972,11 @@ def health() -> dict:
         "ocr_ensemble_enabled": OCR_ENSEMBLE_ENABLED,
         "ollama_base_url": OLLAMA_BASE_URL,
         "ollama_local_only": _is_local_ollama_url(OLLAMA_BASE_URL),
+        "ocr_unlimited_enabled": OCR_UNLIMITED_ENABLED,
+        "ocr_unlimited_model": OCR_UNLIMITED_MODEL,
+        "ocr_unlimited_backend": OCR_UNLIMITED_BACKEND,
+        "ocr_unlimited_base_url": OCR_UNLIMITED_BASE_URL,
+        "ocr_unlimited_ready": unlimited_ocr.check_sidecar_health(),
         "ocr_correction_metrics": {
             "calls_total": _correction_state.calls_total,
             "applied_total": _correction_state.applied_total,
@@ -1948,29 +2003,90 @@ def ocr_image(req: OCRImageRequest) -> OCRImageResponse:
         raise HTTPException(status_code=422, detail="Cannot decode image — unsupported format")
 
     try:
-        blocks = _ocr_pil_image(
-            image,
-            req.lang,
-            source_dpi=_extract_image_dpi(image),
-            min_confidence=req.min_confidence,
-        )
-        corrected_blocks, correction_stats, raw_text = _apply_llm_correction(
-            image=image,
-            blocks=blocks,
-            lang=req.lang,
-            mode=req.mode,
-            enabled_override=req.ocr_correction_enabled,
-            model_override=req.ocr_correction_model,
-        )
-        blocks = corrected_blocks
-    except Exception as exc:
-        logger.exception("OCR engine error on image: %s", exc)
-        raise HTTPException(status_code=500, detail="OCR processing failed")
-    finally:
+        resolved_engine = unlimited_ocr.resolve_engine(req.engine, req.lang)
+    except ValueError as exc:
+        image.close()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if resolved_engine == "unlimited" and not unlimited_ocr.OCR_UNLIMITED_ENABLED:
+        image.close()
+        raise HTTPException(status_code=503, detail="Unlimited OCR is disabled")
+    if resolved_engine == "unlimited":
         try:
-            image.close()
-        except Exception:
-            pass
+            unlimited_blocks, _text, _quality = unlimited_ocr.request_unlimited_image(image)
+            if not unlimited_blocks and unlimited_ocr.OCR_UNLIMITED_FALLBACK_TO_PADDLE:
+                logger.warning("Unlimited image OCR returned no blocks; falling back to PaddleOCR")
+                blocks = _ocr_pil_image(
+                    image,
+                    req.lang,
+                    source_dpi=_extract_image_dpi(image),
+                    min_confidence=req.min_confidence,
+                )
+                resolved_engine = "paddle"
+            elif not unlimited_blocks:
+                raise RuntimeError("Unlimited OCR returned no blocks")
+            else:
+                blocks = []
+                # Coerce adapter dicts into the service's existing Pydantic model.
+                for block in unlimited_blocks:
+                    blocks.append(
+                        TextBlock(
+                            text=block.get("text", ""),
+                            confidence=float(block.get("confidence", 0.0)),
+                            reading_order=int(block.get("reading_order", 0)),
+                            bbox=list(block.get("bbox", [0.0, 0.0, float(image.width), float(image.height)])),
+                            region_class=str(block.get("region_class", "body")),
+                            hierarchy_level=int(block.get("hierarchy_level", 0)),
+                            column_id=int(block.get("column_id", 0)),
+                        )
+                    )
+                resolved_engine = "unlimited"
+        except Exception as exc:
+            if unlimited_ocr.OCR_UNLIMITED_FALLBACK_TO_PADDLE:
+                logger.warning("Unlimited image OCR failed; falling back to PaddleOCR: %s", exc)
+                blocks = _ocr_pil_image(
+                    image,
+                    req.lang,
+                    source_dpi=_extract_image_dpi(image),
+                    min_confidence=req.min_confidence,
+                )
+                resolved_engine = "paddle"
+            else:
+                image.close()
+                raise HTTPException(status_code=502, detail=str(exc))
+    else:
+        try:
+            blocks = _ocr_pil_image(
+                image,
+                req.lang,
+                source_dpi=_extract_image_dpi(image),
+                min_confidence=req.min_confidence,
+            )
+            corrected_blocks, correction_stats, raw_text = _apply_llm_correction(
+                image=image,
+                blocks=blocks,
+                lang=req.lang,
+                mode=req.mode,
+                enabled_override=req.ocr_correction_enabled,
+                model_override=req.ocr_correction_model,
+            )
+            blocks = corrected_blocks
+        except Exception as exc:
+            logger.exception("OCR engine error on image: %s", exc)
+            try:
+                image.close()
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail="OCR processing failed")
+        finally:
+            try:
+                image.close()
+            except Exception:
+                pass
+    try:
+        image.close()
+    except Exception:
+        pass
 
     text, confidence = _summarise(blocks)
     debug_image_path = None
@@ -1987,7 +2103,11 @@ def ocr_image(req: OCRImageRequest) -> OCRImageResponse:
             debug_image_path = None
 
     response = OCRImageResponse(text=text, confidence=confidence, blocks=blocks, debug_image_path=debug_image_path)
-    if req.visual_diff_mode:
+    if resolved_engine in {"paddle", "unlimited"}:
+        response.engine = resolved_engine
+        if resolved_engine == "unlimited":
+            response.engine_version = OCR_UNLIMITED_MODEL
+    if req.visual_diff_mode and raw_text is not None:
         response.raw_text = raw_text
         response.correction_diff = _unified_diff(raw_text, text)
     response.correction = _dict_from_stats(correction_stats)
@@ -2024,6 +2144,7 @@ async def ocr_pdf(request: Request) -> OCRPdfResponse:
                 correction_enabled=payload.ocr_correction_enabled,
                 correction_model=payload.ocr_correction_model,
                 visual_diff_mode=payload.visual_diff_mode,
+                engine=payload.engine,
             )
 
         if payload.pdf_b64:
@@ -2097,6 +2218,7 @@ async def ocr_pdf(request: Request) -> OCRPdfResponse:
             correction_enabled=correction_enabled,
             correction_model=correction_model,
             visual_diff_mode=visual_diff_mode,
+            engine=str(form.get("engine") or "paddle"),
         )
     finally:
         await upload.close()
@@ -2106,3 +2228,237 @@ async def ocr_pdf(request: Request) -> OCRPdfResponse:
             except OSError:
                 logger.warning("Failed to remove temp PDF: %s", file_path)
 
+
+
+def _request_unlimited_window(
+    page_images: list[Image.Image],
+    page_numbers: list[int],
+) -> list[tuple[int, str]]:
+    """Request a page window, splitting on page-count mismatch.
+
+    The v1 model can merge or omit pages in sparse/similar multi-page windows. Retrying
+    with halves preserves content and eventually degrades to one page per request instead
+    of failing the entire PDF.
+    """
+    if not page_images:
+        return []
+    max_tokens = OCR_UNLIMITED_MAX_OUTPUT_TOKENS_PER_PAGE * len(page_images)
+    pages = unlimited_ocr.request_unlimited_pdf(
+        page_images,
+        page_numbers,
+        max_tokens=max_tokens,
+        strict=False,
+    )
+    if len(pages) == len(page_images):
+        return pages
+    if len(page_images) == 1:
+        if pages:
+            return pages[:1]
+        return [(page_numbers[0], "")]
+    midpoint = len(page_images) // 2
+    logger.warning(
+        "unlimited_page_window_split inputs=%d outputs=%d left=%d right=%d",
+        len(page_images),
+        len(pages),
+        midpoint,
+        len(page_images) - midpoint,
+    )
+    return _request_unlimited_window(page_images[:midpoint], page_numbers[:midpoint]) +         _request_unlimited_window(page_images[midpoint:], page_numbers[midpoint:])
+
+
+def _ocr_pdf_with_unlimited(
+    file_path: str,
+    lang: str,
+    dpi: int,
+    min_confidence: float | None = None,
+    debug_output_dir: str | None = None,
+    export_json_path: str | None = None,
+    mode: str = "overlay",
+    correction_enabled: bool | None = None,
+    correction_model: str | None = None,
+    visual_diff_mode: bool = False,
+    max_pages: int | None = None,
+) -> OCRPdfResponse:
+    if max_pages is None:
+        max_pages = MAX_PDF_PAGES
+    try:
+        info = pdfinfo_from_path(file_path)
+        page_count = int(info["Pages"])
+    except Exception as exc:
+        logger.exception("PDF metadata read error: %s", exc)
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot convert PDF to images — ensure it is a valid PDF file",
+        )
+
+    if page_count > max_pages:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF exceeds max page count of {max_pages}",
+        )
+
+    dpi = min(max(dpi, 72), MAX_PDF_DPI)
+    window_size = min(max(OCR_UNLIMITED_MAX_PAGES_PER_REQUEST, 1), 100)
+    overlap = max(min(OCR_UNLIMITED_PAGE_OVERLAP, window_size - 1), 0)
+
+    # Build page windows with absolute page indices. Overlap windows help preserve
+    # cross-page context, but duplicate outputs are discarded during merge.
+    windows = unlimited_ocr.plan_page_windows(page_count, window_size, overlap)
+
+    page_results: list[PageResult | None] = [None for _ in range(page_count)]
+    page_warnings: list[str] = []
+    full_text_buffer = io.StringIO()
+    raw_text_buffer = io.StringIO()
+    confidence_count = 0
+    truncated_pages = 0
+
+    for window_start, window_end in windows:
+        paths: list[str] = []
+        page_numbers = list(range(window_start + 1, window_end + 1))
+        try:
+            with tempfile.TemporaryDirectory(prefix="loklingo-uocr-render-") as render_dir:
+                converted = convert_from_path(
+                    file_path,
+                    dpi=dpi,
+                    first_page=window_start + 1,
+                    last_page=window_end,
+                    output_folder=render_dir,
+                    paths_only=True,
+                    thread_count=1,
+                )
+                if not converted:
+                    raise ValueError("no image returned for Unlimited OCR page window")
+                paths = list(converted)
+                images: list[Image.Image] = []
+                for path in paths:
+                    with Image.open(path) as image:
+                        image.load()
+                        images.append(image.copy())
+                if len(images) != len(page_numbers):
+                    raise RuntimeError(
+                        f"rendered {len(images)} images for {len(page_numbers)} pages"
+                    )
+
+                window_pages = _request_unlimited_window(images, page_numbers)
+
+                for image, absolute_page, raw_page_text in zip(images, page_numbers, [p[1] for p in window_pages]):
+                    if page_results[absolute_page - 1] is not None:
+                        # Overlap output has already been merged for this page.
+                        continue
+                    blocks, plain_text, parse_warnings, quality = unlimited_ocr.parse_unlimited_markdown(
+                        raw_page_text,
+                        image.width,
+                        image.height,
+                        engine_version=OCR_UNLIMITED_MODEL,
+                    )
+                    raw_page_text_stripped = raw_page_text.strip()
+                    page_warnings.extend(
+                        f"page {absolute_page}: {warning}" for warning in parse_warnings
+                    )
+                    if quality.get("repetition_ratio", 0.0) > 0.05:
+                        page_warnings.append(f"page {absolute_page}: possible repeated output detected")
+                    if quality.get("markup_leak"):
+                        page_warnings.append(f"page {absolute_page}: unparsed grounding markers")
+
+                    text_blocks = []
+                    for block in blocks:
+                        text_blocks.append(
+                            TextBlock(
+                                text=block.get("text", ""),
+                                confidence=float(block.get("confidence", 0.0)),
+                                reading_order=int(block.get("reading_order", 0)),
+                                bbox=list(block.get("bbox", [])),
+                                region_class=str(block.get("region_class", "body")),
+                                hierarchy_level=int(block.get("hierarchy_level", 0)),
+                                column_id=int(block.get("column_id", 0)),
+                            )
+                        )
+
+                    page_result = PageResult(
+                        page_number=absolute_page,
+                        text=plain_text,
+                        confidence=0.0,
+                        blocks=text_blocks,
+                        raw_text=raw_page_text_stripped if visual_diff_mode else None,
+                        correction=None,
+                        engine="unlimited",
+                        quality=quality,
+                    )
+                    page_results[absolute_page - 1] = page_result
+
+                    if plain_text:
+                        if full_text_buffer.tell():
+                            full_text_buffer.write("\n")
+                        full_text_buffer.write(plain_text)
+                    if visual_diff_mode and raw_page_text_stripped:
+                        if raw_text_buffer.tell():
+                            raw_text_buffer.write("\n")
+                        raw_text_buffer.write(raw_page_text_stripped)
+        except Exception as exc:
+            logger.exception("Unlimited PDF OCR failed on pages %d-%d: %s", window_start + 1, window_end, exc)
+            if OCR_UNLIMITED_FALLBACK_TO_PADDLE:
+                logger.warning("Falling back to PaddleOCR for PDF %s", file_path)
+                result = _ocr_pdf_file(
+                    file_path,
+                    lang,
+                    dpi,
+                    min_confidence=min_confidence,
+                    debug_output_dir=debug_output_dir,
+                    export_json_path=export_json_path,
+                    mode=mode,
+                    correction_enabled=correction_enabled,
+                    correction_model=correction_model,
+                    visual_diff_mode=visual_diff_mode,
+                    max_pages=max_pages,
+                    engine="paddle",
+                )
+                result.engine = "paddle"
+                result.fallback_from = "unlimited"
+                if result.warnings:
+                    result.warnings = ["fell back from unlimited OCR to PaddleOCR"] + result.warnings
+                else:
+                    result.warnings = ["fell back from unlimited OCR to PaddleOCR"]
+                return result
+            raise HTTPException(status_code=502, detail=f"Unlimited PDF OCR failed: {exc}")
+
+    if any(result is None for result in page_results):
+        failed_pages = [index + 1 for index, result in enumerate(page_results) if result is None]
+        if OCR_UNLIMITED_FALLBACK_TO_PADDLE:
+            result = _ocr_pdf_file(
+                file_path,
+                lang,
+                dpi,
+                min_confidence=min_confidence,
+                debug_output_dir=debug_output_dir,
+                export_json_path=export_json_path,
+                mode=mode,
+                correction_enabled=correction_enabled,
+                correction_model=correction_model,
+                visual_diff_mode=visual_diff_mode,
+                max_pages=max_pages,
+                engine="paddle",
+            )
+            result.engine = "paddle"
+            result.fallback_from = "unlimited"
+            result.warnings = (result.warnings or []) + [
+                f"Unlimited OCR did not return pages: {failed_pages}"
+            ]
+            return result
+        raise HTTPException(status_code=502, detail=f"Unlimited OCR did not return pages: {failed_pages}")
+
+    pages = [result for result in page_results if result is not None]
+    full_text = full_text_buffer.getvalue()
+    full_raw = raw_text_buffer.getvalue() if visual_diff_mode else None
+    response = OCRPdfResponse(
+        text=full_text,
+        confidence=0.0,
+        pages=pages,
+        exported_json_path=None,
+        raw_text=full_raw,
+        correction=None,
+        engine="unlimited",
+        engine_version=OCR_UNLIMITED_MODEL,
+        warnings=page_warnings or None,
+    )
+    response.exported_json_path = _write_json_export(response, export_json_path)
+    return response

@@ -22,6 +22,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY unlimited_ocr.py .
 COPY test_app.py .
 
 RUN chown -R ocr:ocr /app

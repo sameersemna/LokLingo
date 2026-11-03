@@ -18,9 +18,12 @@ LokLingo is a multilingual document translation and optical character recognitio
 LokLingo uses a pluggable OCR provider chain in the backend worker while keeping the same public HTTP APIs.
 
 - Primary provider is selected by `OCR_PROVIDER`.
-- Supported values: `paddle`, `tesseract`, `ollama`.
+- Supported values: `paddle`, `tesseract`, `ollama`, `unlimited`.
 - Per-provider attempt timeout is controlled by `OCR_PROVIDER_TIMEOUT_SECONDS`.
+- `OCR_UNLIMITED_PROVIDER_TIMEOUT_SECONDS` overrides the timeout for the Unlimited OCR provider.
 - Fallback budget per OCR request is controlled by `OCR_MAX_FALLBACKS`.
+- Unlimited OCR is optional and disabled by default (`OCR_UNLIMITED_ENABLED=false`). Enable the
+  `ocr-vlm` compose profile and set `OCR_PROVIDER=unlimited` or pass `ocr_engine=unlimited` on a job.
 - If the primary provider fails or returns invalid OCR output, the backend automatically falls back to the next provider.
 - Frontend and API routes remain unchanged.
 
@@ -30,10 +33,12 @@ flowchart LR
   B --> C[PaddleOCRProvider]
   B --> D[TesseractProvider]
   B --> E[OllamaVisionProvider stub]
+  B --> U[UnlimitedOCRProvider]
 
   C --> F{Success?}
   D --> F
   E --> F
+  U --> F
 
   F -- yes --> G[ocr_completed]
   F -- no --> H[ocr_provider_failed]
@@ -357,6 +362,7 @@ POST /api/v1/jobs/image
 - Field: `image` (binary file, required)
 - Field: `source` (string, optional): Source language
 - Field: `target` (string, required): Target language
+- Field: `ocr_engine` (string, optional): `paddle`, `unlimited`, or `auto`
 
 **Response (202 Accepted):**
 ```json
@@ -383,6 +389,8 @@ POST /api/v1/jobs/pdf
 - Field: `pdf` (binary file, required): PDF document
 - Field: `source` (string, optional): Source language
 - Field: `target` (string, required): Target language
+- Field: `ocr_engine` (string, optional): `paddle`, `unlimited`, or `auto`
+- Field: `force_ocr` (boolean, optional): skip embedded-text extraction and OCR the PDF
 
 **Example:**
 ```bash

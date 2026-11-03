@@ -1,0 +1,6 @@
+pytest
+fastapi
+pydantic
+pillow
+python-multipart
+httpx

@@ -95,7 +95,10 @@ func main() {
 		cfg.OCRSharedStorageDir,
 		cfg.OCRProvider,
 		internalservices.OCRClientChainOptions{
-			ProviderTimeout:  time.Duration(cfg.OCRProviderTimeoutSeconds) * time.Second,
+			ProviderTimeout: time.Duration(cfg.OCRProviderTimeoutSeconds) * time.Second,
+			ProviderTimeouts: map[string]time.Duration{
+				internalservices.OCRProviderUnlimited: time.Duration(cfg.OCRUnlimitedProviderTimeoutSeconds) * time.Second,
+			},
 			MaxFallbackCount: cfg.OCRMaxFallbacks,
 		},
 	)

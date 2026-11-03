@@ -67,6 +67,21 @@ jobs:
           go-version: '1.26.2'
       - run: go test ./...
 
+  ocr-tests:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ocr-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-test.txt
+      - run: python -m pytest test_app.py test_unlimited_ocr.py test_eval_unlimited.py -v
+      - run: python -m pytest ../ocr-vlm/test_server.py -v
+
   frontend-build:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
@@ -177,7 +192,7 @@ jobs:
   e2e-playwright:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend-build, security-gates]
+    needs: [backend-tests, frontend-build, security-gates, ocr-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Start compose stack

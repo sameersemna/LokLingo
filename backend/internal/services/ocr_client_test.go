@@ -630,3 +630,73 @@ func TestOCRClient_InvalidImageBlockSchemaRejected(t *testing.T) {
 		t.Fatalf("expected invalid block schema error, got %v", err)
 	}
 }
+
+func TestOCRClient_EngineAndMetadataPropagation(t *testing.T) {
+	const expectedText = "hello from unlimited"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("parse content-type: %v", err)
+		}
+		if mediaType != "multipart/form-data" {
+			t.Fatalf("expected multipart, got %s", mediaType)
+		}
+		mr := multipart.NewReader(r.Body, params["boundary"])
+		foundEngine := false
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read multipart: %v", err)
+			}
+			raw, _ := io.ReadAll(part)
+			if part.FormName() == "engine" {
+				if string(raw) != "unlimited" {
+					t.Fatalf("expected engine=unlimited, got %q", string(raw))
+				}
+				foundEngine = true
+			}
+		}
+		if !foundEngine {
+			t.Fatal("expected engine multipart field")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"text":           expectedText,
+			"confidence":     0.0,
+			"engine":         "unlimited",
+			"engine_version": "baidu/Unlimited-OCR@test",
+			"pages": []map[string]interface{}{
+				{"page_number": 1, "text": expectedText, "blocks": []interface{}{}},
+			},
+			"warnings": []string{"quality unknown"},
+			"quality":  map[string]interface{}{"page_count_match": true},
+		})
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "input.pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.4"), 0o600); err != nil {
+		t.Fatalf("write temp pdf: %v", err)
+	}
+	client := NewOCRClient(srv.URL, "").(*ocrClient)
+	result, err := client.ExtractPDFResultWithOptions(path, "en", OCRRequestOptions{Engine: "unlimited"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Engine != "unlimited" {
+		t.Fatalf("expected unlimited engine, got %q", result.Engine)
+	}
+	if result.EngineVersion != "baidu/Unlimited-OCR@test" {
+		t.Fatalf("unexpected engine version: %q", result.EngineVersion)
+	}
+	if len(result.Warnings) != 1 || result.Warnings[0] != "quality unknown" {
+		t.Fatalf("unexpected warnings: %#v", result.Warnings)
+	}
+	if result.Text != expectedText {
+		t.Fatalf("expected %q, got %q", expectedText, result.Text)
+	}
+}

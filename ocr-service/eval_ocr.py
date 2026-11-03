@@ -28,8 +28,6 @@ from pathlib import Path
 
 from PIL import Image
 
-from app import _ocr_pil_image, _summarise
-
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
 
@@ -70,6 +68,8 @@ def wer(reference: str, hypothesis: str) -> float:
 
 
 def main() -> int:
+    from app import _ocr_pil_image, _summarise
+
     parser = argparse.ArgumentParser(description="Evaluate OCR accuracy (CER/WER) against reference transcriptions.")
     parser.add_argument("dataset", type=Path, help="Directory with <id>.<img> + <id>.txt pairs")
     parser.add_argument("--lang", default="auto", help="Language hint passed to the OCR pipeline (default: auto)")

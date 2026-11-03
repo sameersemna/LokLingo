@@ -63,3 +63,6 @@ e2e/playwright-report/
 e2e/test-results/
 e2e/tests/*-snapshots/
 ocr-service/__pycache__/
+ocr-service/eval-data/
+ocr-vlm/__pycache__/
+ocr-vlm/models/

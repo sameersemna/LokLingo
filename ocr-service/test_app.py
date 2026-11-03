@@ -469,6 +469,87 @@ class TestOcrPdfFile(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: Unlimited OCR PDF page-window merge
+# ---------------------------------------------------------------------------
+
+class TestUnlimitedPDFMerge(unittest.TestCase):
+    def test_overlap_windows_do_not_duplicate_pages(self):
+        images = [_fake_pil_image() for _ in range(12)]
+
+        def fake_convert(*args, **kwargs):
+            paths = []
+            for page in range(kwargs["first_page"], kwargs["last_page"] + 1):
+                path = os.path.join(kwargs["output_folder"], f"page-{page}.png")
+                images[page - 1].save(path)
+                paths.append(path)
+            return paths
+
+        def fake_request(page_images, page_numbers, **kwargs):
+            return [
+                (page, f"<|det|>text [0,0,999,999]<|/det|>Page {page}")
+                for page in page_numbers
+            ]
+
+        with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "12"}), \
+             mock.patch.object(ocr_app, "convert_from_path", side_effect=fake_convert), \
+             mock.patch.object(ocr_app, "OCR_UNLIMITED_MAX_PAGES_PER_REQUEST", 5), \
+             mock.patch.object(ocr_app, "OCR_UNLIMITED_PAGE_OVERLAP", 1), \
+             mock.patch.object(ocr_app.unlimited_ocr, "request_unlimited_pdf", side_effect=fake_request):
+            result = ocr_app._ocr_pdf_with_unlimited("/tmp/fake.pdf", "auto", 200)
+
+        self.assertEqual(len(result.pages), 12)
+        self.assertEqual([page.page_number for page in result.pages], list(range(1, 13)))
+        self.assertEqual(len({page.page_number for page in result.pages}), 12)
+        self.assertEqual(result.pages[4].text, "Page 5")
+
+    def test_adaptive_window_splits_on_page_count_mismatch(self):
+        images = [_fake_pil_image() for _ in range(10)]
+        page_numbers = list(range(1, 11))
+
+        def fake_request(page_images, numbers, **kwargs):
+            if len(page_images) > 2:
+                return [(numbers[0], "merged")]
+            return [(number, f"Page {number}") for number in numbers]
+
+        with mock.patch.object(ocr_app.unlimited_ocr, "request_unlimited_pdf", side_effect=fake_request):
+            pages = ocr_app._request_unlimited_window(images, page_numbers)
+
+        self.assertEqual([page for page, _ in pages], page_numbers)
+        self.assertEqual(pages[0][1], "Page 1")
+        self.assertEqual(pages[-1][1], "Page 10")
+
+    def test_two_page_window_merges_pages(self):
+        images = [_fake_pil_image(), _fake_pil_image()]
+
+        def fake_convert(*args, **kwargs):
+            paths = []
+            for offset, page in enumerate(range(kwargs["first_page"], kwargs["last_page"] + 1)):
+                path = os.path.join(kwargs["output_folder"], f"page-{page}.png")
+                images[page - 1].save(path)
+                paths.append(path)
+            return paths
+
+        def fake_request(page_images, page_numbers, **kwargs):
+            return [
+                (page_numbers[0], "<|det|>text [0,0,999,999]<|/det|>Hello"),
+                (page_numbers[1], "<|det|>text [0,0,999,999]<|/det|>World"),
+            ]
+
+        with mock.patch.object(ocr_app, "pdfinfo_from_path", return_value={"Pages": "2"}), \
+             mock.patch.object(ocr_app, "convert_from_path", side_effect=fake_convert), \
+             mock.patch.object(ocr_app.unlimited_ocr, "request_unlimited_pdf", side_effect=fake_request):
+            result = ocr_app._ocr_pdf_with_unlimited("/tmp/fake.pdf", "auto", 200)
+
+        self.assertEqual(result.engine, "unlimited")
+        self.assertEqual(len(result.pages), 2)
+        self.assertEqual(result.pages[0].text, "Hello")
+        self.assertEqual(result.pages[1].text, "World")
+        self.assertIn("Hello", result.text)
+        self.assertIn("World", result.text)
+        self.assertEqual(result.pages[0].engine, "unlimited")
+
+
+# ---------------------------------------------------------------------------
 # Tests: _write_upload_to_temp_pdf — temp file management
 # ---------------------------------------------------------------------------
 

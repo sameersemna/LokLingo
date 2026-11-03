@@ -29,6 +29,8 @@ export interface JobResponse {
   total_pages?: number
   processed_pages?: number
   processing_method?: "pdf_text" | "ocr"
+  ocr_engine?: string
+  force_ocr?: boolean
   warnings?: string[]
   ocr_confidence?: number
 }
@@ -149,17 +151,25 @@ export interface UploadPDFResponse {
   job_id: string
 }
 
+export interface OCREngineOptions {
+  ocrEngine?: string
+  forceOCR?: boolean
+}
+
 export async function uploadPDF(
   file: File,
   source: string,
   target: string,
   mode = "overlay",
+  options: OCREngineOptions = {},
 ): Promise<UploadPDFResponse> {
   const form = new FormData()
   form.append("file", file)
   form.append("source", source || "auto")
   form.append("target", target)
   form.append("mode", mode)
+  if (options.ocrEngine) form.append("ocr_engine", options.ocrEngine)
+  if (options.forceOCR) form.append("force_ocr", "true")
 
   return apiFetch<UploadPDFResponse>("/api/v1/jobs/pdf", {
     method: "POST",
@@ -172,8 +182,9 @@ export async function translatePDF(
   source: string,
   target: string,
   mode = "overlay",
+  options: OCREngineOptions = {},
 ): Promise<TranslateResponse> {
-  const { job_id } = await uploadPDF(file, source, target, mode)
+  const { job_id } = await uploadPDF(file, source, target, mode, options)
   return pollJob(job_id, source, target, "PDF translation job failed")
 }
 
@@ -184,12 +195,14 @@ export async function translateImage(
   mode = "overlay",
   onProgress?: (job: JobProgressUpdate) => void,
   signal?: AbortSignal,
+  options: OCREngineOptions = {},
 ): Promise<TranslateResponse> {
   const form = new FormData()
   form.append("file", file)
   form.append("source", source || "auto")
   form.append("target", target)
   form.append("mode", mode)
+  if (options.ocrEngine) form.append("ocr_engine", options.ocrEngine)
 
   const enqueue = await apiFetch<{ job_id: string }>("/api/v1/jobs/image", {
     method: "POST",
